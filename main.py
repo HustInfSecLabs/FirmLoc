@@ -19,7 +19,7 @@ class VulnAgent:
         self.planner_agent = PlannerAgent(self.planner_model)
         self.selector = Selector(self.user_model)
 
-
+        self.chat_id = None
         self.user_input = ""
         self.tasks = ""
         self.results = ""
