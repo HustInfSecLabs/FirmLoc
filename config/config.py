@@ -1,0 +1,24 @@
+import os
+import configparser
+
+
+class Config:
+
+    def __init__(self, config_path: str = None) -> None:
+        if config_path:
+            self.config_path = config_path
+        else:
+            self.config_path = os.path.join(os.path.dirname(__file__), "config.ini")
+
+        self.read_config()
+
+    def read_config(self):
+
+        if self.config_path is None:
+            raise AssertionError("config path is None, please give config path first")
+
+        self.config = configparser.ConfigParser()
+        self.config.read(self.config_path)
+
+
+config_manager = Config()
