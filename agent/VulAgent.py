@@ -1,6 +1,6 @@
 from model import ChatModel, QwenChatModel
 from agent import UserAgent, PlannerAgent, Selector
-from state import ProgressEnum
+from state import ProgressEnum, TaskStatusEnum
 
 from log import logger
 
@@ -21,20 +21,21 @@ class VulnAgent:
         self.user_input = ""
         self.tasks = ""
         self.results = ""
-        self.state = ProgressEnum.NOT_STARTED
+        self.progress = ProgressEnum.NOT_STARTED
+        self.status = TaskStatusEnum.NOT_STARTED
 
     def run(self, user_input: str):
         while True:
-            self.state = ProgressEnum.USER_AGENT
+            self.progress = ProgressEnum.USER_AGENT
             self.user_input = user_input
             self.tasks = self.user_agent.process(self.user_input)
             logger.info(f"Tasks: {self.tasks}")
 
-            self.state = ProgressEnum.PLANNER_AGENT
+            self.progress = ProgressEnum.PLANNER_AGENT
             self.tasks = self.planner_agent.process(self.tasks, self.results)
             logger.info(f"Results: {self.results}")
             
-            self.state = self.selector.process(self.tasks)
+            self.progress = self.selector.process(self.tasks)
             
             pass
 

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, status, Request
+from fastapi import FastAPI, UploadFile, File, Form, status, Request, Query, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import os
@@ -8,6 +8,8 @@ from pathlib import Path
 from agent import VulnAgent
 from config import config_manager
 from log import logger
+
+VulnAgent = VulnAgent()
 
 app = FastAPI()
 
@@ -90,3 +92,39 @@ async def upload_file(
         },
     }
 
+@app.get("/v1/system_status")
+async def get_system_status(
+    chat_id: int = Query(..., description="关联的聊天会话ID", gt=0)
+):
+    """
+    获取智能体系统状态
+    
+    参数:
+    - chat_id: 关联的聊天会话ID
+    
+    返回:
+    - 系统状态信息
+    """
+    # 检查chat_id是否存在
+    if chat_id != VulnAgent.chat_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": 400,
+                "msg": "chat_id不存在",
+                "data": None
+            }
+        )
+    
+    # 获取系统状态信息
+    # session_info = system_sessions[chat_id]
+    
+    return {
+        "code": 0,
+        "msg": "查询成功",
+        "data": {
+            "status": VulnAgent.status,
+            "agent": VulnAgent.progress,
+            "tool": None
+        }
+    }

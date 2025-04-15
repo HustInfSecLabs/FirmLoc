@@ -1,1 +1,1 @@
-from .state import ProgressEnum
+from .state import ProgressEnum, TaskStatusEnum
