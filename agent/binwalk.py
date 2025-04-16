@@ -1,6 +1,7 @@
 import os
 import subprocess
 import json
+import configparser
 from pathlib import Path
 from .base import Agent
 from model import ChatModel
@@ -30,13 +31,18 @@ class BinwalkAgent(Agent):
                 'message': f'固件文件不存在: {firmware_path}'
             })
         
+        firmware_name = os.path.basename(firmware_path)
+        
         work_dir = Path(f'./result/{task_id}/binwalk')
         os.makedirs(work_dir, exist_ok=True)
+        
+        firmware_dir = work_dir / firmware_name
+        os.makedirs(firmware_dir, exist_ok=True)
         
         try:
             # 执行binwalk -e进行分析和提取
             extract_cmd = ['binwalk', '-e', firmware_path]
-            extract_path = work_dir / 'extracted'
+            extract_path = firmware_dir / 'extracted'
             os.makedirs(extract_path, exist_ok=True)
             
             current_dir = os.getcwd()
@@ -52,18 +58,18 @@ class BinwalkAgent(Agent):
             os.chdir(current_dir)
             
             # 保存终端输出结果
-            with open(work_dir / 'binwalk_result.txt', 'w') as f:
+            with open(firmware_dir / 'binwalk_result.txt', 'w') as f:
                 f.write(result_output.stdout)
             
-            # 状态文件
+            # 准备结果数据
             result = {
                 'status': 'success',
-                'binwalk_result_path': str(work_dir / 'binwalk_result.txt'),
+                'binwalk_result_path': str(firmware_dir / 'binwalk_result.txt'),
                 'extracted_files_path': str(extract_path)
             }
             
-            with open(work_dir / 'status.json', 'w') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
+            # 更新状态
+            self._update_status_ini(work_dir, firmware_name, result)
                 
             return json.dumps(result)
             
@@ -73,20 +79,54 @@ class BinwalkAgent(Agent):
                 'message': f'执行过程中发生错误: {str(e)}'
             }
             
-            with open(work_dir / 'status.json', 'w') as f:
-                json.dump(error_result, f, ensure_ascii=False, indent=2)
+            # 更新状态
+            self._update_status_ini(work_dir, firmware_name, error_result)
                 
             return json.dumps(error_result)
     
-    def get_result(self, task_id: str) -> dict:
-        work_dir = Path(f'./result/{task_id}/binwalk')
-        status_file = work_dir / 'status.json'
+    def _update_status_ini(self, work_dir, firmware_name, result):
+        """更新状态"""
+        status_file = work_dir / 'status.ini'
         
+        config = configparser.ConfigParser()
         if os.path.exists(status_file):
-            with open(status_file, 'r') as f:
-                return json.load(f)
+            config.read(status_file)
         
-        return {
-            'status': 'unknown',
-            'message': f'未找到任务 {task_id} 的处理结果'
-        }
+        if not config.has_section(firmware_name):
+            config.add_section(firmware_name)
+        
+        for key, value in result.items():
+            config.set(firmware_name, key, str(value))
+        
+        with open(status_file, 'w') as f:
+            config.write(f)
+    
+    def get_result(self, task_id: str, firmware_name=None) -> dict:
+        work_dir = Path(f'./result/{task_id}/binwalk')
+        status_file = work_dir / 'status.ini'
+        
+        if not os.path.exists(status_file):
+            return {
+                'status': 'unknown',
+                'message': f'未找到任务 {task_id} 的处理结果'
+            }
+        
+        config = configparser.ConfigParser()
+        config.read(status_file)
+        
+        if firmware_name is not None:
+            # 返回特定固件的结果
+            if firmware_name in config.sections():
+                return {key: value for key, value in config[firmware_name].items()}
+            else:
+                return {
+                    'status': 'unknown',
+                    'message': f'未找到固件 {firmware_name} 的处理结果'
+                }
+        else:
+            # 返回所有固件的结果
+            results = {}
+            for section in config.sections():
+                results[section] = {key: value for key, value in config[section].items()}
+            
+            return results
