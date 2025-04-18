@@ -4,7 +4,7 @@ from config import config_manager
 from openai import OpenAI
 
 
-class ChatModel(ChatModel):
+class AgentModel(ChatModel):
 
     def __init__(self, model: str = None):
         super().__init__()

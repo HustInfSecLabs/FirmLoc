@@ -6,11 +6,14 @@ from log import logger
 import uuid
 import json
 import re
+import configparser
+from pathlib import Path
 
 class VulnAgent:
-    def __init__(self, user_model = QwenChatModel(), planner_model = QwenChatModel()):
+    def __init__(self, user_model: ChatModel = QwenChatModel(), planner_model: ChatModel = QwenChatModel(), config_dir: str = './save'):
         self.user_model = user_model
         self.planner_model = planner_model
+        self.config_dir = config_dir
 
         self._init_bot()
 
@@ -92,6 +95,93 @@ class VulnAgent:
         except json.JSONDecodeError:
             print("无法解析大模型返回的结构化结果，请检查输出格式。")
 
+    def generate_chat_config(self, chat_id: str, user_id: int, user_name: str, query: str):
+        """
+        生成会话配置文件
+        :param chat_id: 会话ID
+        :param user_id: 用户ID
+        :param user_name: 用户名
+        :param query: 用户查询内容
+        """
+        config = configparser.ConfigParser()
+        
+        # 生成 chat 配置节
+        config["chat"] = {
+            "chat_id": chat_id,
+            "user_id": str(user_id),
+            "user_name": user_name,
+            "#": "会话基础信息"
+        }
+        
+        # 日志配置
+        config["log"] = {
+            "file_path": "vulnagent.log",
+            "#": "日志文件路径"
+        }
+        
+        # 大模型配置
+        config["llm"] = {
+            "model_name": "gpt-4o-mini",
+            "temperature": "1",
+            "#": "大模型参数"
+        }
+        
+        # 任务规划配置
+        config["plan"] = {
+            "query": query,
+            "upload_files": "",
+            "file_path": "plan.md",
+            "#": "任务规划信息"
+        }
+        
+        # 智能体配置
+        config["agent"] = {
+            "running_agent": "",
+            "unrunning_agent": "Binwalk Agent, IDA Agent, Bindiff Agent, Detection Agent, Location Agent",
+            "completed_agent": "",
+            "#": "智能体状态"
+        }
+        
+        # 工具配置
+        config["tool"] = {
+            "running_tool": "",
+            "unrunning_tool": "Binwalk, IDA Decompiler, Bindiff",
+            "completed_tool": "",
+            "#": "工具状态"
+        }
+        
+        # 创建配置目录
+        config_dir = Path(self.config_dir) / chat_id
+        config_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 写入配置文件
+        config_path = config_dir / "config.ini"
+        with open(config_path, "w", encoding="utf-8") as f:
+            config.write(f)
+            
+        return str(config_path)
+    def update_config_value(self, chat_id: str, section: str, key: str, value: str):
+        """
+        更新配置文件字段
+        :param chat_id: 会话ID
+        :param section: 配置节名称
+        :param key: 字段名称
+        :param value: 要更新的值
+        """
+        config_path = Path(self.config_dir) / chat_id / "config.ini"
+        if not config_path.exists():
+            raise FileNotFoundError(f"配置文件不存在: {config_path}")
+        
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        
+        if not config.has_section(section):
+            raise ValueError(f"配置节不存在: {section}")
+        
+        config.set(section, key, value)
+        
+        with open(config_path, "w", encoding="utf-8") as f:
+            config.write(f)
 
 if __name__ == "__main__":
     agent = VulnAgent()
