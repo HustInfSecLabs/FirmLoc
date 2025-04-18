@@ -128,3 +128,40 @@ async def get_system_status(
             "tool": None
         }
     }
+
+@app.get("/v1/tool_status")
+async def get_tool_status(
+    chat_id: int = Query(..., description="关联的聊天会话ID", gt=0)
+):
+    """
+    获取智能体工具状态
+    
+    参数:
+    - chat_id: 关联的聊天会话ID
+    
+    返回:
+    - 工具状态信息
+    """
+    # 检查chat_id是否存在
+    if chat_id != VulnAgent.chat_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": 400,
+                "msg": "chat_id不存在",
+                "data": None
+            }
+        )
+    
+    # 获取工具状态信息
+    # session_info = system_sessions[chat_id]
+    
+    return {
+        "code": 0,
+        "msg": "查询成功",
+        "data": {
+            "status": "",
+            "agent": "",
+            "tool": ""
+        }
+    }
