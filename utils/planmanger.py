@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import List
 
 class PlanManager:
-    def __init__(self, plan_path: str, query: str, upload_files: str, plan: str):
+    def __init__(self, chat_id: str, plan_path: str, query: str, upload_files: str, plan: str):
         """
         初始化任务规划管理器
         :param plan_path: 任务规划文件路径
@@ -13,7 +13,7 @@ class PlanManager:
         :param upload_files: 用户上传文件
         :param plan: 任务规划内容
         """
-        self.plan_path = plan_path
+        self.plan_path = str(f"{plan_path}/{chat_id}/plan.md")
         self.query = query
         self.upload_files = upload_files
         self.plan = plan
@@ -35,7 +35,6 @@ class PlanManager:
                 stat = file_path.stat()
                 self.md_file.new_list([f"{file}: {stat.st_size/1024} KB, {datetime.fromtimestamp(stat.st_ctime).strftime('%Y-%m-%d %H:%M')}\n"])
         self.md_file.new_paragraph(f"任务规划内容:\n{self.plan}")
-
         self.md_file.create_md_file()
 
     def _parse_list(self, raw_str: str) -> List[str]:

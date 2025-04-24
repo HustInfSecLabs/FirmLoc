@@ -1,15 +1,17 @@
-from fastapi import FastAPI, UploadFile, File, Form, status, Request, Query, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, status, Request, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import os
 import time
+import asyncio
+import json
 from pathlib import Path
+from enum import Enum
+from datetime import datetime
 
 from agent import VulnAgent
 from config import config_manager
 from log import logger
-
-VulnAgent = VulnAgent()
 
 app = FastAPI()
 
@@ -23,6 +25,14 @@ ALLOWED_CONTENT_TYPES = {
     "application/x-sharedlib",   # Linux共享库 (.so)
     "application/x-mach-binary", # macOS可执行文件
 }
+
+
+# 消息类型枚举
+class MessageType(str, Enum):
+    HEADER1 = "header1"
+    HEADER2 = "header2"
+    CONTENT = "content"
+    COMMAND = "command"
 
 # 自定义请求验证错误处理
 @app.exception_handler(RequestValidationError)
@@ -92,76 +102,79 @@ async def upload_file(
         },
     }
 
-@app.get("/v1/system_status")
-async def get_system_status(
-    chat_id: int = Query(..., description="关联的聊天会话ID", gt=0)
-):
-    """
-    获取智能体系统状态
-    
-    参数:
-    - chat_id: 关联的聊天会话ID
-    
-    返回:
-    - 系统状态信息
-    """
-    # 检查chat_id是否存在
-    if chat_id != VulnAgent.chat_id:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": 400,
-                "msg": "chat_id不存在",
-                "data": None
-            }
-        )
-    
-    # 获取系统状态信息
-    # session_info = system_sessions[chat_id]
-    
-    return {
-        "code": 0,
-        "msg": "查询成功",
-        "data": {
-            "status": VulnAgent.status,
-            "agent": VulnAgent.progress,
-            "tool": None
-        }
-    }
 
-@app.get("/v1/tool_status")
-async def get_tool_status(
-    chat_id: int = Query(..., description="关联的聊天会话ID", gt=0)
-):
+
+@app.websocket("/v1/chat")
+async def chat(websocket: WebSocket):
     """
-    获取智能体工具状态
+    WebSocket聊天接口
     
     参数:
-    - chat_id: 关联的聊天会话ID
+    - websocket: WebSocket连接对象
     
     返回:
-    - 工具状态信息
+    - 聊天消息
     """
-    # 检查chat_id是否存在
-    if chat_id != VulnAgent.chat_id:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": 400,
-                "msg": "chat_id不存在",
-                "data": None
-            }
+    await websocket.accept()
+    last_pong = datetime.now()
+
+    async def keep_alive():
+        """心跳保活任务"""
+        nonlocal last_pong
+        while True:
+            await asyncio.sleep(30)  # 30秒心跳间隔
+            if (datetime.now() - last_pong).total_seconds() > 40:
+                await websocket.close(code=1008)
+                break
+            try:
+                await websocket.send_json({"type": "ping"})
+            except:
+                break
+
+    async def receive_messages():
+        """消息接收处理任务"""
+        nonlocal last_pong
+        while True:
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+                
+                # 处理心跳响应
+                if message.get("type") == "pong":
+                    last_pong = datetime.now()
+                    continue
+                
+                # 验证消息格式
+                if not all(key in message for key in ["chat_id", "type", "content"]):
+                    await websocket.send_json({
+                        "error": "Invalid message format",
+                        "code": 400
+                    })
+                    continue
+
+                # 处理业务消息
+                if message["type"] == "message":
+                    # 启动智能体处理流程
+                    VulAgent = VulnAgent(
+                        chat_id=message["chat_id"],
+                        user_input=message["content"],
+                        websocket=websocket,
+                    )
+                    await VulAgent.chat()
+                    
+            except json.JSONDecodeError:
+                await websocket.send_json({"error": "Invalid JSON", "code": 400})
+            except WebSocketDisconnect:
+                break
+
+    
+    try:
+        # 启动并行任务
+        await asyncio.gather(
+            keep_alive(),
+            receive_messages()
         )
-    
-    # 获取工具状态信息
-    # session_info = system_sessions[chat_id]
-    
-    return {
-        "code": 0,
-        "msg": "查询成功",
-        "data": {
-            "status": "",
-            "agent": "",
-            "tool": ""
-        }
-    }
+    except Exception as e:
+        print(f"WebSocket error: {str(e)}")
+    finally:
+        await websocket.close()
