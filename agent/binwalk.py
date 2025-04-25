@@ -5,6 +5,7 @@ import configparser
 from pathlib import Path
 from .base import Agent
 from model import ChatModel
+from datetime import datetime
 
 class BinwalkAgent(Agent):
     """
@@ -14,15 +15,11 @@ class BinwalkAgent(Agent):
     def __init__(self, chat_model: ChatModel) -> None:
         super().__init__(chat_model)
         
-    def process(self, task: dict) -> str:
-        # 任务ID和固件路径
-        task_id = task.get('id')
-        firmware_path = task.get('firmware_path')
-        
+    def process(self, task_id: str, firmware_path: str) -> str:
         if not task_id or not firmware_path:
             return json.dumps({
                 'status': 'error',
-                'message': '缺少必要参数: id 或 firmware_path'
+                'message': '缺少必要参数: task_id 或 firmware_path'
             })
             
         if not os.path.exists(firmware_path):
