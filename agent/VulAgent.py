@@ -101,7 +101,7 @@ class VulnAgent:
         """
         logger.info(f"Tasks: {self.tasks}")
 
-        self.planner_manager = PlanManager(
+        self.plan_manager = PlanManager(
             chat_id=self.chat_id,
             plan_path=self.config_dir,
             query=self.user_input,
