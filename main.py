@@ -111,70 +111,69 @@ async def upload_file(
 
 @app.websocket("/v1/chat")
 async def chat(websocket: WebSocket):
-    """
-    WebSocket聊天接口
-    
-    参数:
-    - websocket: WebSocket连接对象
-    
-    返回:
-    - 聊天消息
-    """
     await websocket.accept()
     last_pong = datetime.now()
+    stop_event = asyncio.Event()  # 用于协调协程停止
 
     async def keep_alive():
-        """心跳保活任务"""
         nonlocal last_pong
-        while True:
-            await asyncio.sleep(30)  # 30秒心跳间隔
+        while not stop_event.is_set():
+            await asyncio.sleep(30)
             if (datetime.now() - last_pong).total_seconds() > 40:
-                await websocket.close(code=1008)
+                stop_event.set()
+                try:
+                    await websocket.close(code=1008)
+                except RuntimeError:
+                    pass  # 连接可能已关闭
                 break
             try:
                 await websocket.send_json({"type": "ping"})
-            except:
+            except RuntimeError:
+                stop_event.set()
                 break
 
     async def receive_messages():
-        """消息接收处理任务"""
         nonlocal last_pong
-        while True:
+        while not stop_event.is_set():
             try:
                 data = await websocket.receive_text()
                 message = json.loads(data)
-                
-                # 处理心跳响应
+
                 if message.get("type") == "pong":
                     last_pong = datetime.now()
                     continue
-                
-                # 验证消息格式
+
                 if not all(key in message for key in ["chat_id", "type", "content"]):
-                    await websocket.send_json({
-                        "error": "Invalid message format",
-                        "code": 400
-                    })
+                    try:
+                        await websocket.send_json({
+                            "error": "Invalid message format",
+                            "code": 400
+                        })
+                    except RuntimeError:
+                        stop_event.set()
                     continue
 
-                # 处理业务消息
                 if message["type"] == "message":
-                    # 启动智能体处理流程
                     VulAgent = VulnAgent(
                         chat_id=message["chat_id"],
                         user_input=message["content"],
                         websocket=websocket,
                     )
                     await VulAgent.chat()
-                    
+
             except json.JSONDecodeError:
-                await websocket.send_json({"error": "Invalid JSON", "code": 400})
+                try:
+                    await websocket.send_json({"error": "Invalid JSON", "code": 400})
+                except RuntimeError:
+                    stop_event.set()
             except WebSocketDisconnect:
+                stop_event.set()
+                break
+            except RuntimeError:
+                stop_event.set()
                 break
 
-    
     try:
-        # 启动并行任务
         await asyncio.gather(
             keep_alive(),
             receive_messages()
@@ -182,7 +181,13 @@ async def chat(websocket: WebSocket):
     except Exception as e:
         print(f"WebSocket error: {str(e)}")
     finally:
-        await websocket.close()
+        if not stop_event.is_set():
+            stop_event.set()
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass  # 连接可能已关闭
+
 
 
 @app.get("/v1/chat_list")
