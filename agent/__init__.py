@@ -4,3 +4,5 @@ from .Selector import Selector
 from .VulAgent import VulnAgent
 from .bindiff_agent import BindiffAgent
 from .ida_toolkits import IdaToolkit
+from .binwalk import BinwalkAgent
+from .online_search import OnlineSearchAgent
