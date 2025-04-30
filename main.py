@@ -1,13 +1,14 @@
 from fastapi import FastAPI, UploadFile, File, Form, status, Request, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 import os
 import time
 import asyncio
 import json
 from pathlib import Path
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from agent import VulnAgent
 from config import config_manager
@@ -15,7 +16,11 @@ from log import logger
 
 app = FastAPI()
 
+app.mount("/static", StaticFiles(directory="images"), name="static")
+
 path = config_manager.config["result.path"]["savedir"]
+
+jst = timezone(timedelta(hours=9))
 
 # 允许上传的文件类型（二进制或可执行文件）
 ALLOWED_CONTENT_TYPES = {
@@ -178,3 +183,33 @@ async def chat(websocket: WebSocket):
         print(f"WebSocket error: {str(e)}")
     finally:
         await websocket.close()
+
+
+@app.get("/v1/chat_list")
+async def get_chat_list():
+    """
+    获取聊天列表
+    # 时间格式：2025-04-15T15:30:45+09:00
+    """
+    chat_list = []
+    for chat_id in os.listdir(path):
+        chat_dir = os.path.join(path, chat_id)
+        if os.path.isdir(chat_dir):
+            creation_timestamp = os.path.getctime(chat_dir)
+            chat_list.append({
+                "chat_id": chat_id,
+                "chat_title": chat_id,
+                "create_time": datetime.fromtimestamp(creation_timestamp, tz=jst).isoformat(),
+            })
+    
+    return {
+        "code": 0,
+        "msg": "获取成功",
+        "data": chat_list
+    }
+
+
+   
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
