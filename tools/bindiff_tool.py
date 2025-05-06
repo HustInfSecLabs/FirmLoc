@@ -18,15 +18,21 @@ def run_bindiff(primary_export: str, secondary_export: str, output_dir: str) -> 
 
     os.makedirs(output_dir, exist_ok=True)
 
-    cmd = ["bindiff", primary_export, secondary_export, "--output_dir", output_dir]
+    # -- ① 默认格式 
+    cmd1 = ["bindiff", primary_export, secondary_export, "--output_dir", output_dir]
+    # -- ② 追加 log 格式
+    cmd2 = ["bindiff", primary_export, secondary_export, "--output_format", "log", "--output_dir", output_dir]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result1 = subprocess.run(cmd1, capture_output=True, text=True, check=True)
+        result2 = subprocess.run(cmd2, capture_output=True, text=True, check=True)
         return {
             "success": True,
             "output_dir": output_dir,
-            "stdout": result.stdout,
-            "stderr": result.stderr
+            "stdout": result1.stdout,
+            "stderr": result1.stderr,
+            "stdout_log": result2.stdout,
+            "stderr_log": result2.stderr
         }
     except subprocess.CalledProcessError as e:
         return {
