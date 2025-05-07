@@ -1,16 +1,17 @@
 import logging
-import os, io, zipfile
+import os
+import tempfile, zipfile
 from typing import List
 import requests
 import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
+import io
 
 from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
 
 logger = logging.getLogger(__name__)
-
 
 class IdaToolkit(BaseToolkit):
     r"""A class representing a toolkit for Ida binary analysis."""
@@ -44,16 +45,17 @@ class IdaToolkit(BaseToolkit):
             messagebox.showerror("Error", f"Failed to display screenshot: {str(e)}")
 
     def analyze_binary(self, input_file_path: str, output_file_path: str = None, 
-                    ida_version: str = "ida32",
-                    url: str = "http://10.12.189.52:5000/analyze",
-                    screenshot_url: str = "http://10.12.189.52:5000/analyze_with_screenshot") -> bool:
+                   ida_version: str = "ida32",
+                   url: str = "http://10.12.189.52:5000/analyze",
+                   screenshot_url: str = "http://10.12.189.52:5000/analyze_with_screenshot") -> bool:
         r"""Analyze a binary file via HTTP API and save the result.
 
         Args:
             input_file_path (str): The path to the binary file to analyze.
             output_file_path (str, optional): The path to save the analysis result. 
                 Defaults to None, in which case it will be saved as `<input_file_path>.BinExport`.
-            ida_version (str, optional): The version of IDA to use. Defaults to "ida32".
+            ida_version (str, optional): The version of IDA to use ("ida32" or "ida64"). 
+                Defaults to "ida32".
             url (str, optional): The HTTP API endpoint for analysis. 
                 Defaults to "http://10.12.189.52:5000/analyze".
             screenshot_url (str, optional): The HTTP API endpoint for getting screenshot. 
@@ -62,6 +64,10 @@ class IdaToolkit(BaseToolkit):
         Returns:
             bool: True if the analysis was successful, False otherwise.
         """
+        # Validate ida_version parameter
+        if ida_version.lower() not in ["ida32", "ida64"]:
+            raise ValueError(f"Invalid ida_version: {ida_version}. Must be 'ida32' or 'ida64'")
+
         # Set default output file path if not provided
         if output_file_path is None:
             output_file_path = f"{input_file_path}.BinExport"
@@ -76,7 +82,7 @@ class IdaToolkit(BaseToolkit):
         os.makedirs(screenshots_dir, exist_ok=True)
 
         try:
-            # 1. 先发送到截图服务获取截图
+            # 1. First send to screenshot service to get screenshots
             with open(input_file_path, 'rb') as f:
                 files = {'file': (file_name, f)}
                 logger.info(f"Sending file to screenshot service: {screenshot_url}")
@@ -85,38 +91,37 @@ class IdaToolkit(BaseToolkit):
             if screenshot_response.status_code != 200:
                 logger.warning(f"Screenshot service failed: HTTP {screenshot_response.status_code}")
             else:
-                # 创建临时目录存放解压的截图
+                # Create temporary directory for extracted screenshots
                 screenshot_dir = os.path.join(screenshots_dir, os.path.splitext(file_name)[0])
                 os.makedirs(screenshot_dir, exist_ok=True)
                 
-                # 保存zip文件并解压
+                # Save zip file and extract it
                 zip_path = os.path.join(screenshot_dir, f"{file_name}_screenshots.zip")
                 with open(zip_path, 'wb') as zip_file:
                     zip_file.write(screenshot_response.content)
                 
-                # 解压zip文件
+                # Extract zip file
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     zip_ref.extractall(screenshot_dir)
-                os.remove(zip_path)  # 删除zip文件
+                os.remove(zip_path)  # Delete the zip file
                 
-                # 获取解压后的截图文件并通过弹窗展示，可在Windows下使用
+                # The following code for displaying screenshots is commented out as it's Windows-specific
                 # screenshot_files = sorted(
                 #     [f for f in os.listdir(screenshot_dir) if f.lower().endswith('.png')],
-                #     key=lambda x: "asm" in x  # 反汇编截图优先显示
+                #     key=lambda x: "asm" in x  # Disassembly screenshots have priority
                 # )
-                
+                # 
                 # if not screenshot_files:
                 #     logger.warning("No screenshot files found in the zip")
-                #     # messagebox.showwarning("Warning", "No valid screenshots received")
                 # else:
-                #     # 依次显示截图
+                #     # Display screenshots one by one
                 #     for screenshot_file in screenshot_files:
                 #         screenshot_path = os.path.join(screenshot_dir, screenshot_file)
                 #         with open(screenshot_path, 'rb') as img_file:
                 #             self._show_screenshot(img_file.read())
                 #         logger.info(f"Displayed screenshot: {screenshot_file}")
             
-            # 2. 进行正式分析（只上传文件名）
+            # 2. Perform formal analysis (only upload filename)
             logger.info("Starting formal analysis...")
             data = {
                 'binary_name': file_name,
