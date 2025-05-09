@@ -6,6 +6,7 @@ from pathlib import Path
 from .base import Agent
 from model import ChatModel
 from datetime import datetime
+import glob
 
 class BinwalkAgent(Agent):
     """
@@ -30,7 +31,7 @@ class BinwalkAgent(Agent):
         
         firmware_name = os.path.basename(firmware_path)
         
-        work_dir = Path(f'./result/{task_id}/binwalk')
+        work_dir = Path(f'./history/{task_id}/binwalk')
         os.makedirs(work_dir, exist_ok=True)
         
         firmware_dir = work_dir / firmware_name
@@ -39,7 +40,7 @@ class BinwalkAgent(Agent):
         try:
             # 执行binwalk -e进行分析和提取
             extract_cmd = ['binwalk', '-e', firmware_path]
-            extract_path = firmware_dir / 'extracted'
+            extract_path = firmware_dir  # 运行binwalk提取的目录路径
             os.makedirs(extract_path, exist_ok=True)
             
             current_dir = os.getcwd()
@@ -54,6 +55,13 @@ class BinwalkAgent(Agent):
             
             os.chdir(current_dir)
             
+            extracted_dirs = sorted(glob.glob(f"{extract_path}/_{firmware_name}*.extracted"), key=os.path.getmtime)
+
+            if not extracted_dirs:
+                raise RuntimeError("binwalk 未提取出任何目录")
+
+            actual_extracted_path = extracted_dirs[-1]  # 实际提取完成后提取出的文件夹路径
+
             # 保存终端输出结果
             with open(firmware_dir / 'binwalk_result.txt', 'w') as f:
                 f.write(result_output.stdout)
@@ -62,7 +70,7 @@ class BinwalkAgent(Agent):
             result = {
                 'status': 'success',
                 'binwalk_result_path': str(firmware_dir / 'binwalk_result.txt'),
-                'extracted_files_path': str(extract_path)
+                'extracted_files_path': str(actual_extracted_path)
             }
             
             # 更新状态
@@ -89,8 +97,10 @@ class BinwalkAgent(Agent):
         if os.path.exists(status_file):
             config.read(status_file)
         
-        if not config.has_section(firmware_name):
-            config.add_section(firmware_name)
+        if config.has_section(firmware_name):
+            config.remove_section(firmware_name)
+        
+        config.add_section(firmware_name)
         
         for key, value in result.items():
             config.set(firmware_name, key, str(value))
@@ -99,7 +109,7 @@ class BinwalkAgent(Agent):
             config.write(f)
     
     def get_result(self, task_id: str, firmware_name=None) -> dict:
-        work_dir = Path(f'./result/{task_id}/binwalk')
+        work_dir = Path(f'./history/{task_id}/binwalk')
         status_file = work_dir / 'status.ini'
         
         if not os.path.exists(status_file):
