@@ -9,8 +9,9 @@ CLICK_BUTTONS = {
     "double_click": ["--repeat", "2", "--delay", "10", "1"],
 }
 
-HOME = "/home/username"  # 截图保存的路径, 请根据需要修改 username
-DIFF_FILE = "/path/to/stack_overflow_demo.export"  # 请替换为实际的文件路径
+HOME = "/home/placebo"  # 截图保存的路径, 请根据需要修改 username
+DIFF_FILE = "/home/placebo/VulAgent/test2/"              
+# "/path/to/stack_overflow_demo.export"  # 请替换为实际的文件路径
 IMAGE_DIR = "/image/"
 IMAGE_FILE = [
     "overview_screenshot.png",
@@ -20,19 +21,28 @@ IMAGE_FILE = [
     "secondary_unmatched_functions_screenshot.png",
 ]
 
+ANCHOR = {
+    "PATH": (1312, 429),
+    "ICON": (79, 153),
+    "SEARCH_BOX1": (397, 368),  # Matched Functions
+    "SEARCH_BOX2": (),  # Primary/Secondary Unmatched Functions
+    "MATCHED_FUNCTIONS": (392, 440), # Interval is 21, such as 408 -> 429
+    "SEARCH_BOX3": (792, 147), # Node Content
+}
+
 # 坐标和延迟时间配置
 COORDINATES = {
-    "file_menu": (90, 411),
-    "diff_menu": (788, 533),
-    "default_file": (227, 534),
-    "confirm_ok": (615, 771),
-    "rename_field": (795, 665),
-    "confirm_add": (686, 708),
-    "select_diff": (103, 378),
-    "overview_tab": (99, 392),
-    "call_graph_tab": (99, 412),
-    "matched_functions_tab": (99, 426),
-    "primary_unmatched_tab": (99, 443),
+    "workplace": (90, 190),
+    "diff_menu": ANCHOR["PATH"],
+    "default_file": (ANCHOR["PATH"][0] - 560, ANCHOR["PATH"][1]),
+    "confirm_ok": (ANCHOR["PATH"][0] - 171, ANCHOR["PATH"][1] + 242),
+    "rename_field": (ANCHOR["PATH"][0] - 14, ANCHOR["PATH"][1] + 135),
+    "confirm_add": (ANCHOR["PATH"][0] - 100, ANCHOR["PATH"][1] + 174),
+    "overview_tab": ANCHOR["ICON"],
+    "call_graph_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 17),
+    "matched_functions_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 34),
+    "primary_unmatched_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 51),
+    "secondary_unmatched_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 68)
 }
 
 DELAY_SHORT = 0.5
@@ -47,9 +57,9 @@ def bindiff_ui(diff_name: str, output_image: str):
         time.sleep(3)  # 等待 BinDiff 启动
 
         active_bindiff()
-
+        
         # 打开文件菜单并加载对比文件
-        open_file_menu()
+        open_workplace()
         load_diff_file(diff_name)
 
         # 截图各个视图
@@ -58,11 +68,11 @@ def bindiff_ui(diff_name: str, output_image: str):
         print(f"运行 BinDiff 时发生错误: {e}")
 
 
-def open_file_menu():
+def open_workplace():
     """打开文件菜单"""
     subprocess.run(["xdotool", "key", "Alt+f"])
     time.sleep(DELAY_SHORT)
-    move_and_click(*COORDINATES["file_menu"], "left_click")
+    move_and_click(*COORDINATES["workplace"], "left_click")
     time.sleep(DELAY_LONG)
 
 
@@ -85,7 +95,7 @@ def load_diff_file(diff_name: str):
     move_and_click(*COORDINATES["confirm_add"], "left_click")
     time.sleep(DELAY_SHORT)
 
-    move_and_click(*COORDINATES["select_diff"], "double_click")
+    move_and_click(*COORDINATES["overview_tab"], "double_click")
     time.sleep(DELAY_LONG)
 
 
@@ -108,7 +118,29 @@ def take_screenshots(output_image: str):
         subprocess.run(["scrot", "-u", screenshot_path])
         time.sleep(DELAY_LONG)
 
+def scrot(path: str):
+    try:
+        subprocess.run(["scrot", "-u", path])
+    except Exception as e:
+        print(f"scrot操作失败: {e}")
 
+def find_matched_function(name: str):
+    """在已匹配的函数中寻找给定函数"""
+    move_and_click(*ANCHOR["SEARCH_BOX1"], "left_click")
+    clear_and_type(name)
+    time.sleep(DELAY_LONG)
+    move_and_click(*ANCHOR["MATCHED_FUNCTIONS"], "double_click") # Default First
+    time.sleep(DELAY_LONG)
+    hightlight_nodes("push")
+    
+    
+def hightlight_nodes(node_content: str):
+    """Hightlight the search content of Graph node """
+    move_and_click(*ANCHOR["SEARCH_BOX3"], "left_click")
+    clear_and_type(node_content)
+    time.sleep(DELAY_SHORT)
+    scrot(HOME + IMAGE_DIR+"diff_function"+node_content+".png")
+    
 def move_and_click(x, y, mode):
     """移动鼠标到指定位置并点击"""
     try:
@@ -126,6 +158,8 @@ def clear_and_type(input_text):
         subprocess.run(["xdotool", "key", "BackSpace"])
         time.sleep(DELAY_SHORT)
         subprocess.run(["xdotool", "type", input_text])
+        time.sleep(DELAY_SHORT)
+        subprocess.run(["xdotool", "key", "Return"]) # Enter or Return
     except Exception as e:
         print(f"输入文本失败: {e}")
 
@@ -140,4 +174,5 @@ def active_bindiff():
 
 if __name__ == "__main__":
     # 示例用法
-    bindiff_ui(HOME + IMAGE_DIR, "test_diff_name")
+    # bindiff_ui("test_diff_name", HOME + IMAGE_DIR)
+    find_matched_function("main")
