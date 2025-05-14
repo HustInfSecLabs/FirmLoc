@@ -13,6 +13,9 @@ from camel.toolkits.function_tool import FunctionTool
 
 logger = logging.getLogger(__name__)
 
+
+# 可上传至Github合并的版本，已测试可行
+
 class IdaToolkit(BaseToolkit):
     r"""A class representing a toolkit for Ida binary analysis."""
 
@@ -44,56 +47,64 @@ class IdaToolkit(BaseToolkit):
             logger.error(f"Failed to show screenshot: {str(e)}")
             messagebox.showerror("Error", f"Failed to display screenshot: {str(e)}")
 
-    def analyze_binary(self, input_file_path: str, output_file_path: str = None, 
-                   ida_version: str = "ida32",
-                   url: str = "http://10.12.189.52:5000/analyze",
-                   screenshot_url: str = "http://10.12.189.52:5000/analyze_with_screenshot") -> bool:
-        r"""Analyze a binary file via HTTP API and save the result.
+    def analyze_binary(self, input_file_path: str, output_dir: str = None, 
+                    ida_version: str = "ida32",
+                    bin_export_url: str = "http://10.12.189.52:5000/export_binexport",
+                    screenshot_url: str = "http://10.12.189.52:5000/reversing_analyze_screenshot",
+                    pseudo_c_url = "http://10.12.189.52:5000/export_pseudo_c") -> bool:
+        r"""Analyze a binary file using IDA Pro through HTTP API endpoints.
+    
+            This function submits the binary to multiple analysis endpoints to generate:
+            - BinExport files
+            - Screenshots of the disassembly
+            - Pseudo-C code decompilation
 
         Args:
             input_file_path (str): The path to the binary file to analyze.
-            output_file_path (str, optional): The path to save the analysis result. 
-                Defaults to None, in which case it will be saved as `<input_file_path>.BinExport`.
+            output_file_path (str, optional): The path to save the analysis results, include screenshots, BinExport, pseudo_c. 
+                Defaults to None, in which case it will be saved in the same path with `<input_file_path>`. 
             ida_version (str, optional): The version of IDA to use ("ida32" or "ida64"). 
-                Defaults to "ida32".
-            url (str, optional): The HTTP API endpoint for analysis. 
-                Defaults to "http://10.12.189.52:5000/analyze".
-            screenshot_url (str, optional): The HTTP API endpoint for getting screenshot. 
-                Defaults to "http://10.12.189.52:5000/analyze_with_screenshot".
+                Defaults to "ida32". 
+            bin_export_url (str, optional): The HTTP API endpoint for analysis. 
+                Defaults to "http://10.12.189.52:5000/export_binexport". 
+            screenshot_url (str, optional): The HTTP API endpoint for disassembly screenshots. 
+                Defaults to "http://10.12.189.52:5000/reversing_analyze_screenshot". 
+            pseudo_c_url (str, optional): The HTTP API endpoint for pseudo-C decompilation. 
+                Defaults to "http://10.12.189.52:5000/export_pseudo_c". 
 
         Returns:
             bool: True if the analysis was successful, False otherwise.
         """
+
+        file_name = os.path.basename(input_file_path)
+        file_dir = os.path.dirname(input_file_path)
+
         # Validate ida_version parameter
         if ida_version.lower() not in ["ida32", "ida64"]:
             raise ValueError(f"Invalid ida_version: {ida_version}. Must be 'ida32' or 'ida64'")
 
         # Set default output file path if not provided
-        if output_file_path is None:
-            output_file_path = f"{input_file_path}.BinExport"
+        if output_dir is None:
+            output_dir = f"{file_dir}"
         
         # Check if input file exists
         if not os.path.exists(input_file_path):
             raise FileNotFoundError(f"Input file does not exist: {input_file_path}")
         
-        file_name = os.path.basename(input_file_path)
-        file_dir = os.path.dirname(input_file_path)
-        screenshots_dir = os.path.join(file_dir, "screenshots")
-        os.makedirs(screenshots_dir, exist_ok=True)
+        # Create temporary directory for extracted screenshots
+        screenshot_dir = os.path.join(output_dir, "screenshots")
+        os.makedirs(screenshot_dir, exist_ok=True)
 
         try:
             # 1. First send to screenshot service to get screenshots
             with open(input_file_path, 'rb') as f:
                 files = {'file': (file_name, f)}
-                logger.info(f"Sending file to screenshot service: {screenshot_url}")
+                logger.info(f"[1/3], Sending file to screenshot service: {screenshot_url}")
                 screenshot_response = requests.post(screenshot_url, files=files)
             
             if screenshot_response.status_code != 200:
                 logger.warning(f"Screenshot service failed: HTTP {screenshot_response.status_code}")
             else:
-                # Create temporary directory for extracted screenshots
-                screenshot_dir = os.path.join(screenshots_dir, os.path.splitext(file_name)[0])
-                os.makedirs(screenshot_dir, exist_ok=True)
                 
                 # Save zip file and extract it
                 zip_path = os.path.join(screenshot_dir, f"{file_name}_screenshots.zip")
@@ -122,23 +133,37 @@ class IdaToolkit(BaseToolkit):
                 #         logger.info(f"Displayed screenshot: {screenshot_file}")
             
             # 2. Perform formal analysis (only upload filename)
-            logger.info("Starting formal analysis...")
+            logger.info("[2/3], Starting formal analysis...")
             data = {
                 'binary_name': file_name,
                 'ida_version': ida_version.lower()
             }
-            response = requests.post(url, data=data, stream=True)
+            response = requests.post(bin_export_url, data=data, stream=True)
 
             # Check response status
             if response.status_code != 200:
                 raise RuntimeError(f"Analysis failed: HTTP {response.status_code} - {response.text}")
-
             # Save the result file
+            output_file_path = os.path.join(output_dir, file_name + ".BinExport")
             with open(output_file_path, 'wb') as f:
                 for chunk in response.iter_content(1024):
                     f.write(chunk)
+            logger.info(f"BinExport successfully! Results saved to: {output_file_path}")
 
-            logger.info(f"IDA analysis completed successfully! Results saved to: {output_file_path}")
+
+            # 3. Export pseudo C code (only upload filename)
+            logger.info("[3/3], Exporting pseudo C code...")
+            response = requests.post(pseudo_c_url, data=data, stream=True)
+            # Check response status
+            if response.status_code != 200:
+                raise RuntimeError(f"Analysis failed: HTTP {response.status_code} - {response.text}")
+            # Save the result file
+            pseudo_c_file_path = os.path.join(output_dir, file_name + "_pseudo.c")
+            with open(pseudo_c_file_path, 'wb') as f:
+                for chunk in response.iter_content(1024):
+                    f.write(chunk)
+            logger.info(f"Exported pseudo C code successfully! File saved to: {pseudo_c_file_path}")
+
             return True
 
         except Exception as e:
@@ -159,4 +184,4 @@ class IdaToolkit(BaseToolkit):
 if __name__ == "__main__":
     # Example usage
     toolkit = IdaToolkit()
-    toolkit.analyze_binary(r"/disk0/like/2025xa/owl/test/stack_overflow_demo")
+    toolkit.analyze_binary(r"/disk0/like/2025xa/owl/test/stack_overflow_demo_v1", output_dir=r"/disk0/like/2025xa/owl/test/20250514", ida_version="ida32",)
