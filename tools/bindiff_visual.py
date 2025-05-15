@@ -12,6 +12,7 @@ CLICK_BUTTONS = {
 HOME = "/home/placebo"  # 截图保存的路径, 请根据需要修改 username
 DIFF_FILE = "/home/placebo/VulAgent/test2/"              
 # "/path/to/stack_overflow_demo.export"  # 请替换为实际的文件路径
+# window size 1916x915
 IMAGE_DIR = "/image/"
 IMAGE_FILE = [
     "overview_screenshot.png",
@@ -42,7 +43,10 @@ COORDINATES = {
     "call_graph_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 17),
     "matched_functions_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 34),
     "primary_unmatched_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 51),
-    "secondary_unmatched_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 68)
+    "secondary_unmatched_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 68),
+    "delete_diff": (ANCHOR["ICON"][0] + 14, ANCHOR["ICON"][1] + 57),
+    "delete_file_select": (ANCHOR["PATH"][0] - 454, ANCHOR["PATH"][1] + 85),
+    "confirm_delete":(ANCHOR["PATH"][0] - 354, ANCHOR["PATH"][1] + 120),
 }
 
 DELAY_SHORT = 0.5
@@ -64,6 +68,10 @@ def bindiff_ui(diff_name: str, output_image: str):
 
         # 截图各个视图
         take_screenshots(output_image)
+        
+        delete_diff_file(DIFF_FILE)
+        # Exit BinDiff
+        close_bindiff()
     except Exception as e:
         print(f"运行 BinDiff 时发生错误: {e}")
 
@@ -99,6 +107,19 @@ def load_diff_file(diff_name: str):
     time.sleep(DELAY_LONG)
 
 
+def delete_diff_file(diff_dir: str):
+    """Delete diff file"""
+    move_and_click(*ANCHOR["ICON"], "right_click")
+    time.sleep(DELAY_SHORT)
+    move_and_click(*COORDINATES["delete_diff"], "left_click")
+    time.sleep(DELAY_SHORT)
+    # Actually it does not work.
+    move_and_click(*COORDINATES["delete_file_select"], "left_click")
+    move_and_click(*COORDINATES["confirm_delete"], "left_click")
+    # It does work.
+    subprocess.run(["rm", "-rf", diff_dir])
+    
+    
 def take_screenshots(output_image: str):
     """截图各个视图"""
     tabs = [
@@ -172,7 +193,13 @@ def active_bindiff():
         print(f"激活 BinDiff 窗口失败: {e}")
 
 
+def close_bindiff():
+    """Close Bindiff UI"""
+    subprocess.run(["xdotool", "key", "Alt+f"])
+    time.sleep(DELAY_SHORT)
+    subprocess.run(["xdotool", "key", "Ctrl+q"])
+    
 if __name__ == "__main__":
     # 示例用法
-    # bindiff_ui("test_diff_name", HOME + IMAGE_DIR)
-    find_matched_function("main")
+    bindiff_ui("test_diff_name1", HOME + IMAGE_DIR)
+    # find_matched_function("main")
