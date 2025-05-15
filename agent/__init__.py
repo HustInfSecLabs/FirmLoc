@@ -6,3 +6,4 @@ from .bindiff_agent import BindiffAgent
 from .ida_toolkits import IdaToolkit
 from .binwalk import BinwalkAgent
 from .online_search import OnlineSearchAgent
+from .binary_filter import BinaryFilterAgent
