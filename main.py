@@ -16,7 +16,7 @@ from log import logger
 
 app = FastAPI()
 
-app.mount("/static", StaticFiles(directory="images"), name="static")
+app.mount("/static/images", StaticFiles(directory="images"), name="static")
 
 path = config_manager.config["result.path"]["savedir"]
 
@@ -31,6 +31,19 @@ ALLOWED_CONTENT_TYPES = {
     "application/x-mach-binary", # macOS可执行文件
 }
 
+# 常见固件文件后缀列表
+FIRMWARE_EXTENSIONS = {
+    ".bin",  # raw binary firmware
+    ".img",  # disk image firmware
+    ".hex",  # Intel HEX text format 
+    ".ihex", ".mcs",          # Intel HEX variants
+    ".elf",  # ELF executables often used in embedded systems
+    ".dfu",  # Device Firmware Update packages :contentReference[oaicite:2]{index=2}
+    ".uf2",  # Microsoft UF2 bootloader format
+    ".srec", ".s19", ".s28", ".s37",  # Motorola S-records
+    ".pat",  # Cisco firmware images
+    ".ipsw", # Apple firmware bundles
+}
 
 # 消息类型枚举
 class MessageType(str, Enum):
@@ -59,7 +72,9 @@ async def upload_file(
     chat_id: int = Form(...)
 ):
     # 检查文件类型
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
+    filename = Path(file.filename).name
+    ext = Path(filename).suffix.lower()
+    if file.content_type not in ALLOWED_CONTENT_TYPES and ext not in FIRMWARE_EXTENSIONS:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={"code": 400, "msg": "文件类型不在白名单中", "data": None},
@@ -99,9 +114,9 @@ async def upload_file(
         "msg": "上传成功",
         "data": {
             "id": filename,  
-            "chat_id": chat_id,
-            "original_name": file.filename,
-            "saved_path": save_path,
+            # "chat_id": chat_id,
+            # "original_name": file.filename,
+            # "saved_path": save_path,
             "created_at": int(time.time()),
             "bytes": file_stat.st_size,
         },
@@ -217,4 +232,4 @@ async def get_chat_list():
    
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8888)
