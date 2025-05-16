@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import List
 
 class PlanManager:
-    def __init__(self, chat_id: str, plan_path: str, query: str, upload_files: str, plan: str):
+    def __init__(self, chat_id: str, plan_path: str, query: str, upload_files: List, plan: str):
         """
         初始化任务规划管理器
         :param plan_path: 任务规划文件路径
@@ -26,7 +26,7 @@ class PlanManager:
         self.md_file = MdUtils(file_name=self.plan_path, title='VulnAgent Plan')
         self.md_file.new_paragraph(f"用户请求任务: {self.query}")
         self.md_file.new_paragraph("用户上传文件:")
-        upload_files = self._parse_list(self.upload_files)
+        upload_files = self.upload_files
         for file in upload_files:
             file = file.strip()
             if file:

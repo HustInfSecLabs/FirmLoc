@@ -3,14 +3,14 @@ from pathlib import Path
 from typing import List, Dict
 
 class ConfigManager:
-    def __init__(self, chat_id: str, user_id: int, user_name: str, query: str, upload_files: str, config_path: str = "../save"):
+    def __init__(self, chat_id: str, user_id: int, user_name: str, query: str, upload_files: List, config_path: str = "../save"):
         self.chat_id = chat_id
         self.config_path = Path(f"{config_path}/{chat_id}/config.ini")
         self.config = configparser.ConfigParser()
         self.user_id = user_id
         self.user_name = user_name
         self.query = query
-        self.upload_files = upload_files
+        self.upload_files = self._format_str(upload_files)
 
         # 初始化配置文件
         if not self.config_path.exists():
@@ -57,13 +57,13 @@ class ConfigManager:
         
         self.config["agent"] = {
             "running_agent": "",
-            "unrunning_agent": "Binwalk Agent, IDA Agent, Bindiff Agent, Detection Agent, Location Agent",
+            "unrunning_agent": "Intelligence Agent, Binwalk Agent, IDA Agent, Bindiff Agent, Detection Agent, Location Agent",
             "completed_agent": "",
             "#": "智能体运行状态"
         }
         self.config["tool"] = {
             "running_tool": "",
-            "unrunning_tool": "Binwalk, IDA Decompiler, Bindiff",
+            "unrunning_tool": "Online Search, Binwalk, IDA Decompiler, Bindiff",
             "completed_tool": "",
             "#": "工具运行状态"
         }
