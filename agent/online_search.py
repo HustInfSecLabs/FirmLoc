@@ -37,7 +37,7 @@ class OnlineSearchAgent(Agent):
     
     # 直接搜索特定CVE-ID的详细信息
     def _process_cve_search(self, task_id: str, cve_id: str):
-        work_dir = Path(f'./result/{task_id}/online_search')
+        work_dir = Path(f'./history/{task_id}/online_search')
         os.makedirs(work_dir, exist_ok=True)
         
         try:
@@ -73,7 +73,7 @@ class OnlineSearchAgent(Agent):
     
     # 根据厂商、型号、版本搜索相关CVE
     def _process_device_search(self, task_id: str, vendor: str, model: str = None, version: str = None):
-        work_dir = Path(f'./result/{task_id}/online_search')
+        work_dir = Path(f'./history/{task_id}/online_search')
         os.makedirs(work_dir, exist_ok=True)
         
         try:

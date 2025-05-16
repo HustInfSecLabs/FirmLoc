@@ -76,7 +76,7 @@ class BinwalkAgent(Agent):
             # 更新状态
             self._update_status_ini(work_dir, firmware_name, result)
                 
-            return json.dumps(result)
+            return result
             
         except Exception as e:
             error_result = {
