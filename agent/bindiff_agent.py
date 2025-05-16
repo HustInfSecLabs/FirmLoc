@@ -3,11 +3,13 @@
 import os
 import json
 from datetime import datetime
-from uuid import uuid4
 
 from tools.bindiff_tool import run_bindiff
+from tools.bindiff_visual import bindiff_ui
+from utils.utils import copy_file, cleanup_dir
 from log import logger
 from state import ProgressEnum, TaskStatusEnum
+
 
 class BindiffAgent:
     def __init__(self, chat_id: str, task_name: str = "bindiff_compare"):
@@ -30,7 +32,9 @@ class BindiffAgent:
             "timestamp": str(datetime.now())
         }
 
-    def execute(self, primary_export: str, secondary_export: str) -> dict:
+    def execute(self, primary_export: str, secondary_export: str, output_dir: str) -> dict:
+        self.output_dir = output_dir
+        self.state_file = os.path.join(self.output_dir, f"{self.task_name}_state.json")
         self.status = TaskStatusEnum.IN_PROGRESS
         self.state["status"] = str(self.status.name)
         self.state["input"] = {
@@ -41,6 +45,14 @@ class BindiffAgent:
         self._save_state()
 
         result = run_bindiff(primary_export, secondary_export, self.output_dir)
+        file1 = os.path.basename(primary_export)
+        file2 = os.path.basename(secondary_export)
+        src_name = f"{os.path.splitext(file1)[0]}_vs_{os.path.splitext(file2)[0]}.BinDiff"
+        # 目标路径为当前目录下的test文件夹
+        copy_file(os.path.join(self.output_dir, src_name), os.path.join("test"))
+        # bindiff截图
+        # bindiff_ui(os.path.basename(primary_export), os.path.join(self.output_dir, "images"))
+        cleanup_dir(os.path.join("test"))
 
         if result.get("success"):
             self.status = TaskStatusEnum.COMPLETED

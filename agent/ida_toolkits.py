@@ -11,6 +11,8 @@ import io
 from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
 
+from utils.utils import copy_file
+
 logger = logging.getLogger(__name__)
 
 
@@ -149,6 +151,7 @@ class IdaToolkit(BaseToolkit):
                 for chunk in response.iter_content(1024):
                     f.write(chunk)
             logger.info(f"BinExport successfully! Results saved to: {output_file_path}")
+            copy_file(output_file_path, os.path.join("test"))  # Copy the result file to the screenshots directory
 
 
             # 3. Export pseudo C code (only upload filename)
