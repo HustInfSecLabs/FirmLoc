@@ -39,7 +39,7 @@ class BinwalkAgent(Agent):
         
         try:
             # 执行binwalk -e进行分析和提取
-            extract_cmd = ['binwalk', '-e', firmware_path]
+            extract_cmd = ['binwalk', '-Me', firmware_path]
             extract_path = firmware_dir  # 运行binwalk提取的目录路径
             os.makedirs(extract_path, exist_ok=True)
             
