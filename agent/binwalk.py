@@ -43,17 +43,16 @@ class BinwalkAgent(Agent):
             extract_path = firmware_dir  # 运行binwalk提取的目录路径
             os.makedirs(extract_path, exist_ok=True)
             
-            current_dir = os.getcwd()
-            os.chdir(extract_path)
-            
             result_output = subprocess.run(
                 extract_cmd,
                 capture_output=True,
                 text=True,
-                check=True
+                check=True,
+                cwd=str(extract_path)
             )
-            
-            os.chdir(current_dir)
+
+            if result_output.returncode != 0:
+                raise RuntimeError(f"binwalk 执行失败: {result_output.returncode}")
             
             extracted_dirs = sorted(glob.glob(f"{extract_path}/_{firmware_name}*.extracted"), key=os.path.getmtime)
 
