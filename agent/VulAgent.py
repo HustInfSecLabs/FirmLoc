@@ -12,11 +12,11 @@ from agent.bindiff_agent import BindiffAgent
 from agent.ida_toolkits import IdaToolkit
 from agent.binwalk import BinwalkAgent
 from agent.online_search import OnlineSearchAgent
-from agent.llm_diff import Refiner
+from agent.llm_diff import main as llm_diff
 from agent.binary_filter import BinaryFilterAgent
 from log import logger
 from utils import ConfigManager, PlanManager
-from utils.utils import get_firmware_files
+from utils.utils import get_firmware_files, copy_file
 
 
 
@@ -260,7 +260,7 @@ class VulnAgent:
         self.user_model = user_model
         self.planner_model = planner_model
         self.config_dir = config_dir
-        self.chat_id = chat_id
+        self.chat_id = str(chat_id)
         self.user_input = user_input
         self.websocket = websocket
         
@@ -284,7 +284,6 @@ class VulnAgent:
         self.BinaryFilterAgent = BinaryFilterAgent(self.planner_model)
         self.IDAAgent = IdaToolkit()
         self.BindiffAgent = BindiffAgent(self.chat_id)
-        self.LLM_DIFF = Refiner()
         
         self.config_manager = ConfigManager(
             chat_id=self.chat_id,
@@ -346,6 +345,21 @@ class VulnAgent:
         """
         # self.tasks = self.user_agent.process(query)
         # logger.info(f"Tasks: {self.tasks}")
+        def show_file_info(full_path: str):
+            """
+            给定目录路径和文件名，打印文件的完整路径以及文件大小。
+            """
+            
+            # 检查文件是否存在
+            if not os.path.isfile(full_path):
+                print(f"[错误] 文件不存在：{full_path}")
+                return
+            
+            # 获取文件大小（字节）
+            size_bytes = os.path.getsize(full_path)
+            
+            print(f"文件路径：{full_path}")
+            print(f"文件大小：{size_bytes} 字节")
 
         self.tasks = """
         ## 1.使用Binwalk提取固件文件
@@ -401,13 +415,12 @@ class VulnAgent:
         # llm_result = call_model()
         llm_result = """- **boxlogin**: 通常负责处理用户登录，可能是绕过身份验证的主要目标。
 - **uhttpd**: 作为Web服务器，它可能展现出不当的身份验证处理。
-- **smbd**: 处理文件分享和访问，可能存在敏感信息的访问漏洞。
 - **ntgr_sw_api**: 这个API接口可能是很多服务的交互点，需分析其实现是否存在薄弱环节。"""
-        llm_result = self.BinaryFilterAgent.process(
-            binary_filename="Netgear R9000",
-            directory_structure=binwalk_results[0]['extracted_files_path'],
-            cve_details="CVE-2019-20760"
-        )
+        # llm_result = self.BinaryFilterAgent.process(
+        #     binary_filename="Netgear R9000",
+        #     directory_structure=binwalk_results[0]['extracted_files_path'],
+        #     cve_details="CVE-2019-20760"
+        # )
         logger.info(f"LLM result: {llm_result}")
 
 
@@ -419,20 +432,6 @@ class VulnAgent:
         # self.command = f"ida -o {output_file1} {file1}"
         # self.tool_result = result1 + "\n" + result2
         await self.send_message("正在运行 IDA Decompiler...")
-        # await asyncio.sleep(10)
-
-        # bindiff_result = self.BindiffAgent.execute(output_file1, output_file2)
-        # print(bindiff_result)
-
-        # self.config_manager.update_agent_status("IDA Agent", "Bindiff Agent")
-        # self.config_manager.update_tool_status("IDA Decompiler", "Bindiff")
-        # self.tool = "Bindiff"
-        # self.tool_status = "running"
-        # self.agent = "Bindiff Agent"
-        # self.command = f"bindiff -o {bindiff_result['result'].get('output_dir')} {output_file1} {output_file2}"
-        # self.tool_result = bindiff_result["result"].get("stdout", "").strip()
-        # await self.send_message("正在运行 Bindiff...")
-        # # await asyncio.sleep(10)
 
         # 使用正则表达式提取所有 `**filename**` 的内容
         matches = re.findall(r'\*\*(\w+)\*\*', llm_result)
@@ -456,15 +455,26 @@ class VulnAgent:
             os.makedirs(idadir, exist_ok=True)
             output_path1 = os.path.join(idadir, f"{os.path.basename(file1)}")
             output_path2 = os.path.join(idadir, f"{os.path.basename(file2)}1")
+            show_file_info(file1)
+            show_file_info(file2)
+            file2 = copy_file(file2, os.path.dirname(file2))
+            from time import sleep
             result1 = self.IDAAgent.analyze_binary(file1, output_path1, ida_version="ida32")
             result2 = self.IDAAgent.analyze_binary(file2, output_path2, ida_version="ida32")
             print(result1)
             print(result2)
             output_file1 = os.path.join("test", f"{os.path.basename(file1)}.BinExport")
-            output_file2 = os.path.join("test", f"{os.path.basename(file2)}1.BinExport")
+            output_file2 = os.path.join("test", f"{os.path.basename(file2)}.BinExport")
             output_dir = os.path.join(bindiffdir, f"{os.path.basename(file1)}")
             bindiff_result = self.BindiffAgent.execute(output_file1, output_file2, output_dir)
             print(bindiff_result)
+            llm_diff(
+                chat_id=self.chat_id,
+                history_root=self.config_dir,
+                pre_c=os.path.join(output_path1,f"{os.path.basename(file1)}_pseudo.c"),
+                post_c=os.path.join(output_path2,f"{os.path.basename(file2)}_pseudo.c"),
+                binary_filename = os.path.basename(file1)
+            )
 
 
         # self.config_manager.update_agent_status("Bindiff Agent", "Detection Agent")
