@@ -9,11 +9,10 @@ CLICK_BUTTONS = {
     "double_click": ["--repeat", "2", "--delay", "10", "1"],
 }
 
-HOME = "/home/placebo"  # 截图保存的路径, 请根据需要修改 username
-DIFF_FILE = "/home/placebo/VulAgent/test2/"              
+HOME = "/home/wzh/Desktop/Project/VulnAgent/"  # 截图保存的路径, 请根据需要修改 username
+DIFF_FILE = "~/Desktop/Project/VulnAgent/test/"              
 # "/path/to/stack_overflow_demo.export"  # 请替换为实际的文件路径
-# window size 1916x915
-IMAGE_DIR = "/image/"
+IMAGE_DIR = "/images/"
 IMAGE_FILE = [
     "overview_screenshot.png",
     "call_graph_screenshot.png",
@@ -23,22 +22,26 @@ IMAGE_FILE = [
 ]
 
 ANCHOR = {
-    "PATH": (1312, 429),
-    "ICON": (79, 153),
-    "SEARCH_BOX1": (397, 368),  # Matched Functions
+    "PATH": (1671, 787),
+    "ICON": (155, 214),
+    "SEARCH_BOX1": (522, 425),  # Matched Functions
     "SEARCH_BOX2": (),  # Primary/Secondary Unmatched Functions
-    "MATCHED_FUNCTIONS": (392, 440), # Interval is 21, such as 408 -> 429
-    "SEARCH_BOX3": (792, 147), # Node Content
+    "MATCHED_FUNCTIONS": (368, 414), # Interval is 21, such as 408 -> 429
+    "SEARCH_BOX3": (1065, 141), # Node Content
 }
 
 # 坐标和延迟时间配置
 COORDINATES = {
-    "workplace": (90, 190),
+    "workplace": (178, 241),
     "diff_menu": ANCHOR["PATH"],
-    "default_file": (ANCHOR["PATH"][0] - 560, ANCHOR["PATH"][1]),
-    "confirm_ok": (ANCHOR["PATH"][0] - 171, ANCHOR["PATH"][1] + 242),
-    "rename_field": (ANCHOR["PATH"][0] - 14, ANCHOR["PATH"][1] + 135),
-    "confirm_add": (ANCHOR["PATH"][0] - 100, ANCHOR["PATH"][1] + 174),
+    # "default_file": (ANCHOR["PATH"][0] - 560, ANCHOR["PATH"][1]),
+    "default_file": (1133, 775),
+    # "confirm_ok": (ANCHOR["PATH"][0] - 171, ANCHOR["PATH"][1] + 242),
+    "confirm_ok": (1492, 1015),
+    # "rename_field": (ANCHOR["PATH"][0] - 14, ANCHOR["PATH"][1] + 135),
+    "rename_field": (1151, 927),
+    # "confirm_add": (ANCHOR["PATH"][0] - 100, ANCHOR["PATH"][1] + 174),
+    "confirm_add": (1559, 965),
     "overview_tab": ANCHOR["ICON"],
     "call_graph_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 17),
     "matched_functions_tab": (ANCHOR["ICON"][0] + 20, ANCHOR["ICON"][1] + 34),
@@ -131,6 +134,7 @@ def take_screenshots(output_image: str):
     ]
 
     for i, tab in enumerate(tabs):
+        os.makedirs(output_image, exist_ok=True)
         active_bindiff()
         time.sleep(DELAY_LONG)
         move_and_click(*COORDINATES[tab], "left_click")
@@ -201,5 +205,5 @@ def close_bindiff():
     
 if __name__ == "__main__":
     # 示例用法
-    bindiff_ui("test_diff_name1", HOME + IMAGE_DIR)
+    bindiff_ui("test_diff_name0514", HOME + IMAGE_DIR)
     # find_matched_function("main")

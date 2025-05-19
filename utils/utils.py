@@ -6,7 +6,7 @@ import os
 from log import logger
 
 
-def get_firmware_files(directory: str, recursive: bool = False) -> list:
+def get_firmware_files(directory: str, recursive: bool = False) -> List:
         """
         获取指定目录下的固件文件
         :param directory: 目标目录路径
@@ -73,7 +73,7 @@ def _generate_unique_name(src_file: str, dest_dir: str) -> str:
         # 生成带序号的新文件名
         new_name = f"{name_part}{counter}{ext}"
         counter += 1
-def copy_file(src_file: str, dest_dir: str) -> List[str]:
+def copy_file(src_file: str, dest_dir: str) -> str:
     """复制文件到目标目录"""
     try:
         # 验证源文件存在
@@ -90,6 +90,7 @@ def copy_file(src_file: str, dest_dir: str) -> List[str]:
         # 执行复制（保留元数据）
         shutil.copy2(src_file, dest_file)
         logger.info(f"文件复制成功: {src_file} -> {dest_file}")
+        return dest_file
     except Exception as e:
         logger.error(f"复制文件时发生错误: {str(e)}")
         raise

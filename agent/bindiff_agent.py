@@ -2,6 +2,7 @@
 
 import os
 import json
+import random
 from datetime import datetime
 
 from tools.bindiff_tool import run_bindiff
@@ -34,6 +35,7 @@ class BindiffAgent:
 
     def execute(self, primary_export: str, secondary_export: str, output_dir: str) -> dict:
         self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
         self.state_file = os.path.join(self.output_dir, f"{self.task_name}_state.json")
         self.status = TaskStatusEnum.IN_PROGRESS
         self.state["status"] = str(self.status.name)
@@ -51,7 +53,7 @@ class BindiffAgent:
         # 目标路径为当前目录下的test文件夹
         copy_file(os.path.join(self.output_dir, src_name), os.path.join("test"))
         # bindiff截图
-        # bindiff_ui(os.path.basename(primary_export), os.path.join(self.output_dir, "images"))
+        bindiff_ui(os.path.splitext(os.path.basename(primary_export))[0] + f"{str(random.randint(100000, 999999))}", os.path.join(self.output_dir, "images"))
         cleanup_dir(os.path.join("test"))
 
         if result.get("success"):
