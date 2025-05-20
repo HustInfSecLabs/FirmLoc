@@ -160,11 +160,18 @@ class IdaToolkit(BaseToolkit):
             # Check response status
             if response.status_code != 200:
                 raise RuntimeError(f"Analysis failed: HTTP {response.status_code} - {response.text}")
-            # Save the result file
-            pseudo_c_file_path = os.path.join(output_dir, file_name + "_pseudo.c")
-            with open(pseudo_c_file_path, 'wb') as f:
+                
+           # 接收 BinExport idb的压缩文件
+            bin_zip_path = os.path.join(output_dir, f"{file_name}_idao.zip")
+            with open(bin_zip_path, 'wb') as bin_zip_file:
                 for chunk in response.iter_content(1024):
-                    f.write(chunk)
+                    bin_zip_file.write(chunk)
+            
+            # Extract zip file
+            with zipfile.ZipFile(bin_zip_path, 'r') as zip_ref:
+                zip_ref.extractall(output_dir)
+            os.remove(bin_zip_path)
+            
             logger.info(f"Exported pseudo C code successfully! File saved to: {pseudo_c_file_path}")
 
             return True
