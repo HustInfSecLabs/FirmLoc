@@ -78,7 +78,8 @@ class IdaToolkit(BaseToolkit):
             bool: True if the analysis was successful, False otherwise.
         """
 
-        file_name = os.path.basename(input_file_path)
+        # file_name = os.path.basename(input_file_path)
+        file_name = input_file_path.split("/")[-1]
         file_dir = os.path.dirname(input_file_path)
 
         # Validate ida_version parameter
