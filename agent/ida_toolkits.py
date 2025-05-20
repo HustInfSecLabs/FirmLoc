@@ -11,8 +11,6 @@ import io
 from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
 
-from utils.utils import copy_file
-
 logger = logging.getLogger(__name__)
 
 
@@ -54,25 +52,20 @@ class IdaToolkit(BaseToolkit):
                     bin_export_url: str = "http://10.12.189.52:5000/export_binexport",
                     screenshot_url: str = "http://10.12.189.52:5000/reversing_analyze_screenshot",
                     pseudo_c_url = "http://10.12.189.52:5000/export_pseudo_c") -> bool:
-        r"""Analyze a binary file using IDA Pro through HTTP API endpoints.
-    
-            This function submits the binary to multiple analysis endpoints to generate:
-            - BinExport files
-            - Screenshots of the disassembly
-            - Pseudo-C code decompilation
+        r"""Analyze a binary file via HTTP API and save the result.
 
         Args:
             input_file_path (str): The path to the binary file to analyze.
             output_file_path (str, optional): The path to save the analysis results, include screenshots, BinExport, pseudo_c. 
-                Defaults to None, in which case it will be saved in the same path with `<input_file_path>`. 
+                Defaults to None, in which case it will be saved as `<input_file_path>`. 
             ida_version (str, optional): The version of IDA to use ("ida32" or "ida64"). 
-                Defaults to "ida32". 
+                Defaults to "ida32".
             bin_export_url (str, optional): The HTTP API endpoint for analysis. 
-                Defaults to "http://10.12.189.52:5000/export_binexport". 
-            screenshot_url (str, optional): The HTTP API endpoint for disassembly screenshots. 
-                Defaults to "http://10.12.189.52:5000/reversing_analyze_screenshot". 
-            pseudo_c_url (str, optional): The HTTP API endpoint for pseudo-C decompilation. 
-                Defaults to "http://10.12.189.52:5000/export_pseudo_c". 
+                Defaults to "http://10.12.189.52:5000/export_binexport".
+            screenshot_url (str, optional): The HTTP API endpoint for getting screenshot. 
+                Defaults to "http://10.12.189.52:5000/reversing_analyze_screenshot".
+            pseudo_c_url (str, optional): The HTTP API endpoint for getting pseudo_c. 
+                Defaults to "http://10.12.189.52:5000/export_pseudo_c".
 
         Returns:
             bool: True if the analysis was successful, False otherwise.
@@ -145,23 +138,8 @@ class IdaToolkit(BaseToolkit):
             # Check response status
             if response.status_code != 200:
                 raise RuntimeError(f"Analysis failed: HTTP {response.status_code} - {response.text}")
-            # Save the result file
-            output_file_path = os.path.join(output_dir, file_name + ".BinExport")
-            with open(output_file_path, 'wb') as f:
-                for chunk in response.iter_content(1024):
-                    f.write(chunk)
-            logger.info(f"BinExport successfully! Results saved to: {output_file_path}")
-            copy_file(output_file_path, os.path.join("test"))  # Copy the result file to the screenshots directory
-
-
-            # 3. Export pseudo C code (only upload filename)
-            logger.info("[3/3], Exporting pseudo C code...")
-            response = requests.post(pseudo_c_url, data=data, stream=True)
-            # Check response status
-            if response.status_code != 200:
-                raise RuntimeError(f"Analysis failed: HTTP {response.status_code} - {response.text}")
-                
-           # 接收 BinExport idb的压缩文件
+            
+            # 接收 BinExport idb的压缩文件
             bin_zip_path = os.path.join(output_dir, f"{file_name}_idao.zip")
             with open(bin_zip_path, 'wb') as bin_zip_file:
                 for chunk in response.iter_content(1024):
@@ -171,7 +149,22 @@ class IdaToolkit(BaseToolkit):
             with zipfile.ZipFile(bin_zip_path, 'r') as zip_ref:
                 zip_ref.extractall(output_dir)
             os.remove(bin_zip_path)
-            
+
+
+            logger.info(f"BinExport and idb successfully!")
+
+
+            # 3. Export pseudo C code (only upload filename)
+            logger.info("[3/3], Exporting pseudo C code...")
+            response = requests.post(pseudo_c_url, data=data, stream=True)
+            # Check response status
+            if response.status_code != 200:
+                raise RuntimeError(f"Analysis failed: HTTP {response.status_code} - {response.text}")
+            # Save the result file
+            pseudo_c_file_path = os.path.join(output_dir, file_name + "_pseudo.c")
+            with open(pseudo_c_file_path, 'wb') as f:
+                for chunk in response.iter_content(1024):
+                    f.write(chunk)
             logger.info(f"Exported pseudo C code successfully! File saved to: {pseudo_c_file_path}")
 
             return True
@@ -194,4 +187,4 @@ class IdaToolkit(BaseToolkit):
 if __name__ == "__main__":
     # Example usage
     toolkit = IdaToolkit()
-    toolkit.analyze_binary(r"/disk0/like/2025xa/owl/test/stack_overflow_demo_v1", output_dir=r"/disk0/like/2025xa/owl/test/20250514", ida_version="ida32",)
+    toolkit.analyze_binary(r"/disk0/like/2025xa/owl/test/stack_overflow_demo")
