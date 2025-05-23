@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import json
 from fastapi import WebSocket
 from pathlib import Path
 from typing import Set
@@ -20,243 +21,8 @@ from utils.utils import get_firmware_files, copy_file
 
 
 
-
-PROMPT ="""你是一个安全分析师，现在在进行漏洞复现，下面是Netgear R9000 设备的固件文件以及对应的CVE的相关信息，请分析哪个二进制文件可能有漏洞，下面是固件的usr/sbin目录 
-
-[directory]
-├── 11ad_fw_log_capture.sh
-├── 80211stats
-├── aclctl
-├── acld
-├── aclhijackdns
-├── acl_update_name
-├── afpd
-├── afppasswd
-├── am_listen
-├── api -> ntgr_sw_api
-├── app-register -> ntgr_sw_api
-├── apstats
-├── assocdenialnotify
-├── atd
-├── athadhoc
-├── athdiag
-├── athstats
-├── athstatsclr
-├── athtestcmd
-├── avahi-autoipd
-├── avahi-daemon
-├── avahi-dnsconfd
-├── bc
-├── blkid
-├── bond-ctrl
-├── bond-monitor
-├── bond-set
-├── bond-show
-├── boxlogin
-├── brctl
-├── build-ca
-├── build-dh
-├── build-inter
-├── build-key
-├── build-key-pass
-├── build-key-pkcs12
-├── build-key-server
-├── build-req
-├── build-req-pass
-├── check_lang
-├── check_time_machine
-├── chroot -> ../../bin/busybox
-├── clean-all
-├── cmd_cron
-├── cnid_dbd
-├── cnid_metad
-├── crond -> ../../bin/busybox
-├── dbus-daemon
-├── detach_afp_shares
-├── detectSATA
-├── detwan
-├── dev-scan
-├── dhcp6c
-├── dhcp6ctl
-├── dhcp6s
-├── disktype
-├── dlclient
-├── dlna -> ntgr_sw_api
-├── dns-hijack
-├── dnsmasq
-├── dsyslog
-├── e2fsck
-├── ebtables
-├── eeprog
-├── emule_firewall
-├── ethtool
-├── ez-ipupdate
-├── file_notify
-├── firewall -> ntgr_sw_api
-├── flash_erase
-├── forked-daapd
-├── ftpload -> /dev/null
-├── ftptop
-├── getpcode
-├── get_plex_pcode
-├── greendownload
-├── green_download.sh
-├── green_download_upgrade.sh
-├── hash-data
-├── hostapd
-├── hostapd_cli
-├── icqm
-├── inetd
-├── inherit-inter
-├── inotifywait
-├── inotifywatch
-├── internet -> ntgr_sw_api
-├── ip
-├── ip6tables -> xtables-multi
-├── ip6tables-restore -> xtables-multi
-├── ip6tables-save -> xtables-multi
-├── ipp
-├── iptables -> xtables-multi
-├── iptables-restore -> xtables-multi
-├── iptables-save -> xtables-multi
-├── itunes_allow_control
-├── iw
-├── iwconfig
-├── iwgetid -> iwconfig
-├── iwlist -> iwconfig
-├── iwpriv -> iwconfig
-├── iwspy -> iwconfig
-├── jq
-├── lacp-debug
-├── lbd
-├── lbt
-├── list-crl
-├── lld2d
-├── lspci
-├── minidlna
-├── miniupnpd
-├── mke2fs
-├── mkfs.ext2 -> mke2fs
-├── mkfs.ext3 -> mke2fs
-├── mkfs.ext4 -> mke2fs
-├── mount.cifs
-├── mtdinfo
-├── nanddump
-├── nandtest
-├── nandwrite
-├── net-cgi
-├── netconn
-├── netconn.sh
-├── netdrive
-├── netdrive.sh
-├── net-scan
-├── net-wall
-├── nmbd -> samba_multicall
-├── noip2
-├── ntgrddns
-├── ntgr_sw_api
-├── ntgr_sw_api_event_notify
-├── ntpclient
-├── ntpclient-qos
-├── ntpst
-├── nusb_right.sh
-├── nvconfig -> ntgr_sw_api
-├── openvpn
-├── parted
-├── partprobe
-├── phddns
-├── pkitool
-├── pktlogconf
-├── pktlogdump
-├── plex_net_dev
-├── potd
-├── potval
-├── pppd
-├── ppp-nas
-├── proftpd
-├── px5g
-├── Qcmbr
-├── ra_check
-├── radardetect
-├── radardetect_cli
-├── radartool
-├── radvd
-├── radvdump
-├── rdate -> ../../bin/busybox
-├── readycloud_unregister
-├── remote_fsize
-├── remote_share_conf
-├── remote_smb_conf
-├── remote_user_conf
-├── repacd-run.sh
-├── revoke-full
-├── ripd
-├── ripngd
-├── samba_multicall
-├── save_shadow
-├── select_partition
-├── send_wol
-├── setpci
-├── sign-req
-├── smbclient
-├── smbd -> samba_multicall
-├── smbpasswd -> samba_multicall
-├── spectraltool
-├── ssdk_sh
-├── ssidsteering
-├── ssmtp
-├── stamac
-├── system -> ntgr_sw_api
-├── taskset
-├── tc
-├── tcpdump
-├── telnetenable
-├── thermaltool
-├── tx99tool
-├── ubiattach
-├── ubidetach
-├── ubimkvol
-├── ubinfo
-├── ubinize
-├── uhttpd
-├── update_afp
-├── update-pciids
-├── update_smb
-├── update_user
-├── usb_cfg
-├── utelnetd
-├── vmstat
-├── vol_id
-├── wget
-├── wget_netgear
-├── whichopensslcnf
-├── wifitool
-├── wifi_try
-├── wigig_logcollector
-├── wigig_remoteserver
-├── wlanconfig
-├── wol
-├── wpa_supplicant
-├── wps_enhc
-├── xtables-multi
-└── zebra
-[/directory]
-
-[CVE details]
-CVE-2019-20760
-描述信息
-NETGEAR R9000 devices before 1.0.4.26 are affected by authentication bypass.
-[/CVE details]
-"""
-
-# 调用大模型分析哪个二进制文件可能有漏洞
-def call_model() -> str:
-    chat_model = AgentModel("GPT")
-    response = chat_model.chat(PROMPT)
-    return response
-
 class VulnAgent:
-    def __init__(self, chat_id: str, user_input: str, websocket: WebSocket, user_model: ChatModel = QwenChatModel(), planner_model: ChatModel = QwenChatModel(), config_dir: str = './history'):
+    def __init__(self, chat_id: str, user_input: str, websocket: WebSocket, user_model: ChatModel = AgentModel("GPT"), planner_model: ChatModel = AgentModel("GPT"), config_dir: str = './history'):
         self.user_model = user_model
         self.planner_model = planner_model
         self.config_dir = config_dir
@@ -302,7 +68,6 @@ class VulnAgent:
     async def send_message(self, content: str):
         """
         发送消息到 WebSocket
-        :
         """
         system_status = {
             "status": self.state.name,
@@ -310,19 +75,18 @@ class VulnAgent:
             "tool": self.tool
         }
 
+        tool_status = None
         if self.tool:
             tool_status = {
                 "type": "terminal",
                 "content": [
                     {
                         "user": "root@ubuntu:~$",
-                        "input": self.command,
-                        "output": self.tool_result
+                        "input": self.command or "",
+                        "output": self.tool_result or ""
                     }
                 ]
             }
-        else:
-            tool_status = None
 
         response = {
             "chat_id": self.chat_id,
@@ -333,8 +97,11 @@ class VulnAgent:
             "tool_status": tool_status
         }
 
-        await self.websocket.send_json(response)
-        logger.info(f"发送消息: {response}")
+        try:
+            await self.websocket.send_json(response)
+            logger.info(f"发送消息: {response}")
+        except Exception as e:
+            logger.error(f"发送消息失败: {str(e)}")
 
     async def chat(self):
         """
@@ -386,7 +153,8 @@ class VulnAgent:
         self.tool_status = "running"
         self.agent = "Online Search Agent"
         await self.send_message("正在运行 Online Search Agent...")
-        search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id="CVE-2019-20760")
+        await asyncio.sleep(0) 
+        search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id="CVE-2019-20760") # CVE-2019-20760 CVE-2021-20090 CVE-2024-39226
         logger.info(f"Online search result: {search_result}")
         
 
@@ -397,6 +165,7 @@ class VulnAgent:
         self.agent = "Binwalk Agent"
         self.command = "binwalk -e ..."
         await self.send_message("正在运行 Binwalk...")
+        await asyncio.sleep(0) 
         # await asyncio.sleep(10)  # 模拟处理间隔
         
         files = self.files
@@ -411,45 +180,40 @@ class VulnAgent:
             logger.info(f"Binwalk result: {binwalk_result}")
             binwalk_results.append(binwalk_result)
 
-        
-        # llm_result = call_model()
-        llm_result = """- **boxlogin**: 通常负责处理用户登录，可能是绕过身份验证的主要目标。
-- **uhttpd**: 作为Web服务器，它可能展现出不当的身份验证处理。
-- **ntgr_sw_api**: 这个API接口可能是很多服务的交互点，需分析其实现是否存在薄弱环节。"""
-        # llm_result = self.BinaryFilterAgent.process(
-        #     binary_filename="Netgear R9000",
-        #     directory_structure=binwalk_results[0]['extracted_files_path'],
-        #     cve_details="CVE-2019-20760"
-        # )
+        cve_details = ""
+        cwe = ""
+        with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
+            content = f.read()
+            content = json.loads(content)
+            cve_details = json.dumps(content['vulnerabilities'][0]['cve']['descriptions'][0]["value"])
+            cwe = json.dumps(content['vulnerabilities'][0]['cve']['weaknesses'][0]["description"][0]['value'])
+
+        print(f"cve_details: {cve_details}")
+        llm_result = self.BinaryFilterAgent.process(
+            # binary_filename="Buffalo WSR-2533DHPL2",
+            binary_filename="Netgear R9000",
+            # binary_filename="GL-iNet",
+            # extracted_files_path=os.path.join(binwalk_results[0]['extracted_files_path'],"squashfs-root/usr/sbin/"),
+            extracted_files_path=binwalk_results[0]['extracted_files_path'],
+            cve_details=cve_details
+        )
+        print(f"LLM result: {llm_result}")
         logger.info(f"LLM result: {llm_result}")
 
+        suspicious_files = [os.path.join(name['binary_path']) for name in llm_result["suspicious_binaries"]]
 
-        self.config_manager.update_agent_status("Binwalk Agent", "IDA Agent")
-        self.config_manager.update_tool_status("Binwalk", "IDA Decompiler")
-        self.tool = "IDA Decompiler"
-        self.tool_status = "running"
-        self.agent = "IDA Agent"
-        # self.command = f"ida -o {output_file1} {file1}"
-        # self.tool_result = result1 + "\n" + result2
-        await self.send_message("正在运行 IDA Decompiler...")
-
-        # 使用正则表达式提取所有 `**filename**` 的内容
-        matches = re.findall(r'\*\*(\w+)\*\*', llm_result)
-
-# 拼接路径
-        suspicious_files = [f"squashfs-root/usr/sbin/{name}" for name in matches]
-
+        # suspicious_files = [f"squashfs-root/usr/sbin/{name}" for name in matches]
         print(f"可疑文件: {suspicious_files}")
         idadir = os.path.join("/home/wzh/Desktop/Project/VulnAgent/history", self.chat_id, "ida")
         bindiffdir = os.path.join("/home/wzh/Desktop/Project/VulnAgent/history", self.chat_id, "bindiff")
         for file in suspicious_files:
             file1 = f"./{binwalk_results[0]['extracted_files_path']}/{file}"
-            file2 = f"./{binwalk_results[1]['extracted_files_path']}/{file}"
+            file2 = f"./{binwalk_results[1]['extracted_files_path']}/{file}" # 大模型回答与 路径有问题
             # 检查文件是否存在
-            if not os.path.exists(file1):
+            if not os.path.isfile(file1):
                 print(f"文件不存在: {file1}")
                 continue
-            if not os.path.exists(file2):
+            if not os.path.isfile(file2):
                 print(f"文件不存在: {file2}")
                 continue
             os.makedirs(idadir, exist_ok=True)
@@ -458,7 +222,19 @@ class VulnAgent:
             show_file_info(file1)
             show_file_info(file2)
             file2 = copy_file(file2, os.path.dirname(file2))
-            from time import sleep
+
+
+            self.config_manager.update_agent_status("Binwalk Agent", "IDA Agent")
+            self.config_manager.update_tool_status("Binwalk", "IDA Decompiler")
+            self.tool = "IDA Decompiler"
+            self.tool_status = "running"
+            self.agent = "IDA Agent"
+            # self.command = f"ida -o {output_file1} {file1}"
+            # self.tool_result = result1 + "\n" + result2
+            await self.send_message("正在运行 IDA Decompiler...")
+            await asyncio.sleep(0) 
+
+
             result1 = self.IDAAgent.analyze_binary(file1, output_path1, ida_version="ida32")
             result2 = self.IDAAgent.analyze_binary(file2, output_path2, ida_version="ida32")
             print(result1)
@@ -466,6 +242,16 @@ class VulnAgent:
             output_file1 = os.path.join("test", f"{os.path.basename(file1)}.BinExport")
             output_file2 = os.path.join("test", f"{os.path.basename(file2)}.BinExport")
             output_dir = os.path.join(bindiffdir, f"{os.path.basename(file1)}")
+
+
+            self.config_manager.update_agent_status("IDA Agent", "Bindiff Agent")
+            self.config_manager.update_tool_status("IDA Decompiler", "Bindiff")
+            self.tool = "Bindiff"
+            self.tool_status = "running"
+            self.agent = "Bindiff Agent"
+            await self.send_message("正在运行 Bindiff...")
+            await asyncio.sleep(0) 
+
             bindiff_result = self.BindiffAgent.execute(output_file1, output_file2, output_dir)
             print(bindiff_result)
             llm_diff(
@@ -473,18 +259,12 @@ class VulnAgent:
                 history_root=self.config_dir,
                 pre_c=os.path.join(output_path1,f"{os.path.basename(file1)}_pseudo.c"),
                 post_c=os.path.join(output_path2,f"{os.path.basename(file2)}_pseudo.c"),
-                binary_filename = os.path.basename(file1)
+                binary_filename = os.path.basename(file1),
+                cve_details=cve_details,
+                cwe=cwe,
             )
 
-
-        # self.config_manager.update_agent_status("Bindiff Agent", "Detection Agent")
-        # self.config_manager.update_tool_status("Bindiff")
-        # self.plan_manager.add_plan("## 3.使用Detection Agent分析文件")
-        # self.plan_manager.add_result(bindiff_result)
-        # self.agent = "Detection Agent"
-        # self.tool = None
-        # self.tool_status = "stop"
-        # await self.send_message("正在运行 Detection Agent...")
+        
         self.is_last = True
         self.state = ProgressEnum.COMPLETED
         response = ""
@@ -500,4 +280,3 @@ if __name__ == "__main__":
             break
 
         agent.run(user_input)
-        
