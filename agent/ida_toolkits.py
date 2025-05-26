@@ -51,7 +51,7 @@ class IdaToolkit(BaseToolkit):
                     ida_version: str = "ida32",
                     bin_export_url: str = "http://10.12.189.52:5000/export_binexport",
                     screenshot_url: str = "http://10.12.189.52:5000/reversing_analyze_screenshot",
-                    pseudo_c_url = "http://10.12.189.52:5000/export_pseudo_c") -> bool:
+                    pseudo_c_url = "http://10.12.189.52:5000/export_pseudo_c") -> dict:
         r"""Analyze a binary file via HTTP API and save the result.
 
         Args:
@@ -68,8 +68,17 @@ class IdaToolkit(BaseToolkit):
                 Defaults to "http://10.12.189.52:5000/export_pseudo_c".
 
         Returns:
-            bool: True if the analysis was successful, False otherwise.
+            dict: A dictionary containing the results of the analysis, including paths to screenshots, BinExport, and pseudo C code.
+            example:
+            {
+                "screenshots": ["/path/to/binfilename_asm_timestamp.png", "/path/to/binfilename_decomp_timestamp.png"],
+                "binexport": ["/path/to/binfilename.BinExport", "/path/to/binfilename.idb"],
+                "pseudo_c": "/path/to/binfilename_pseudo.c",
+                "state": True,
+                "error": None
+            }
         """
+        res_info = {}
 
         file_name = os.path.basename(input_file_path)
         file_dir = os.path.dirname(input_file_path)
@@ -108,6 +117,10 @@ class IdaToolkit(BaseToolkit):
                 
                 # Extract zip file
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    file_names = zip_ref.namelist()
+                    res_info['screenshots'] = [
+                        os.path.join(screenshot_dir, name) for name in file_names
+                    ]
                     zip_ref.extractall(screenshot_dir)
                 os.remove(zip_path)  # Delete the zip file
                 
@@ -147,6 +160,10 @@ class IdaToolkit(BaseToolkit):
             
             # Extract zip file
             with zipfile.ZipFile(bin_zip_path, 'r') as zip_ref:
+                file_names = zip_ref.namelist()
+                res_info['binexport'] = [
+                    os.path.join(output_dir, name) for name in file_names
+                ]
                 zip_ref.extractall(output_dir)
             os.remove(bin_zip_path)
 
@@ -165,14 +182,17 @@ class IdaToolkit(BaseToolkit):
             with open(pseudo_c_file_path, 'wb') as f:
                 for chunk in response.iter_content(1024):
                     f.write(chunk)
+            res_info['pseudo_c'] = pseudo_c_file_path
             logger.info(f"Exported pseudo C code successfully! File saved to: {pseudo_c_file_path}")
-
-            return True
+            res_info["state"] = True
+            return res_info
 
         except Exception as e:
             logger.error(f"Error during analysis: {str(e)}", exc_info=True)
             messagebox.showerror("Analysis Error", f"Analysis failed: {str(e)}")
-            return False
+            res_info["state"] = False
+            res_info["error"] = str(e)
+            return res_info
 
     def get_tools(self) -> List[FunctionTool]:
         r"""Returns a list of FunctionTool objects representing the functions in the toolkit.
@@ -187,4 +207,5 @@ class IdaToolkit(BaseToolkit):
 if __name__ == "__main__":
     # Example usage
     toolkit = IdaToolkit()
-    toolkit.analyze_binary(r"/disk0/like/2025xa/owl/test/stack_overflow_demo")
+    res = toolkit.analyze_binary(r"/disk0/like/2025xa/owl/test/stack_overflow_demo_v1", output_dir=r"/disk0/like/2025xa/owl/test/ida_test")
+    print(res)
