@@ -1,13 +1,13 @@
 import asyncio
 import os
-import re
+import time
 import json
 from fastapi import WebSocket
 from pathlib import Path
 from typing import Set
 
 from model import ChatModel, QwenChatModel, AgentModel
-from agent import UserAgent, PlannerAgent
+from agent import UserAgent, PlannerAgent, ida
 from state import ProgressEnum
 from agent.bindiff_agent import BindiffAgent
 from agent.ida_toolkits import IdaToolkit
@@ -65,33 +65,39 @@ class VulnAgent:
         self.results = None
         self.state = ProgressEnum.NOT_STARTED
     
-    async def send_message(self, content: str):
+
+    def on_status_update(self, command=None, tool=None, tool_status=None, tool_result=None):
+        if command is not None:
+            self.command = command
+        if tool is not None:
+            self.tool = tool
+        if tool_status is not None:
+            self.tool_status = tool_status
+        if tool_result is not None:
+            self.tool_result = tool_result
+
+    async def send_message(self, content: str, message_type="message", tool_type=None, tool_content=None, agent=None, tool=None, tool_status=None):
         """
         发送消息到 WebSocket
         """
         system_status = {
             "status": self.state.name,
-            "agent": self.agent,
-            "tool": self.tool
+            "agent": agent,
+            "tool": tool
         }
 
         tool_status = None
         if self.tool:
             tool_status = {
-                "type": "terminal",
-                "content": [
-                    {
-                        "user": "root@ubuntu:~$",
-                        "input": self.command or "",
-                        "output": self.tool_result or ""
-                    }
-                ]
+                "type": tool_type,
+                "title": tool_status,
+                "content": tool_content
             }
 
         response = {
             "chat_id": self.chat_id,
             "is_last": self.is_last,
-            "type": "message",
+            "type": message_type,
             "content": content,
             "system_status": system_status,
             "tool_status": tool_status
@@ -129,13 +135,13 @@ class VulnAgent:
             print(f"文件大小：{size_bytes} 字节")
 
         self.tasks = """
-        ## 1.使用Binwalk提取固件文件
-        ## 2.筛选出可能存在漏洞的二进制文件
-        ## 3.使用IDA导出两个不同版本二进制文件的.export文件
-        ## 4.使用BinDiff分析两个.export文件的差异
-        ## 5.分析BinDiff的结果，找出可能存在漏洞的函数
-        ## 6.使用IDA导出函数的伪C代码
-        ## 7.使用Detection Agent分析函数的伪C代码
+## 1.使用Binwalk提取固件文件
+## 2.筛选出可能存在漏洞的二进制文件
+## 3.使用IDA导出两个不同版本二进制文件的.Binexport文件
+## 4.使用BinDiff分析两个.export文件的差异
+## 5.分析BinDiff的结果，找出可能存在漏洞的函数
+## 6.使用IDA导出函数的伪C代码
+## 7.使用Detection Agent分析函数的伪C代码
         """
         logger.info(f"Tasks: {self.tasks}")
 
@@ -147,25 +153,36 @@ class VulnAgent:
             plan=self.tasks
         )
 
-        self.config_manager.update_agent_status(new_running_agent="Online Search Agent")
-        self.config_manager.update_tool_status(new_running_tool="Online Search")
-        self.tool = "Online Search"
-        self.tool_status = "running"
-        self.agent = "Online Search Agent"
-        await self.send_message("正在运行 Online Search Agent...")
+        self.config_manager.update_agent_status(new_running_agent="Intelligence Agent")
+        # self.config_manager.update_tool_status(new_running_tool="Online Search")
+        # self.tool = "Online Search"
+        # self.tool_status = "running"
+        self.agent = "Intelligence Agent"
+        self.tool = None
+        self.state = ProgressEnum.RUNNING
+        await self.send_message("情报收集智能体收集CVE相关信息",
+                                 message_type="header1",
+                                agent=self.agent,)
         await asyncio.sleep(0) 
-        search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id="CVE-2019-20760") # CVE-2019-20760 CVE-2021-20090 CVE-2024-39226
+        search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id="CVE-2021-20090") # CVE-2019-20760 CVE-2021-20090 CVE-2024-39226
         logger.info(f"Online search result: {search_result}")
+        await self.send_message(f"在线搜索结果: {search_result}",
+                                    message_type="message",
+                                    agent=self.agent)
+        await asyncio.sleep(0)
         
-
-        self.config_manager.update_agent_status("Online Search Agent", "Binwalk Agent")
-        self.config_manager.update_tool_status("Online Search", new_running_tool="Binwalk")
-        self.tool = "Binwalk"
-        self.tool_status = "running"
+        # time.sleep(15) 
+        self.config_manager.update_agent_status("Intelligence Agent", "Binwalk Agent")
+        # self.config_manager.update_tool_status("Online Search", new_running_tool="Binwalk")
+        # self.tool = "Binwalk"
+        # self.tool_status = "running"
         self.agent = "Binwalk Agent"
-        self.command = "binwalk -e ..."
-        await self.send_message("正在运行 Binwalk...")
-        await asyncio.sleep(0) 
+        self.tool = None
+        # self.command = "binwalk -e ..."
+        await self.send_message("Binwalk Agent提取固件文件",
+                                 message_type="header1",
+                                agent=self.agent)
+        await asyncio.sleep(5) 
         # await asyncio.sleep(10)  # 模拟处理间隔
         
         files = self.files
@@ -173,9 +190,12 @@ class VulnAgent:
         binwalk_results = []
 
         for file in files:
-            binwalk_result = self.BinwalkAgent.process(
+            binwalk_result = await self.BinwalkAgent.process(
                 task_id=self.chat_id,
-                firmware_path=str(file))
+                firmware_path=str(file),
+                config=self.config_manager,
+                send_message=self.send_message,
+                on_status_update=self.on_status_update)
             print(binwalk_result)
             logger.info(f"Binwalk result: {binwalk_result}")
             binwalk_results.append(binwalk_result)
@@ -189,9 +209,19 @@ class VulnAgent:
             cwe = json.dumps(content['vulnerabilities'][0]['cve']['weaknesses'][0]["description"][0]['value'])
 
         print(f"cve_details: {cve_details}")
+        self.config_manager.update_agent_status("Binwalk Agent", "Binary Filter Agent")
+        self.config_manager.update_tool_status("Binwalk", "Binary Filter")
+        # self.tool = "Binary Filter"
+        # self.tool = None
+        # self.tool_status = "running"
+        self.agent = "Binary Filter Agent"
+        await self.send_message("Binary Filter Agent筛选可疑二进制文件",
+                                 message_type="header1",
+                                agent=self.agent)
+        await asyncio.sleep(0)
         llm_result = self.BinaryFilterAgent.process(
-            # binary_filename="Buffalo WSR-2533DHPL2",
-            binary_filename="Netgear R9000",
+            binary_filename="Buffalo WSR-2533DHPL2",
+            # binary_filename="Netgear R9000",
             # binary_filename="GL-iNet",
             # extracted_files_path=os.path.join(binwalk_results[0]['extracted_files_path'],"squashfs-root/usr/sbin/"),
             extracted_files_path=binwalk_results[0]['extracted_files_path'],
@@ -199,16 +229,26 @@ class VulnAgent:
         )
         print(f"LLM result: {llm_result}")
         logger.info(f"LLM result: {llm_result}")
-
+        # time.sleep(30)
         suspicious_files = [os.path.join(name['binary_path']) for name in llm_result["suspicious_binaries"]]
 
         # suspicious_files = [f"squashfs-root/usr/sbin/{name}" for name in matches]
-        print(f"可疑文件: {suspicious_files}")
+        print(f"可疑文件列表: {suspicious_files}")
+        self.tool = None
+        formatted_lines = [f"{i+1}. {path}" for i, path in enumerate(suspicious_files)]
+
+        suspicious_lines = '\n'.join(formatted_lines)
+        await self.send_message(f"可疑文件: {suspicious_lines}",
+                                    message_type="message",
+                                    agent=self.agent)
+        await asyncio.sleep(0)
         idadir = os.path.join("/home/wzh/Desktop/Project/VulnAgent/history", self.chat_id, "ida")
         bindiffdir = os.path.join("/home/wzh/Desktop/Project/VulnAgent/history", self.chat_id, "bindiff")
         for file in suspicious_files:
-            file1 = f"./{binwalk_results[0]['extracted_files_path']}/{file}"
-            file2 = f"./{binwalk_results[1]['extracted_files_path']}/{file}" # 大模型回答与 路径有问题
+            # file1 = f"./{binwalk_results[0]['extracted_files_path']}/{file}"
+            file1 = os.path.join(binwalk_results[0]['extracted_files_path'], file) 
+            file2 = os.path.join(binwalk_results[1]['extracted_files_path'], file)
+            # file2 = f"./{binwalk_results[1]['extracted_files_path']}/{file}" # 大模型回答与 路径有问题
             # 检查文件是否存在
             if not os.path.isfile(file1):
                 print(f"文件不存在: {file1}")
@@ -225,36 +265,55 @@ class VulnAgent:
 
 
             self.config_manager.update_agent_status("Binwalk Agent", "IDA Agent")
-            self.config_manager.update_tool_status("Binwalk", "IDA Decompiler")
-            self.tool = "IDA Decompiler"
-            self.tool_status = "running"
+            # self.config_manager.update_tool_status("Binwalk", "IDA Decompiler")
+            # self.tool = "IDA Decompiler"
+            # self.tool_status = "running"
             self.agent = "IDA Agent"
+            self.tool = None
             # self.command = f"ida -o {output_file1} {file1}"
             # self.tool_result = result1 + "\n" + result2
-            await self.send_message("正在运行 IDA Decompiler...")
+            await self.send_message(f"IDA Agent分析二进制文件{file}",
+                                    message_type="header1",
+                                agent=self.agent)
             await asyncio.sleep(0) 
 
 
-            result1 = self.IDAAgent.analyze_binary(file1, output_path1, ida_version="ida32")
-            result2 = self.IDAAgent.analyze_binary(file2, output_path2, ida_version="ida32")
-            print(result1)
-            print(result2)
+            # result1 = self.IDAAgent.analyze_binary(file1, output_path1, ida_version="ida32")
+            # result2 = self.IDAAgent.analyze_binary(file2, output_path2, ida_version="ida32")
+            result1 = await ida.ida_process(input_file_path=file1, output_dir=output_path1, ida_version="ida32", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
+            await asyncio.sleep(1)
+            result2 = await ida.ida_process(input_file_path=file2, output_dir=output_path2, ida_version="ida32", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
+            await asyncio.sleep(1)  
+            # print(result1)
+            # print(result2)
             output_file1 = os.path.join("test", f"{os.path.basename(file1)}.BinExport")
             output_file2 = os.path.join("test", f"{os.path.basename(file2)}.BinExport")
             output_dir = os.path.join(bindiffdir, f"{os.path.basename(file1)}")
 
 
             self.config_manager.update_agent_status("IDA Agent", "Bindiff Agent")
-            self.config_manager.update_tool_status("IDA Decompiler", "Bindiff")
-            self.tool = "Bindiff"
-            self.tool_status = "running"
+            # self.config_manager.update_tool_status("IDA Decompiler", "Bindiff")
+            # self.tool = "Bindiff"
+            # self.tool_status = "running"
             self.agent = "Bindiff Agent"
-            await self.send_message("正在运行 Bindiff...")
+            self.tool = None
+            await self.send_message("Bindiff Agent对比两个二进制文件",
+                                    message_type="header1",
+                                agent=self.agent)
             await asyncio.sleep(0) 
 
-            bindiff_result = self.BindiffAgent.execute(output_file1, output_file2, output_dir)
+            bindiff_result = await self.BindiffAgent.execute(output_file1, output_file2, output_dir, self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
+            await asyncio.sleep(1)
             print(bindiff_result)
-            llm_diff(
+
+            self.agent = "Detection Agent"
+            self.tool = None
+            self.config_manager.update_agent_status("Bindiff Agent", "Detection Agent")
+            await self.send_message("Detection Agent分析Bindiff结果",
+                                    message_type="header1",
+                                agent=self.agent)
+            await asyncio.sleep(0)
+            await llm_diff(
                 chat_id=self.chat_id,
                 history_root=self.config_dir,
                 pre_c=os.path.join(output_path1,f"{os.path.basename(file1)}_pseudo.c"),
@@ -262,21 +321,44 @@ class VulnAgent:
                 binary_filename = os.path.basename(file1),
                 cve_details=cve_details,
                 cwe=cwe,
+                send_message=self.send_message
             )
-
+            await asyncio.sleep(1) 
         
         self.is_last = True
         self.state = ProgressEnum.COMPLETED
         response = ""
+        self.agent = None
+        self.tool = None
+        self.config_manager.update_agent_status(new_running_agent=None)
+        self.config_manager.update_tool_status(new_running_tool=None)
+        await self.send_message("系统运行完成。感谢使用 VulnAgent！",
+                                 message_type="message")
+        logger.info("系统运行完成")
 
         return response
 
-if __name__ == "__main__":
-    agent = VulnAgent()
-    while True:
-        user_input = input("请输入漏洞分析请求（输入 exit 退出）：\n> ")
-        if user_input.lower() in {"exit", "quit"}:
-            print("再见！")
-            break
-
-        agent.run(user_input)
+    def run(self):
+        """
+        运行聊天流程
+        """
+        try:
+            asyncio.create_task(self.chat())
+        except Exception as e:
+            logger.error(f"聊天过程中发生错误: {str(e)}")
+            self.state = ProgressEnum.FAILED
+            self.is_last = True
+            asyncio.create_task(self.send_message(f"聊天过程中发生错误: {str(e)}"))
+            return f"聊天过程中发生错误: {str(e)}"
+        finally:
+            self.config_manager.update_agent_status(new_running_agent=None)
+            self.config_manager.update_tool_status(new_running_tool=None)
+            self.tool = None
+            self.agent = None
+            self.command = None
+            self.tool_result = None
+            logger.info("聊天流程结束")
+            self.state = ProgressEnum.COMPLETED
+            self.is_last = True
+            asyncio.create_task(self.send_message("聊天流程已完成。感谢使用 VulnAgent！"))
+            return "聊天流程已完成。感谢使用 VulnAgent！"

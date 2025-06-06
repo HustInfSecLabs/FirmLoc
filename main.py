@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form, status, Request, Query, HTTPException, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -6,6 +7,8 @@ import os
 import time
 import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from enum import Enum
 from datetime import datetime, timezone, timedelta
@@ -43,6 +46,7 @@ FIRMWARE_EXTENSIONS = {
     ".srec", ".s19", ".s28", ".s37",  # Motorola S-records
     ".pat",  # Cisco firmware images
     ".ipsw", # Apple firmware bundles
+    ".tar"
 }
 
 # 消息类型枚举
@@ -69,7 +73,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.post("/v1/files")
 async def upload_file(
     file: UploadFile = File(..., max_size=10 * 1024 * 1024),  # 10MB限制
-    chat_id: int = Form(...)
+    chat_id: str = Form(...)
 ):
     # 检查文件类型
     filename = Path(file.filename).name
@@ -128,22 +132,34 @@ async def upload_file(
 async def chat(websocket: WebSocket):
     await websocket.accept()
     last_pong = datetime.now()
-    stop_event = asyncio.Event()  # 用于协调协程停止
+    stop_event = asyncio.Event()
+    worker_finished = asyncio.Event()
+    # 创建专用的线程池执行器
+    executor = ThreadPoolExecutor(max_workers=1)
 
     async def keep_alive():
         nonlocal last_pong
         while not stop_event.is_set():
-            await asyncio.sleep(30)
-            if (datetime.now() - last_pong).total_seconds() > 40:
+            await asyncio.sleep(10)  # 每10秒发送一次pong
+            if (datetime.now() - last_pong).total_seconds() > 1200:
+                logger.warning("No pong received in 20 minutes, closing WebSocket.")
                 stop_event.set()
                 try:
                     await websocket.close(code=1008)
                 except RuntimeError:
-                    pass  # 连接可能已关闭
+                    pass
                 break
+            
             try:
-                await websocket.send_json({"type": "ping"})
-            except RuntimeError:
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_json({"type": "pong"})
+                    logger.info("Keep-alive pong sent.")
+                else:
+                    logger.warning("WebSocket is already closed. Stopping keep_alive.")
+                    stop_event.set()
+                    break
+            except Exception as e:
+                logger.error(f"Keep-alive pong failed: {str(e)}")
                 stop_event.set()
                 break
 
@@ -151,57 +167,100 @@ async def chat(websocket: WebSocket):
         nonlocal last_pong
         while not stop_event.is_set():
             try:
-                data = await websocket.receive_text()
-                message = json.loads(data)
-
-                if message.get("type") == "pong":
-                    last_pong = datetime.now()
-                    continue
-
-                if not all(key in message for key in ["chat_id", "type", "content"]):
-                    try:
-                        await websocket.send_json({
-                            "error": "Invalid message format",
-                            "code": 400
-                        })
-                    except RuntimeError:
-                        stop_event.set()
-                    continue
-
-                if message["type"] == "message":
-                    VulAgent = VulnAgent(
-                        chat_id=message["chat_id"],
-                        user_input=message["content"],
-                        websocket=websocket,
-                    )
-                    await VulAgent.chat()
-
-            except json.JSONDecodeError:
-                try:
-                    await websocket.send_json({"error": "Invalid JSON", "code": 400})
-                except RuntimeError:
+                # 检查 worker 是否完成
+                if worker_finished.is_set():
+                    logger.info("Worker finished, closing WebSocket")
                     stop_event.set()
+                    break
+
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
+                message = json.loads(data)
+                logger.info(f"Received message: {message}")
+                
+                # 处理 ping/pong 消息
+                if message.get("type") in ["pong", "ping"]:
+                    last_pong = datetime.now()
+                    logger.info(f"Received {message['type']} message.")
+                    continue
+
+                # 校验消息格式
+                if not all(key in message for key in ["chat_id", "type", "content"]):
+                    await websocket.send_json({
+                        "error": "Invalid message format",
+                        "code": 400
+                    })
+                    continue
+
+                # 根据消息类型处理
+                if message["type"] == "message":
+                    # 在独立线程中运行 VulnAgent
+                    def run_agent():
+                        try:
+                            # 创建新的事件循环给VulnAgent使用
+                            new_loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(new_loop)
+                            
+                            agent = VulnAgent(message["chat_id"], message["content"], websocket)
+                            
+                            # 在新事件循环中运行chat
+                            new_loop.run_until_complete(agent.chat())
+                            logger.info("VulnAgent.chat completed successfully")
+                        except Exception as e:
+                            logger.error("VulnAgent.chat 线程内错误: %s", e)
+                        finally:
+                            # 关闭新事件循环
+                            new_loop.close()
+                            # 通知主协程worker已完成
+                            main_loop = asyncio.get_event_loop()
+                            main_loop.call_soon_threadsafe(worker_finished.set)
+
+                    # 使用线程池执行
+                    await asyncio.get_event_loop().run_in_executor(executor, run_agent)
+                    
+                else:
+                    await websocket.send_json({
+                        "error": f"Unsupported message type: {message['type']}",
+                        "code": 400
+                    })
+
+            except asyncio.TimeoutError:
+                continue  # 继续循环检查 worker_finished
+            except json.JSONDecodeError:
+                await websocket.send_json({"error": "Invalid JSON", "code": 400})
             except WebSocketDisconnect:
+                logger.info("WebSocket disconnected.")
                 stop_event.set()
                 break
-            except RuntimeError:
+            except Exception as e:
+                logger.error(f"Error in receive_messages: {str(e)}")
                 stop_event.set()
                 break
 
     try:
+        # 并发运行keep_alive和receive_messages
         await asyncio.gather(
             keep_alive(),
-            receive_messages()
+            receive_messages(),
+            return_exceptions=True
         )
     except Exception as e:
-        print(f"WebSocket error: {str(e)}")
+        logger.error(f"WebSocket error: {str(e)}")
     finally:
         if not stop_event.is_set():
             stop_event.set()
+        
+        # 关闭线程池
+        executor.shutdown(wait=False)
+        
         try:
-            await websocket.close()
+            if websocket.client_state == WebSocketState.CONNECTED:
+                logger.info("Closing WebSocket connection.")
+                await websocket.send_json({"type": "close", "message": "Chat completed"})
+                await asyncio.sleep(1)
+                await websocket.close()
         except RuntimeError:
-            pass  # 连接可能已关闭
+            logger.warning("WebSocket already closed.")
+            pass
 
 
 
@@ -232,4 +291,4 @@ async def get_chat_list():
    
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8888)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
