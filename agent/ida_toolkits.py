@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class IdaToolkit(BaseToolkit):
     r"""A class representing a toolkit for Ida binary analysis."""
 
-    def get_screenshots(self, input_file_path: str, output_dir: str, 
+    async def get_screenshots(self, input_file_path: str, output_dir: str, 
                         screenshot_url: str = "http://10.12.189.52:5000/reversing_analyze_screenshot") -> List[str]:
         r"""Get screenshots from the screenshot service.
         
@@ -33,7 +33,7 @@ class IdaToolkit(BaseToolkit):
         """
         if output_dir is None:
             output_dir = os.path.join(os.path.dirname(input_file_path), "screenshots")
-
+        os.makedirs(output_dir, exist_ok=True)  # Ensure output directory exists
         file_name = os.path.basename(input_file_path)
         
         with open(input_file_path, 'rb') as f:
@@ -43,7 +43,7 @@ class IdaToolkit(BaseToolkit):
         
         if screenshot_response.status_code != 200:
             logger.warning(f"Screenshot service failed: HTTP {screenshot_response.status_code}")
-            return res_info
+            return []
             
         # Save zip file and extract it
         zip_path = os.path.join(output_dir, f"{file_name}_screenshots.zip")
@@ -61,7 +61,7 @@ class IdaToolkit(BaseToolkit):
         
         return screenshots_path
     
-    def get_binexport(self, input_file_path: str, output_dir: str, 
+    async def get_binexport(self, input_file_path: str, output_dir: str, 
                         ida_version: str = "ida32", 
                         bin_export_url: str = "http://10.12.189.52:5000/export_binexport") -> List[str]:
         r"""Get BinExport and IDB files from the analysis service.
@@ -107,7 +107,7 @@ class IdaToolkit(BaseToolkit):
         logger.info(f"BinExport and idb successfully!")
         return binexports_path
 
-    def get_pseudo_c(self, input_file_path: str, output_dir: str,
+    async def get_pseudo_c(self, input_file_path: str, output_dir: str,
                         ida_version: str = "ida32",
                         pseudo_c_url: str = "http://10.12.189.52:5000/export_pseudo_c") -> str:
         r"""Get pseudo C code from the analysis service.
