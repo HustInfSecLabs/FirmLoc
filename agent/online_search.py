@@ -58,7 +58,7 @@ class OnlineSearchAgent(Agent):
             
             self._update_status_ini(work_dir, None, None, None, result, cve_id)
             
-            return json.dumps(result)
+            return result
             
         except Exception as e:
             error_result = {

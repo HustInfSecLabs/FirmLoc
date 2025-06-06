@@ -5,6 +5,7 @@ class ProgressEnum(int, Enum):
     """
     Enum for progress status.
     """
+    FAILED = -1
     NOT_STARTED = 0
     USER_AGENT = 1
     PLANNER_AGENT = 2
@@ -14,6 +15,7 @@ class ProgressEnum(int, Enum):
     LOCATIONAGENT = 6
     DETECTIONAGENT = 7
     COMPLETED = 8
+    RUNNING = 9
 
 
 class TaskStatusEnum(int, Enum):
