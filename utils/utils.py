@@ -2,6 +2,8 @@ from typing import List
 from pathlib import Path
 import shutil
 import os
+import base64
+from datetime import datetime
 
 from log import logger
 
@@ -25,6 +27,7 @@ def get_firmware_files(directory: str, recursive: bool = False) -> List:
             '.tar',  # 打包固件
             '.gz',   # 压缩固件
             '.upd',  # 通用更新文件
+            '.w',
         }
 
         # 验证目录是否存在
@@ -51,7 +54,8 @@ def get_firmware_files(directory: str, recursive: bool = False) -> List:
                 # 处理无法访问的文件
                 print(f"跳过无法访问的文件: {item} - {str(e)}")
                 continue
-
+        # （按文件名升序）
+        firmware_files.sort(key=lambda x: x.lower())
         return firmware_files
 
 
@@ -108,3 +112,39 @@ def cleanup_dir(dst_dir):
                 logger.info(f"已删除：{file_path.name}")
             except Exception as e:
                 logger.info(f"[错误] 删除文件失败 {file_path.name}：{e}")
+
+
+
+def rename_file_with_b64_timestamp(file_path):
+    """
+    将文件名重命名为base64编码+时间戳格式(保留扩展名)
+    
+    参数：
+    file_path : 原始文件的相对/绝对路径
+    
+    返回：
+    new_path : 重命名后的新路径
+    """
+    # 分割目录和完整文件名
+    directory = os.path.dirname(file_path)
+    full_name = os.path.basename(file_path)
+    
+    # 拆分文件名和扩展名
+    basename, ext = os.path.splitext(full_name)
+    
+    # 生成base64编码文件名（URL安全格式）
+    encoded_name = base64.urlsafe_b64encode(basename.encode()).decode().rstrip('=')
+    
+    # 生成时间戳（格式：YYYYMMDDHHMMSS）
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    
+    # 构建新文件名
+    new_filename = f"{encoded_name}_{timestamp}{ext}"
+    
+    # 组合新路径
+    new_path = os.path.join(directory, new_filename)
+    
+    # 执行重命名
+    os.rename(file_path, new_path)
+    logger.info(f"文件重命名成功: {file_path} -> {new_path}")
+    return new_path

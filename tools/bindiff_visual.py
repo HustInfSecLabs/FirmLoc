@@ -70,13 +70,15 @@ def bindiff_ui(diff_name: str, output_image: str):
         load_diff_file(diff_name)
 
         # 截图各个视图
-        take_screenshots(output_image)
+        screenshots =  take_screenshots(output_image)
         
         delete_diff_file(DIFF_FILE)
         # Exit BinDiff
         close_bindiff()
+        return screenshots
     except Exception as e:
         print(f"运行 BinDiff 时发生错误: {e}")
+        return []
 
 
 def open_workplace():
@@ -132,7 +134,7 @@ def take_screenshots(output_image: str):
         "primary_unmatched_tab",
         "secondary_unmatched_tab",
     ]
-
+    screenshots = []
     for i, tab in enumerate(tabs):
         os.makedirs(output_image, exist_ok=True)
         active_bindiff()
@@ -140,8 +142,11 @@ def take_screenshots(output_image: str):
         move_and_click(*COORDINATES[tab], "left_click")
         time.sleep(DELAY_LONG)
         screenshot_path = os.path.join(output_image, IMAGE_FILE[i])
+        screenshots.append(screenshot_path)
         subprocess.run(["scrot", "-u", screenshot_path])
         time.sleep(DELAY_LONG)
+
+    return screenshots
 
 def scrot(path: str):
     try:
