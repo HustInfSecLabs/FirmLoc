@@ -7,6 +7,8 @@ from .base import Agent
 from model import ChatModel
 from datetime import datetime
 import glob
+import asyncio
+from utils import ConfigManager
 
 class BinwalkAgent(Agent):
     """
@@ -15,8 +17,15 @@ class BinwalkAgent(Agent):
     
     def __init__(self, chat_model: ChatModel) -> None:
         super().__init__(chat_model)
+        self.agent = "Binwalk Agent"
+        self.tool = "Binwalk"
+        self.tool_status = "stop"
+        self.command = None
+        self.tool_result = None
+        self.tool_type = "terminal"
+
         
-    def process(self, task_id: str, firmware_path: str) -> str:
+    async def process(self, task_id: str, firmware_path: str, config: ConfigManager, send_message=None, on_status_update=None) -> str:
         if not task_id or not firmware_path:
             return json.dumps({
                 'status': 'error',
@@ -41,6 +50,26 @@ class BinwalkAgent(Agent):
             # 执行binwalk -e进行分析和提取
             extract_cmd = ['binwalk', '-Me', firmware_path]
             extract_path = firmware_dir  # 运行binwalk提取的目录路径
+            # 更新状态
+            config.update_tool_status("Online Search", "Binwalk")
+            self.tool_status = "running"
+            if on_status_update:
+                on_status_update(' '.join(extract_cmd), self.tool, self.tool_status)
+            tool_content = [
+                {
+                    "user": "wzh@ubuntu:~$",
+                    "input": ' '.join(extract_cmd),
+                    "output": None
+                }
+            ]
+            # asyncio.create_task(send_message(
+            #     f"正在执行: {' '.join(extract_cmd)}", 
+            #     "command", 
+            #     self.tool_type, 
+            #     tool_content,
+            #     agent=self.agent,
+            #     tool=self.tool,
+            #     tool_status=self.tool_status))
             os.makedirs(extract_path, exist_ok=True)
             
             result_output = subprocess.run(
@@ -60,7 +89,31 @@ class BinwalkAgent(Agent):
                 raise RuntimeError("binwalk 未提取出任何目录")
 
             actual_extracted_path = extracted_dirs[-1]  # 实际提取完成后提取出的文件夹路径
-
+            
+            # 更新状态
+            config.update_tool_status("Binwalk")
+            self.tool_status = "completed"
+            on_status_update(tool_status = self.tool_status)
+            tool_content[0]["output"] = result_output.stdout
+            # asyncio.create_task(send_message(
+            #     f"{' '.join(extract_cmd)}", 
+            #     "command", 
+            #     self.tool_type, 
+            #     tool_content,
+            #     agent=self.agent,
+            #     tool=self.tool,
+            #     tool_status=self.tool_status))
+            if send_message:
+                await send_message(
+                        f"{' '.join(extract_cmd)}", 
+                        "command", 
+                        self.tool_type, 
+                        tool_content,
+                        agent=self.agent,
+                        tool=self.tool,
+                        tool_status=self.tool_status)
+            # asyncio.create_task(asyncio.sleep(1))  # 确保消息发送完成
+                await asyncio.sleep(1)
             # 保存终端输出结果
             with open(firmware_dir / 'binwalk_result.txt', 'w') as f:
                 f.write(result_output.stdout)
