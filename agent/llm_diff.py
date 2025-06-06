@@ -61,6 +61,15 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
 
 """
 
+SUMMARY_PROMPT = """
+你是一个漏洞分析结果的总结助手。
+请根据以下漏洞分析结果，生成一个简洁的总结报告。
+
+[漏洞分析结果]
+{$result$}
+[漏洞分析结果 end]
+
+"""
 # GPT 调用
 COST_TOKEN = 0
 TPM = 4000000
@@ -96,10 +105,10 @@ def gpt_inference(prompt: str = None, temperature: int = 0, default_system_promp
 
     # rate limit
     prompt_length = len(gpt_encoder.encode(prompt))
-    if MODEL in ["gpt-4o-mini", "o3-mini-2025-01-31", "gpt-4o"]:
-        if COST_TOKEN + prompt_length > TPM:
-            time.sleep(70)
-            COST_TOKEN = 0
+    # if MODEL in ["gpt-4o-mini", "o3-mini-2025-01-31", "gpt-4o"]:
+    #     if COST_TOKEN + prompt_length > TPM:
+    #         time.sleep(70)
+    #         COST_TOKEN = 0
 
     if MODEL == "o3-mini-2025-01-31":
         completion = client.chat.completions.create(model=MODEL, messages=messages)
@@ -278,6 +287,8 @@ def write_extracted(pseudo_file, base_names, out_dir):
 class Refiner:
     def __init__(self, LOG_FILE):
         self.log = LOG_FILE
+        self.agent = "Detection Agent"
+
         #api_key = "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"
         #if not api_key:
         #    raise RuntimeError("请先通过环境变量 OPENAI_API_KEY 设置你的 API Key")
@@ -286,7 +297,7 @@ class Refiner:
     def make_prompt(self, fa_content, fb_content, cve_details=None, cwe=None):
         return PROMPT.replace("{$filea$}", fa_content).replace("{$fileb$}", fb_content).replace("{$cve_details$}", cve_details if cve_details else "").replace("{$cwe$}", cwe if cwe else "")
 
-    def query2bot(self, fa, fb, cve_details=None, cwe=None):
+    def query2bot(self, fa, fb, cve_details=None, cwe=None) -> str:
         print(f"→ 开始分析 {os.path.basename(fa)} vs {os.path.basename(fb)}")
 
         # 读两个.c文件的内容
@@ -322,12 +333,14 @@ class Refiner:
         except Exception as e:
             print(f"写日志失败: {e}")
 
+        return result if result else None
 
 
-def main(chat_id: str,
+
+async def main(chat_id: str,
          history_root: str | Path,
          binary_filename: str,
-         pre_c: str = None, post_c: str = None, cve_details: str = None, cwe: str = None):
+         pre_c: str = None, post_c: str = None, cve_details: str = None, cwe: str = None, send_message=None):
     # ---------- 动态定位 ----------
     paths = locate_paths(chat_id, history_root, binary_filename)
     WORK_DIR     = Path(paths["WORK_DIR"])     
@@ -371,6 +384,9 @@ def main(chat_id: str,
 
     if not func_mapping:
         print("没有解析到变化的函数对，退出")
+        await send_message("没有解析到变化的函数对",
+                           "message",
+                           agent="Detection Agent")
         return
 
     # 3. 拆分伪C文件，只提取需要分析的函数
@@ -387,10 +403,41 @@ def main(chat_id: str,
         #print(f"→ 准备分析 {os.path.basename(pre_func_path)} vs {os.path.basename(post_func_path)}")
         
         if os.path.exists(pre_func_path) and os.path.exists(post_func_path):
-            r.query2bot(pre_func_path, post_func_path, cve_details, cwe)
+            result = r.query2bot(pre_func_path, post_func_path, cve_details, cwe)
+            if send_message:
+                await send_message(
+                    f"大模型分析 {os.path.basename(pre_func_path)} vs {os.path.basename(post_func_path)}结果：\n{result}",
+                    "message",
+                    agent = r.agent
+                )
         else:
             print(f"缺少文件 {pre_func_path} 或 {post_func_path}，跳过")
-
+    # 5. 最后生成总结
+    try:
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            results = f.read()
+        summary_prompt = SUMMARY_PROMPT.replace("{$result$}", results)
+        summary = gpt_inference(
+            prompt=summary_prompt,
+            temperature=0,
+            default_system_prompt="You are a security analysis summary assistant."
+        )
+        print("\n总结报告：")
+        print(summary)
+        if send_message:
+            await send_message(
+                f"漏洞分析总结：\n{summary}",
+                "message",
+                agent=r.agent
+            )
+    except Exception as e:
+        print(f"生成总结失败: {e}")
+        if send_message:
+            await send_message(
+                f"未分析出差异结果",
+                "message",
+                agent=r.agent
+            )
     print("\n全部分析完成！")
 
 if __name__ == "__main__":
