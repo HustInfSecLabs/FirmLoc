@@ -1,12 +1,8 @@
 import logging
 import os
-import tempfile, zipfile
+import zipfile
 from typing import List
 import requests
-import tkinter as tk
-from tkinter import messagebox
-from PIL import Image, ImageTk
-import io
 
 from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
@@ -18,6 +14,19 @@ logger = logging.getLogger(__name__)
 
 class IdaToolkit(BaseToolkit):
     r"""A class representing a toolkit for Ida binary analysis."""
+
+    def is_binary_file(self, file_path: str) -> bool:
+        r"""Check if a file is a binary file based on its content."""
+        with open(file_path, 'rb') as f:
+            chunk = f.read(1024)
+            if b'\x00' in chunk:
+                return True
+            text_chars = bytearray({7,8,9,10,12,13,27} | set(range(0x20, 0x100)) - {0x7f})
+            if not chunk:
+                return False
+            if float(len(chunk.translate(None, text_chars))) / len(chunk) > 0.3:
+                return True
+            return False
 
     async def get_screenshots(self, input_file_path: str, output_dir: str, 
                         screenshot_url: str = "http://10.12.189.52:5000/reversing_analyze_screenshot") -> List[str]:
@@ -31,6 +40,13 @@ class IdaToolkit(BaseToolkit):
         Returns:
             list: List containing screenshot paths.
         """
+        if not os.path.exists(input_file_path):
+            logger.error(f"Input file does not exist: {input_file_path}")
+            return []
+        if not self.is_binary_file(input_file_path):
+            logger.error(f"Input file is not a binary file: {input_file_path}")
+            return []
+
         if output_dir is None:
             output_dir = os.path.join(os.path.dirname(input_file_path), "screenshots")
         os.makedirs(output_dir, exist_ok=True)  # Ensure output directory exists
@@ -75,6 +91,13 @@ class IdaToolkit(BaseToolkit):
         Returns:
             list: List containing BinExport and IDB file paths.
         """
+        if not os.path.exists(input_file_path):
+            logger.error(f"Input file does not exist: {input_file_path}")
+            return []
+        if not self.is_binary_file(input_file_path):
+            logger.error(f"Input file is not a binary file: {input_file_path}")
+            return []
+
         file_name = os.path.basename(input_file_path)
         if output_dir is None:
             output_dir = os.path.dirname(input_file_path)
@@ -121,6 +144,13 @@ class IdaToolkit(BaseToolkit):
         Returns:
             str: Path to the pseudo C file.
         """
+        if not os.path.exists(input_file_path):
+            logger.error(f"Input file does not exist: {input_file_path}")
+            return ""
+        if not self.is_binary_file(input_file_path):
+            logger.error(f"Input file is not a binary file: {input_file_path}")
+            return ""
+        
         file_name = os.path.basename(input_file_path)
         if output_dir is None:
             output_dir = os.path.dirname(input_file_path)
