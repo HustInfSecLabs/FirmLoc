@@ -18,9 +18,11 @@ IDA64_PATH = r"D:\software\IDA_Pro_v7.5_Portable\ida64"  # ida64安装路径
 IDAT32_PATH = r"D:\software\IDA_Pro_v7.5_Portable\idat"
 IDAT64_PATH = r"D:\software\IDA_Pro_v7.5_Portable\idat64"
 
-# 配置分析脚本路径
-ANALYZE_SCRIPT = os.path.abspath("export_binexport.py")  # 确保绝对路径
+# 配置分析脚本路径, 确保绝对路径
+ANALYZE_SCRIPT = os.path.abspath("export_binexport.py")
+EXPORT_SCRIPT = os.path.abspath("export_hexrays.py")  
 print(ANALYZE_SCRIPT)
+print(EXPORT_SCRIPT)
 
 # 创建base输出目录：ida_output\{日期}
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -29,7 +31,7 @@ os.makedirs(ida_output_dir, exist_ok=True)
 
 
 MAX_FILE_SIZE = 1024 * 1024 * 500  # 500MB
-TIMEOUT = 300  # 5分钟超时
+TIMEOUT = 3000  # 50分钟超时
 
 # 导出伪C代码的等待检测时间
 max_wait_time = 30  # 最大等待时间（秒）
@@ -138,7 +140,7 @@ def analyze_with_screenshot():
             # 等待IDA窗口出现
             time.sleep(4)
             
-            # 获取反编译的截图
+            # 获取反汇编（从二进制得到汇编）的截图
             screenshot_path_1 = take_screenshot(stage="disassembly")
             if not screenshot_path_1:
                 abort(500, "Failed to capture first screenshot")
@@ -147,7 +149,7 @@ def analyze_with_screenshot():
             pyautogui.press('tab')
             time.sleep(1)
             
-            # 获取反汇编的截图
+            # 获取反编译（从二进制得到高级代码）的截图
             screenshot_path_2 = take_screenshot(stage="decompilation")
             if not screenshot_path_2:
                 abort(500, "Failed to capture second screenshot")
@@ -270,6 +272,15 @@ def analyze():
         app.logger.error(f"Error during analysis: {str(e)}", exc_info=True)
         abort(500, f"Analysis error: {str(e)}")
 
+
+def convert_size(size_bytes):
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.2f} TB"
+
+
 @app.route('/export_pseudo_c', methods=['POST'])
 def export_pseudo_c():
     """根据文件名导出二进制文件的伪C代码"""
@@ -291,8 +302,6 @@ def export_pseudo_c():
         date_str = datetime.now().strftime('%Y%m%d')
         analysis_dir = os.path.join(ida_output_dir, date_str)
         source_output_dir = os.path.join(analysis_dir, "source")
-        
-        # 创建伪C代码输出目录（如果不存在）
         os.makedirs(source_output_dir, exist_ok=True)
 
         # 查找目标文件
@@ -302,91 +311,56 @@ def export_pseudo_c():
 
         app.logger.info(f"Found target file: {bin_path}")
 
-        # 准备输出文件路径
-        # print(f"Pseudo C output directory: {source_output_dir}")
-        os.chdir(source_output_dir)  # 切换到输出目录
-        output_filename = binary_name
-
+        # 运行IDA分析
         cmd = [
             IDAT_PATH,
-            f'-Ohexrays:{output_filename}:ALL',  # Hex-Rays伪代码导出
             '-A',  # 自动模式
+            '-T',  # 不显示界面
+            f'-S\"{EXPORT_SCRIPT}\"',
             bin_path
         ]
-        print(cmd)
+        app.logger.info(f"Executing: {' '.join(cmd)}")
         
-        output_filepath = os.path.join(source_output_dir, output_filename + ".c")
-        if os.path.exists(output_filepath):
-            os.remove(output_filepath)
-        
-        # 运行IDA Hex-Rays反编译
-        app.logger.info(f"Exporting pseudo C to: {output_filename}")    
+        start_time = time.time()
         try:
-            ida_process = subprocess.Popen(
-                cmd, 
-                # stdout=open(export_log, 'w', encoding='utf-8'), 
-                # stderr=subprocess.STDOUT,
+            result = subprocess.run(
+                cmd,
+                # cwd=analysis_dir,  # 在工作目录执行
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                # stdout=subprocess.DEVNULL,  # 丢弃输出
-                # stderr=subprocess.DEVNULL,  # 丢弃错误
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                timeout=TIMEOUT,
                 env={
                     "PATH": os.environ["PATH"],
                     "SYSTEMROOT": os.environ["SYSTEMROOT"],
                     "PYTHONHOME": r"C:\ProgramData\Miniconda3",
                     "PYTHONPATH": r"C:\ProgramData\Miniconda3\Lib;C:\ProgramData\Miniconda3\DLLs"
-            })
-            
-
-            # 改进的等待逻辑：优先检查输出文件
-            start_time = time.time()
-            while True:
-                # 检查文件是否已生成
-                if os.path.exists(output_filepath):
-                    print(f"伪C代码已生成: {output_filepath}")
-                    time.sleep(5)  
-                    ida_process.terminate()
-                    try:
-                        ida_process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        ida_process.kill()
-                    break
-                
-                # 检查是否超时
-                elapsed = time.time() - start_time
-                if elapsed >= max_wait_time:
-                    # print(f"等待超时({max_wait_time}秒)，文件未生成，终止进程...")
-                    ida_process.terminate()
-                    try:
-                        ida_process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        ida_process.kill()
-                    break
-                
-                # 检查进程是否已结束
-                if ida_process.poll() is not None:
-                    print(f"进程已结束(退出码: {ida_process.returncode})，但文件未生成")
-                    break
-                
-                # 等待下一次检查
-                time.sleep(check_interval)
-            
-        except subprocess.CalledProcessError as e:
-            app.logger.error(f"Hex-Rays decompilation failed: {e}")
-            abort(500, f"Hex-Rays decompilation failed: {e.stdout.read() if e.stdout else str(e)}")
+                },
+            )
+        except subprocess.TimeoutExpired:
+            # abort(408, "Export pseudo C timeout")
+            app.logger.warning("Export pseudo C timeout")
+        
+        end_time = time.time()
         
         # 再次检查输出文件
+        output_filepath = os.path.join(analysis_dir, f"{binary_name}_pseudo.c")
         if not os.path.exists(output_filepath):
             abort(500, f"Pseudo C file not generated: {output_filepath}")
+        
+        pseudo_filepath = os.path.join(source_output_dir, f"{binary_name}_pseudo.c")
+        if os.path.exists(pseudo_filepath):
+            os.remove(pseudo_filepath)
+        shutil.move(output_filepath, source_output_dir)
+        
 
-        app.logger.info(f"Successfully exported pseudo C code")
+        app.logger.info(f"{binary_name} Exported pseudo C completed, size: {convert_size(os.path.getsize(bin_path))}")
+        app.logger.info(f"Export time: {end_time - start_time:.2f} seconds")
 
         # 返回生成的伪C代码文件
         return send_file(
-            output_filepath,
+            pseudo_filepath,
             as_attachment=True,
-            download_name=os.path.basename(output_filename),
+            download_name=os.path.basename(pseudo_filepath),
             mimetype='text/plain'
         )
 
