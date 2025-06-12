@@ -6,28 +6,13 @@ import requests
 
 from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
+from utils.utils import is_binary_file
 
 logger = logging.getLogger(__name__)
 
-
-# 可上传至Github合并的版本，已测试可行
-
 class IdaToolkit(BaseToolkit):
     r"""A class representing a toolkit for Ida binary analysis."""
-
-    def is_binary_file(self, file_path: str) -> bool:
-        r"""Check if a file is a binary file based on its content."""
-        with open(file_path, 'rb') as f:
-            chunk = f.read(1024)
-            if b'\x00' in chunk:
-                return True
-            text_chars = bytearray({7,8,9,10,12,13,27} | set(range(0x20, 0x100)) - {0x7f})
-            if not chunk:
-                return False
-            if float(len(chunk.translate(None, text_chars))) / len(chunk) > 0.3:
-                return True
-            return False
-
+    
     async def get_screenshots(self, input_file_path: str, output_dir: str, 
                         screenshot_url: str = "http://10.12.189.52:5000/reversing_analyze_screenshot") -> List[str]:
         r"""Get screenshots from the screenshot service.
