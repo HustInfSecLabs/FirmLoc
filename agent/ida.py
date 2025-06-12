@@ -60,7 +60,7 @@ async def ida_process(input_file_path: str, output_dir: str = None,
     if send_message:
         await send_message(
             f"正在执行: IDA反编译文件{filename}",
-            "command",
+            "message",
             tool_type,
             tool_content,
             agent=agent,

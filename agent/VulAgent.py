@@ -17,7 +17,7 @@ from agent.llm_diff import main as llm_diff
 from agent.binary_filter import BinaryFilterAgent
 from log import logger
 from utils import ConfigManager, PlanManager
-from utils.utils import get_firmware_files, copy_file
+from utils.utils import get_firmware_files, copy_file, is_binary_file
 
 
 
@@ -163,13 +163,11 @@ class VulnAgent:
         await self.send_message("情报收集智能体收集CVE相关信息",
                                  message_type="header1",
                                 agent=self.agent,)
-        await asyncio.sleep(0) 
-        search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id="CVE-2021-20090") # CVE-2019-20760 CVE-2021-20090 CVE-2024-39226
+        search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id="CVE-2019-20760") # CVE-2019-20760 CVE-2021-20090 CVE-2024-39226
         logger.info(f"Online search result: {search_result}")
         await self.send_message(f"在线搜索结果: {search_result}",
                                     message_type="message",
                                     agent=self.agent)
-        await asyncio.sleep(0)
         
         # time.sleep(15) 
         self.config_manager.update_agent_status("Intelligence Agent", "Binwalk Agent")
@@ -181,8 +179,7 @@ class VulnAgent:
         # self.command = "binwalk -e ..."
         await self.send_message("Binwalk Agent提取固件文件",
                                  message_type="header1",
-                                agent=self.agent)
-        await asyncio.sleep(5) 
+                                agent=self.agent) 
         # await asyncio.sleep(10)  # 模拟处理间隔
         
         files = self.files
@@ -214,14 +211,14 @@ class VulnAgent:
         # self.tool = "Binary Filter"
         # self.tool = None
         # self.tool_status = "running"
-        self.agent = "Binary Filter Agent"
-        await self.send_message("Binary Filter Agent筛选可疑二进制文件",
+        # self.agent = "Binary Filter Agent"
+        self.agent = "Binwalk Agent"
+        await self.send_message("Binary Filter Agent筛选可疑文件列表",
                                  message_type="header1",
                                 agent=self.agent)
-        await asyncio.sleep(0)
         llm_result = self.BinaryFilterAgent.process(
-            binary_filename="Buffalo WSR-2533DHPL2",
-            # binary_filename="Netgear R9000",
+            # binary_filename="Buffalo WSR-2533DHPL2",
+            binary_filename="Netgear R9000",
             # binary_filename="GL-iNet",
             # extracted_files_path=os.path.join(binwalk_results[0]['extracted_files_path'],"squashfs-root/usr/sbin/"),
             extracted_files_path=binwalk_results[0]['extracted_files_path'],
@@ -241,7 +238,6 @@ class VulnAgent:
         await self.send_message(f"可疑文件: {suspicious_lines}",
                                     message_type="message",
                                     agent=self.agent)
-        await asyncio.sleep(0)
         idadir = os.path.join("/home/wzh/Desktop/Project/VulnAgent/history", self.chat_id, "ida")
         bindiffdir = os.path.join("/home/wzh/Desktop/Project/VulnAgent/history", self.chat_id, "bindiff")
         for file in suspicious_files:
@@ -256,6 +252,14 @@ class VulnAgent:
             if not os.path.isfile(file2):
                 print(f"文件不存在: {file2}")
                 continue
+            # 检查是否为二进制文件
+            if not is_binary_file(file1) or not is_binary_file(file2):
+                self.agent = None
+                await self.send_message(f"文件 {file1} 不是二进制文件，跳过分析。",
+                                        message_type="header2",
+                                        agent=self.agent)
+                continue
+
             os.makedirs(idadir, exist_ok=True)
             output_path1 = os.path.join(idadir, f"{os.path.basename(file1)}")
             output_path2 = os.path.join(idadir, f"{os.path.basename(file2)}1")
@@ -272,18 +276,15 @@ class VulnAgent:
             self.tool = None
             # self.command = f"ida -o {output_file1} {file1}"
             # self.tool_result = result1 + "\n" + result2
-            await self.send_message(f"IDA Agent分析二进制文件{file}",
+            await self.send_message(f"IDA Agent分析二进制文件{file.split('./', 1)[-1]}",
                                     message_type="header1",
-                                agent=self.agent)
-            await asyncio.sleep(0) 
+                                agent=self.agent) 
 
 
             # result1 = self.IDAAgent.analyze_binary(file1, output_path1, ida_version="ida32")
             # result2 = self.IDAAgent.analyze_binary(file2, output_path2, ida_version="ida32")
             result1 = await ida.ida_process(input_file_path=file1, output_dir=output_path1, ida_version="ida32", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
-            await asyncio.sleep(1)
-            result2 = await ida.ida_process(input_file_path=file2, output_dir=output_path2, ida_version="ida32", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
-            await asyncio.sleep(1)  
+            result2 = await ida.ida_process(input_file_path=file2, output_dir=output_path2, ida_version="ida32", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)  
             # print(result1)
             # print(result2)
             output_file1 = os.path.join("test", f"{os.path.basename(file1)}.BinExport")
@@ -299,11 +300,9 @@ class VulnAgent:
             self.tool = None
             await self.send_message("Bindiff Agent对比两个二进制文件",
                                     message_type="header1",
-                                agent=self.agent)
-            await asyncio.sleep(0) 
+                                agent=self.agent) 
 
             bindiff_result = await self.BindiffAgent.execute(output_file1, output_file2, output_dir, self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
-            await asyncio.sleep(1)
             print(bindiff_result)
 
             self.agent = "Detection Agent"
@@ -312,7 +311,6 @@ class VulnAgent:
             await self.send_message("Detection Agent分析Bindiff结果",
                                     message_type="header1",
                                 agent=self.agent)
-            await asyncio.sleep(0)
             await llm_diff(
                 chat_id=self.chat_id,
                 history_root=self.config_dir,
@@ -322,8 +320,7 @@ class VulnAgent:
                 cve_details=cve_details,
                 cwe=cwe,
                 send_message=self.send_message
-            )
-            await asyncio.sleep(1) 
+            ) 
         
         self.is_last = True
         self.state = ProgressEnum.COMPLETED

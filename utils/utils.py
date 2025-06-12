@@ -148,3 +148,16 @@ def rename_file_with_b64_timestamp(file_path):
     os.rename(file_path, new_path)
     logger.info(f"文件重命名成功: {file_path} -> {new_path}")
     return new_path
+
+def is_binary_file(file_path: str) -> bool:
+        r"""Check if a file is a binary file based on its content."""
+        with open(file_path, 'rb') as f:
+            chunk = f.read(1024)
+            if b'\x00' in chunk:
+                return True
+            text_chars = bytearray({7,8,9,10,12,13,27} | set(range(0x20, 0x100)) - {0x7f})
+            if not chunk:
+                return False
+            if float(len(chunk.translate(None, text_chars))) / len(chunk) > 0.3:
+                return True
+            return False

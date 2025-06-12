@@ -82,8 +82,8 @@ class BindiffAgent:
         ]
         if send_message:
             await send_message(
-                f"执行命令：bindiff {primary_export} {secondary_export} -- output_dir {self.output_dir}",
-                "message",
+                f"bindiff {primary_export} {secondary_export} -- output_dir {self.output_dir}",
+                "command",
                 self.tool_type,
                 tool_content,
                 agent=self.agent,
