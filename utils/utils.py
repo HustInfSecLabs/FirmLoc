@@ -150,14 +150,44 @@ def rename_file_with_b64_timestamp(file_path):
     return new_path
 
 def is_binary_file(file_path: str) -> bool:
-        r"""Check if a file is a binary file based on its content."""
-        with open(file_path, 'rb') as f:
-            chunk = f.read(1024)
-            if b'\x00' in chunk:
+    """Check if a file is a binary executable (ELF, PE) or non-text file.
+    Args:
+        file_path: Path to the file.
+    Returns:
+        True if the file is a binary executable or high-entropy data, False otherwise.
+    """
+    with open(file_path, 'rb') as f:
+        # Read the first 1024 bytes for analysis
+        chunk = f.read(1024)
+        if not chunk:
+            return False  # Empty file
+
+        # Check for executable file signatures
+        if len(chunk) >= 4:
+            # ELF format (Linux)
+            if chunk.startswith(b'\x7FELF'):
                 return True
-            text_chars = bytearray({7,8,9,10,12,13,27} | set(range(0x20, 0x100)) - {0x7f})
-            if not chunk:
-                return False
-            if float(len(chunk.translate(None, text_chars))) / len(chunk) > 0.3:
-                return True
-            return False
+            # PE format (Windows)
+            if chunk.startswith(b'MZ'):
+                # Check for PE header offset (0x3C) and 'PE\0\0' signature
+                pe_header_offset = chunk[0x3C:0x3C+4]
+                if len(pe_header_offset) == 4:
+                    pe_offset = int.from_bytes(pe_header_offset, byteorder='little')
+                    if pe_offset + 4 <= len(chunk):
+                        if chunk[pe_offset:pe_offset+4] == b'PE\0\0':
+                            return True
+            # Optional: Mach-O (macOS)
+            # if chunk.startswith(b'\xFE\xED\xFA\xCE') or chunk.startswith(b'\xCF\xFA\xED\xFE'):
+            #     return True
+
+        # Fallback to heuristic binary detection
+        # 1. Check for NULL bytes (common in binaries)
+        if b'\x00' in chunk:
+            return True
+        # 2. Check for high non-text character ratio
+        text_chars = bytearray({7, 8, 9, 10, 12, 13, 27} | set(range(0x20, 0x100)) - {0x7F})
+        non_text = chunk.translate(None, text_chars)
+        if len(non_text) / len(chunk) > 0.3:
+            return True
+
+    return False
