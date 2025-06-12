@@ -8,9 +8,12 @@ from datetime import datetime
 import pyautogui
 import time
 
+# Flask服务端口
+port = 5000
 
-app = Flask(__name__)
-app.logger.setLevel(logging.INFO)
+# 配置 PYTHONHOME 和 PYTHONPATH 环境变量
+PYTHONHOME = r"C:\ProgramData\Miniconda3"
+PYTHONPATH = r"C:\ProgramData\Miniconda3\Lib;C:\ProgramData\Miniconda3\DLLs"
 
 # 配置ida、idat路径
 IDA32_PATH = r"D:\software\IDA_Pro_v7.5_Portable\ida"  # ida32安装路径
@@ -19,17 +22,10 @@ IDAT32_PATH = r"D:\software\IDA_Pro_v7.5_Portable\idat"
 IDAT64_PATH = r"D:\software\IDA_Pro_v7.5_Portable\idat64"
 
 # 配置分析脚本路径, 确保绝对路径
-ANALYZE_SCRIPT = os.path.abspath("export_binexport.py")
-EXPORT_SCRIPT = os.path.abspath("export_hexrays.py")  
-print(ANALYZE_SCRIPT)
-print(EXPORT_SCRIPT)
+ANALYZE_SCRIPT = os.path.abspath("analyse.py")
+EXPORT_SCRIPT = os.path.abspath("export_hexrays.py")
 
-# 创建base输出目录：ida_output\{日期}
-base_dir = os.path.dirname(os.path.abspath(__file__))
-ida_output_dir = os.path.join(base_dir, "ida_output")
-os.makedirs(ida_output_dir, exist_ok=True)
-
-
+# 最大文件大小限制
 MAX_FILE_SIZE = 1024 * 1024 * 500  # 500MB
 TIMEOUT = 3000  # 50分钟超时
 
@@ -37,8 +33,42 @@ TIMEOUT = 3000  # 50分钟超时
 max_wait_time = 30  # 最大等待时间（秒）
 check_interval = 0.5  # 检查间隔（秒）
 
+# 配置日志记录
+def setup_logger():
+    # 创建log目录
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log")
+    os.makedirs(log_dir, exist_ok=True)
     
-def take_screenshot(stage="disassembly"):
+    # 设置日志文件名
+    log_file = os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log")
+    
+    # 配置日志格式和级别
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
+    
+    return logging.getLogger(__name__)
+
+# 初始化logger
+logger = setup_logger()
+
+app = Flask(__name__)
+app.logger.setLevel(logging.INFO)
+
+logger.info(f"Analyze script path: {ANALYZE_SCRIPT}")
+logger.info(f"Export script path: {EXPORT_SCRIPT}")
+
+# 创建base输出目录：ida_output\{日期}
+base_dir = os.path.dirname(os.path.abspath(__file__))
+ida_output_dir = os.path.join(base_dir, "ida_output")
+os.makedirs(ida_output_dir, exist_ok=True)
+   
+def take_screenshot(filename: str, stage="disassembly"):
     """
     获取当前屏幕截图并保存到日期目录
     
@@ -68,18 +98,18 @@ def take_screenshot(stage="disassembly"):
         stage_marker = "asm" if stage == "disassembly" else "decomp"
         screenshot_path = os.path.join(
             screenshot_dir, 
-            f"ida_{stage_marker}_{timestamp}.png"
+            f"{filename}_{stage_marker}_{timestamp}.png"
         )
         
         # 获取屏幕截图
         pyautogui.screenshot(screenshot_path)
-        app.logger.info(f"Saved {stage} screenshot to: {screenshot_path}")
+        logger.info(f"Saved {stage} screenshot to: {screenshot_path}")
         return screenshot_path
     except ValueError as ve:
-        app.logger.error(f"Invalid parameter: {str(ve)}")
+        logger.error(f"Invalid parameter: {str(ve)}")
         return None
     except Exception as e:
-        app.logger.error(f"Error taking screenshot: {str(e)}")
+        logger.error(f"Error taking screenshot: {str(e)}")
         return None
     
 
@@ -102,7 +132,7 @@ def analyze_with_screenshot():
     date_str = datetime.now().strftime('%Y%m%d')
     analysis_dir = os.path.join(ida_output_dir, date_str)
     os.makedirs(analysis_dir, exist_ok=True)
-    app.logger.info(f"Using analysis dir: {analysis_dir}")
+    logger.info(f"Using analysis dir: {analysis_dir}")
     
     try:
         # 保存上传文件
@@ -113,7 +143,7 @@ def analyze_with_screenshot():
         # 保存文件到ida_output_dir下的当天日期目录
         bin_path = os.path.join(analysis_dir, uploaded_file.filename)
         uploaded_file.save(bin_path)
-        app.logger.info(f"File saved to: {bin_path}")
+        logger.info(f"File saved to: {bin_path}")
         
         # 运行IDA分析
         cmd = [
@@ -132,16 +162,16 @@ def analyze_with_screenshot():
                 env={
                     "PATH": os.environ["PATH"],
                     "SYSTEMROOT": os.environ["SYSTEMROOT"],
-                    "PYTHONHOME": r"C:\ProgramData\Miniconda3",
-                    "PYTHONPATH": r"C:\ProgramData\Miniconda3\Lib;C:\ProgramData\Miniconda3\DLLs"
+                    "PYTHONHOME": PYTHONHOME,
+                    "PYTHONPATH": PYTHONPATH
                 },
             )
             
             # 等待IDA窗口出现
             time.sleep(4)
             
-            # 获取反汇编（从二进制得到汇编）的截图
-            screenshot_path_1 = take_screenshot(stage="disassembly")
+            # 获取反汇编的截图
+            screenshot_path_1 = take_screenshot(filename=uploaded_file.filename, stage="disassembly")
             if not screenshot_path_1:
                 abort(500, "Failed to capture first screenshot")
 
@@ -149,8 +179,8 @@ def analyze_with_screenshot():
             pyautogui.press('tab')
             time.sleep(1)
             
-            # 获取反编译（从二进制得到高级代码）的截图
-            screenshot_path_2 = take_screenshot(stage="decompilation")
+            # 获取反编译的截图
+            screenshot_path_2 = take_screenshot(filename=uploaded_file.filename, stage="decompilation")
             if not screenshot_path_2:
                 abort(500, "Failed to capture second screenshot")
             
@@ -182,11 +212,11 @@ def analyze_with_screenshot():
         except subprocess.TimeoutExpired:
             abort(408, "Analysis timeout")
         except Exception as e:
-            app.logger.error(f"Error during IDA analysis: {str(e)}")
+            logger.error(f"Error during IDA analysis: {str(e)}")
             abort(500, f"IDA analysis error: {str(e)}")
             
     except Exception as e:
-        app.logger.error(f"Error during analysis: {str(e)}")
+        logger.error(f"Error during analysis: {str(e)}")
         abort(500, f"Analysis error: {str(e)}")
 
 
@@ -220,7 +250,7 @@ def analyze():
         if not bin_path:
             abort(404, f"Binary file not found: {binary_name}")
         
-        app.logger.info(f"Found target file: {bin_path}")
+        logger.info(f"Found target file: {bin_path}")
         
         # 运行IDA分析
         cmd = [
@@ -230,7 +260,7 @@ def analyze():
             f'-S\"{ANALYZE_SCRIPT}\"',  # 执行脚本
             bin_path
         ]
-        app.logger.info(f"Executing: {' '.join(cmd)}")
+        logger.info(f"Executing: {' '.join(cmd)}")
         
         try:
             result = subprocess.run(
@@ -242,8 +272,8 @@ def analyze():
                 env={
                     "PATH": os.environ["PATH"],
                     "SYSTEMROOT": os.environ["SYSTEMROOT"],
-                    "PYTHONHOME": r"C:\ProgramData\Miniconda3",
-                    "PYTHONPATH": r"C:\ProgramData\Miniconda3\Lib;C:\ProgramData\Miniconda3\DLLs"
+                    "PYTHONHOME": PYTHONHOME,
+                    "PYTHONPATH": PYTHONPATH
                 },
             )
         except subprocess.TimeoutExpired:
@@ -252,24 +282,35 @@ def analyze():
         # 检查执行结果
         if result.returncode != 0:
             error_msg = result.stderr.decode().strip()
-            app.logger.error(f"IDA Error (code {result.returncode}): {error_msg}")
+            logger.error(f"IDA Error (code {result.returncode}): {error_msg}")
             abort(500, f"IDA analysis failed: {error_msg}")
         
-        app.logger.info(f"Analysis completed successfully")
+        logger.info(f"Analysis completed successfully")
         
-        # 获取生成文件（假设脚本生成同名的.export文件）
-        export_path = os.path.splitext(bin_path)[0] + '.BinExport'
-        if not os.path.exists(export_path):
-            abort(500, f"Export file not generated: {export_path}")
+        # 获取生成文件（假设脚本生成同名的.BinExport文件）
+        export_path = bin_path + '.BinExport'
+        idb_path = bin_path + '.idb'
+        if not os.path.exists(export_path) or not os.path.exists(idb_path):
+            logger.error(f"Export file not found: {export_path} or {idb_path}")
+            abort(500, f"BinExport file not generated: {export_path}")
         
-        # 返回结果
+        # 创建zip文件
+        zip_filename = os.path.join(analysis_dir, f"ida_analysis_{binary_name}.zip")
+        with zipfile.ZipFile(zip_filename, 'w') as zipf:
+            zipf.write(export_path, os.path.basename(export_path))
+            zipf.write(idb_path, os.path.basename(idb_path))
+
+        # 返回zip文件
         return send_file(
-            export_path,
+            zip_filename,
             as_attachment=True,
-            download_name=os.path.basename(export_path))
+            download_name=f"ida_analysis_{binary_name}.zip",
+            mimetype='application/zip'
+        )
+        
         
     except Exception as e:
-        app.logger.error(f"Error during analysis: {str(e)}", exc_info=True)
+        logger.error(f"Error during analysis: {str(e)}", exc_info=True)
         abort(500, f"Analysis error: {str(e)}")
 
 
@@ -293,7 +334,7 @@ def export_pseudo_c():
         # 获取IDA版本参数 (默认为ida32)
         ida_version = request.form.get('ida_version', 'ida').lower()
         if ida_version == 'ida64':
-            app.logger.info("Using IDA64")
+            logger.info("Using IDA64")
             IDAT_PATH = IDAT64_PATH
         else:
             IDAT_PATH = IDAT32_PATH
@@ -309,7 +350,7 @@ def export_pseudo_c():
         if not bin_path:
             abort(404, f"Binary file not found: {binary_name}")
 
-        app.logger.info(f"Found target file: {bin_path}")
+        logger.info(f"Found target file: {bin_path}")
 
         # 运行IDA分析
         cmd = [
@@ -319,7 +360,7 @@ def export_pseudo_c():
             f'-S\"{EXPORT_SCRIPT}\"',
             bin_path
         ]
-        app.logger.info(f"Executing: {' '.join(cmd)}")
+        logger.info(f"Executing: {' '.join(cmd)}")
         
         start_time = time.time()
         try:
@@ -332,13 +373,13 @@ def export_pseudo_c():
                 env={
                     "PATH": os.environ["PATH"],
                     "SYSTEMROOT": os.environ["SYSTEMROOT"],
-                    "PYTHONHOME": r"C:\ProgramData\Miniconda3",
-                    "PYTHONPATH": r"C:\ProgramData\Miniconda3\Lib;C:\ProgramData\Miniconda3\DLLs"
+                    "PYTHONHOME": PYTHONHOME,
+                    "PYTHONPATH": PYTHONPATH
                 },
             )
         except subprocess.TimeoutExpired:
             # abort(408, "Export pseudo C timeout")
-            app.logger.warning("Export pseudo C timeout")
+            logger.warning("Export pseudo C timeout")
         
         end_time = time.time()
         
@@ -353,8 +394,8 @@ def export_pseudo_c():
         shutil.move(output_filepath, source_output_dir)
         
 
-        app.logger.info(f"{binary_name} Exported pseudo C completed, size: {convert_size(os.path.getsize(bin_path))}")
-        app.logger.info(f"Export time: {end_time - start_time:.2f} seconds")
+        logger.info(f"{binary_name} Exported pseudo C completed, size: {convert_size(os.path.getsize(bin_path))}")
+        logger.info(f"Export time: {end_time - start_time:.2f} seconds")
 
         # 返回生成的伪C代码文件
         return send_file(
@@ -365,10 +406,10 @@ def export_pseudo_c():
         )
 
     except Exception as e:
-        app.logger.error(f"Error during pseudo C export: {str(e)}", exc_info=True)
+        logger.error(f"Error during pseudo C export: {str(e)}", exc_info=True)
         abort(500, f"Pseudo C export error: {str(e)}")
      
 
 if __name__ == '__main__':
     from waitress import serve
-    serve(app, host="0.0.0.0", port=5000)
+    serve(app, host="0.0.0.0", port=port)
