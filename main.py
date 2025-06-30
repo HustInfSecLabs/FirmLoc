@@ -13,7 +13,7 @@ from pathlib import Path
 from enum import Enum
 from datetime import datetime, timezone, timedelta
 
-from agent import VulnAgent
+from agent import VulnAgent, run_repair_agent
 from config import config_manager
 from log import logger
 
@@ -47,6 +47,13 @@ FIRMWARE_EXTENSIONS = {
     ".pat",  # Cisco firmware images
     ".ipsw", # Apple firmware bundles
     ".tar"
+}
+
+CODE_REPAIR_EXTENSIONS = {
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp"
 }
 
 # 消息类型枚举
@@ -287,6 +294,142 @@ async def get_chat_list():
         "data": chat_list
     }
 
+@app.post("/v1/codeRepair/files")
+async def upload_file(
+    file: UploadFile = File(..., max_size=10 * 1024 * 1024),  # 10MB限制
+    chat_id: str = Form(...)
+):
+    # 检查文件类型
+    filename = Path(file.filename).name
+    ext = Path(filename).suffix.lower()
+    
+    if ext not in CODE_REPAIR_EXTENSIONS:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"code": 400, "msg": "文件类型不在白名单中", "data": None},
+        )
+    
+    file_dir = os.path.join(path, str(chat_id))
+    os.makedirs(file_dir, exist_ok=True)
+
+    filename = Path(file.filename).name
+    save_path = os.path.join(file_dir, filename)
+
+    if os.path.exists(save_path):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"code": 400, "msg": "文件已存在", "data": None},
+        )
+    
+    # 保存文件
+    try:
+        content = await file.read()
+        with open(save_path, "wb") as f:
+            f.write(content)
+    except Exception as e:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"code": 500, "msg": f"文件保存失败: {str(e)}", "data": None},
+        )
+    
+    # 获取文件信息
+    file_stat = os.stat(save_path)
+
+    # 构造响应数据
+    return {
+        "code": 0,
+        "msg": "上传成功",
+        "data": {
+            "id": filename,  
+            # "chat_id": chat_id,
+            # "original_name": file.filename,
+            # "saved_path": save_path,
+            "created_at": int(time.time()),
+            "bytes": file_stat.st_size,
+        },
+    }
+
+@app.get("/v1/codeRepair/files")
+async def list_files(chat_id: str = Query(...)):
+    folder = os.path.join(path, str(chat_id))
+    if not os.path.exists(folder):
+        raise HTTPException(404, detail="文件夹不存在")
+    result = []
+    for f in os.listdir(folder):
+        path = os.path.join(folder, f)
+        if os.path.isfile(path):
+            stat = os.stat(path)
+            result.append({
+                "filename": f,
+                "size": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime, tz=jst).isoformat()
+            })
+    return {"code": 0, 
+            "msg": "获取成功",
+            "data": result}
+
+@app.delete("/v1/codeRepair/file")
+async def delete_file(chat_id: str = Query(...), filename: str = Query(...)):
+    path = os.path.join(path, str(chat_id), filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    os.remove(path)
+    return {"code": 0, 
+            "msg": "删除成功"}
+
+@app.websocket("/v1/codeRepair/repair")
+async def code_repair_ws(websocket: WebSocket, chat_id: str = Query(...)):
+    await websocket.accept()
+    base_dir = os.path.join(path, str(chat_id))
+    os.makedirs(base_dir, exist_ok=True)
+
+    async def send_message_async(content: str, type: str = "message"):
+        try:
+            await websocket.send_json({
+                "chat_id": chat_id,
+                "is_last": False,
+                "type": type,
+                "content": content,
+                "system_status": {},
+                "tool_status": None
+            })
+        except Exception as e:
+            logger.error(f"WebSocket send failed: {e}")
+
+    loop = asyncio.get_event_loop()
+
+    try:
+        future = loop.run_in_executor(
+            None,
+            lambda: run_repair_agent(
+                base_dir,
+                lambda **kwargs: asyncio.run_coroutine_threadsafe(send_message_async(**kwargs), loop)
+            )
+        )
+        success, result_msg = await future
+
+        # 结束消息，根据 success 判定状态
+        await websocket.send_json({
+            "chat_id": chat_id,
+            "is_last": True,
+            "type": "message",
+            "content": result_msg if success else f"执行失败：{result_msg}",
+            "system_status": {},
+            "tool_status": None
+        })
+
+    except Exception as e:
+        await websocket.send_json({
+            "chat_id": chat_id,
+            "is_last": True,
+            "type": "error",
+            "content": f"运行错误：{str(e)}",
+            "system_status": {},
+            "tool_status": None
+        })
+
+    finally:
+        await websocket.close()
 
    
 if __name__ == "__main__":
