@@ -160,7 +160,7 @@ async def chat(websocket: WebSocket):
             try:
                 if websocket.client_state == WebSocketState.CONNECTED:
                     await websocket.send_json({"type": "pong"})
-                    logger.info("Keep-alive pong sent.")
+                    # logger.info("Keep-alive pong sent.")
                 else:
                     logger.warning("WebSocket is already closed. Stopping keep_alive.")
                     stop_event.set()
@@ -378,57 +378,75 @@ async def delete_file(chat_id: str = Query(...), filename: str = Query(...)):
             "msg": "删除成功"}
 
 @app.websocket("/v1/codeRepair/repair")
-async def code_repair_ws(websocket: WebSocket, chat_id: str = Query(...)):
+async def code_repair_ws(websocket: WebSocket):
     await websocket.accept()
-    base_dir = os.path.join(path, str(chat_id))
-    os.makedirs(base_dir, exist_ok=True)
+    
+    try:
+        # 等待客户端发送包含 chat_id 的消息
+        data = await websocket.receive_text()
+        message = json.loads(data)
+        chat_id = message.get("chat_id")
+        
+        if not chat_id:
+            await websocket.send_json({
+                "error": "Missing chat_id in message",
+                "code": 400
+            })
+            return
+        
+        base_dir = os.path.join(path, str(chat_id))
+        os.makedirs(base_dir, exist_ok=True)
 
-    async def send_message_async(content: str, type: str = "message"):
+        async def send_message_async(content: str, type: str = "message"):
+            try:
+                await websocket.send_json({
+                    "chat_id": chat_id,
+                    "is_last": False,
+                    "type": type,
+                    "content": content,
+                    "system_status": {},
+                    "tool_status": None
+                })
+            except Exception as e:
+                logger.error(f"WebSocket send failed: {e}")
+
+        loop = asyncio.get_event_loop()
+
         try:
+            future = loop.run_in_executor(
+                None,
+                lambda: run_repair_agent(
+                    base_dir,
+                    lambda **kwargs: asyncio.run_coroutine_threadsafe(send_message_async(**kwargs), loop)
+                )
+            )
+            success, result_msg = await future
+
+            # 结束消息，根据 success 判定状态
             await websocket.send_json({
                 "chat_id": chat_id,
-                "is_last": False,
-                "type": type,
-                "content": content,
+                "is_last": True,
+                "type": "message",
+                "content": result_msg if success else f"执行失败：{result_msg}",
                 "system_status": {},
                 "tool_status": None
             })
+
         except Exception as e:
-            logger.error(f"WebSocket send failed: {e}")
+            await websocket.send_json({
+                "chat_id": chat_id,
+                "is_last": True,
+                "type": "error",
+                "content": f"运行错误：{str(e)}",
+                "system_status": {},
+                "tool_status": None
+            })
 
-    loop = asyncio.get_event_loop()
-
-    try:
-        future = loop.run_in_executor(
-            None,
-            lambda: run_repair_agent(
-                base_dir,
-                lambda **kwargs: asyncio.run_coroutine_threadsafe(send_message_async(**kwargs), loop)
-            )
-        )
-        success, result_msg = await future
-
-        # 结束消息，根据 success 判定状态
-        await websocket.send_json({
-            "chat_id": chat_id,
-            "is_last": True,
-            "type": "message",
-            "content": result_msg if success else f"执行失败：{result_msg}",
-            "system_status": {},
-            "tool_status": None
-        })
+        finally:
+            await websocket.close()
 
     except Exception as e:
-        await websocket.send_json({
-            "chat_id": chat_id,
-            "is_last": True,
-            "type": "error",
-            "content": f"运行错误：{str(e)}",
-            "system_status": {},
-            "tool_status": None
-        })
-
-    finally:
+        logger.error(f"WebSocket error: {e}")
         await websocket.close()
 
    
