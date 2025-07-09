@@ -14,7 +14,7 @@ class IdaToolkit(BaseToolkit):
     r"""A class representing a toolkit for Ida binary analysis."""
     
     async def get_screenshots(self, input_file_path: str, output_dir: str, 
-                        screenshot_url: str = "http://10.12.189.52:5000/reversing_analyze_screenshot") -> List[str]:
+                        screenshot_url: str = "http://10.12.189.40:5000/reversing_analyze_screenshot") -> List[str]:
         r"""Get screenshots from the screenshot service.
         
         Args:
@@ -28,7 +28,7 @@ class IdaToolkit(BaseToolkit):
         if not os.path.exists(input_file_path):
             logger.error(f"Input file does not exist: {input_file_path}")
             return []
-        if not self.is_binary_file(input_file_path):
+        if not is_binary_file(input_file_path):
             logger.error(f"Input file is not a binary file: {input_file_path}")
             return []
 
@@ -64,7 +64,7 @@ class IdaToolkit(BaseToolkit):
     
     async def get_binexport(self, input_file_path: str, output_dir: str, 
                         ida_version: str = "ida32", 
-                        bin_export_url: str = "http://10.12.189.52:5000/export_binexport") -> List[str]:
+                        bin_export_url: str = "http://10.12.189.40:5000/export_binexport") -> List[str]:
         r"""Get BinExport and IDB files from the analysis service.
         
         Args:
@@ -79,7 +79,7 @@ class IdaToolkit(BaseToolkit):
         if not os.path.exists(input_file_path):
             logger.error(f"Input file does not exist: {input_file_path}")
             return []
-        if not self.is_binary_file(input_file_path):
+        if not is_binary_file(input_file_path):
             logger.error(f"Input file is not a binary file: {input_file_path}")
             return []
 
@@ -117,7 +117,7 @@ class IdaToolkit(BaseToolkit):
 
     async def get_pseudo_c(self, input_file_path: str, output_dir: str,
                         ida_version: str = "ida32",
-                        pseudo_c_url: str = "http://10.12.189.52:5000/export_pseudo_c") -> str:
+                        pseudo_c_url: str = "http://10.12.189.40:5000/export_pseudo_c") -> str:
         r"""Get pseudo C code from the analysis service.
         
         Args:
@@ -132,7 +132,7 @@ class IdaToolkit(BaseToolkit):
         if not os.path.exists(input_file_path):
             logger.error(f"Input file does not exist: {input_file_path}")
             return ""
-        if not self.is_binary_file(input_file_path):
+        if not is_binary_file(input_file_path):
             logger.error(f"Input file is not a binary file: {input_file_path}")
             return ""
         
