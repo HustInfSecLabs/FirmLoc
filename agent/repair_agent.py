@@ -12,6 +12,7 @@ from langchain import hub
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.agents import AgentAction, AgentFinish
 from langchain.callbacks.manager import CallbackManager
+from langchain.prompts import PromptTemplate
 from config import config_manager
 import tiktoken
 import ast
@@ -270,6 +271,7 @@ def run_repair_agent(base_dir: str, websocket_sender):
         )
         tools = build_tools(base_dir, websocket_sender)
         prompt = hub.pull("hwchase17/react")
+        prompt.template += "\n[系统指令] 所有输出必须直接使用中文，禁止声明语言切换行为。"
         agent = create_react_agent(llm, tools, prompt)
         
         log_info = f"Start process the .c file in {base_dir}"
@@ -334,7 +336,7 @@ def run_repair_agent(base_dir: str, websocket_sender):
             return_intermediate_steps=True
         )
         
-        result = agent_executor.invoke({"input": QUESTION})
+        result = agent_executor.invoke({"input": CHINESE_QUESTION})
         save_llm_result(base_dir, result)
 
     except Exception as e:
