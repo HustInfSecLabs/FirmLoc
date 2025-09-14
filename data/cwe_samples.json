@@ -1,0 +1,166 @@
+{
+  "CWE-22": [
+    {
+      "id": "CVE-2011-5325",
+      "cwe": "CWE-22",
+      "before": "if (symlink(file_header->link_target, name) && (archive_handle->ah_flags & 8) == 0)\n    bb_perror_msg(\"can't create %slink %s to %s\", \"sym\", name, file_header->link_target);",
+      "after": "if (*v20 == 47 || strstr(file_header->link_target, \"..\"))\n{\n    v21 = xasprintf(\"%s%c%s\", file_header->name, 0LL, v20);\n    llist_add_to(&archive_handle->symlink_placeholders, v21);\n}\nelse if (symlink(v20, name) && (archive_handle->ah_flags & 8) == 0)\n{\n    bb_perror_msg(\"can't create %slink '%s' to '%s'\", \"sym\", name, file_header->link_target);\n}",
+      "rationale": "修复的基本原理是通过路径验证（如检查是否包含 [`..`]或绝对路径）来防止路径遍历攻击，确保文件操作仅限于安全的目标路径。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2015-1192",
+      "cwe": "CWE-22",
+      "before": "",
+      "after": "if ( std::string::find((char *)filename._M_impl._M_start + v25, \"../\", 0LL, 3LL) != -1\n               || std::string::find((char *)filename._M_impl._M_start + v25, \"..\\\", 0LL, 3LL) != -1 )\n             {\n               puts(\"cannot create file.\");\n               printf(\"Directory traversal attack found while trying to create '%s' file\\n\",\n                 filename._M_impl._M_start[v239 / 8]._M_dataplus._M_p);\n               exit(1);\n             }",
+      "rationale": "检查路径是否包含 ../ 或是否是绝对路径，阻止目录遍历攻击。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2017-14120",
+      "cwe": "CWE-22",
+      "before": "",
+      "after": "  if ( !strncmp(\"../\", s2, 3uLL) || strstr(s2, \"/../\") )\n {\n   v11 = 0;\n   v10 = 0;\n   ptr[1] = \"archive contains unsafe filename: '%s'\\n\";\n   error(0, 0, \"archive contains unsafe filename: '%s'\\n\", s2);\n   return 0xFFFFFFFFLL;\n }\n ",
+      "rationale": "检查路径是否包含路径遍历标志（如 ../ 或 /../）。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2019-6111",
+      "cwe": "CWE-22",
+      "before": "    if ( strchr(v13 + 1, 47) )\n      goto LABEL_160;\n    {\nLABEL_160:\n      run_err(\"error: unexpected filename: %s\", v13 + 1);\n      exit(1);\n    }",
+      "after": "    if ( !v16\n      || strchr(v14 + 1, 47)\n      || 46 == v16\n      && ((v17 = (unsigned __int8)v14[2], !v14[2])\n       || (46 == v17 ? (LODWORD(v18) = (unsigned __int8)v14[3]) : (v18 = -(__int64)(unsigned int)(46 - v17)),\n           !(_DWORD)v18)) )\n    {\n      run_err(\"error: unexpected filename: %s\", v14 + 1);\n      exit(1);\n    }",
+      "rationale": "在原有检查的基础上，新增了对 . 和 .. 的验证。",
+      "is_positive": true
+    },
+    {
+      "id": "",
+      "cwe": "CWE-22",
+      "before": "v2 = webGetParam(a1, (int)\"file_path\", (int)\"\");\nsprintf(cmd, \"open_file %s\", v2);\nsystem(cmd);",
+      "after": "v2 = webGetParam(a1, (int)\"file_path\", (int)\"byte_4A2D7C\");\nsprintf(cmd, \"open_file %s\", v2);\nsystem(cmd);",
+      "rationale": "仅将空字符串常量替换为变量，但未添加任何路径验证或过滤逻辑，路径遍历漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-22",
+      "before": "v3 = strcat(base_dir, user_input);\nfopen(v3, \"r\");",
+      "after": "v3 = strcat(base_dir, user_input);\nif (strlen(v3) < 256) {\n  fopen(v3, \"r\");\n}",
+      "rationale": "仅添加了长度检查，但未验证路径内容或过滤危险字符，路径遍历漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-22",
+      "before": "v4 = getPathFromUser();\naccess(v4, 0);",
+      "after": "v4 = getPathFromUser();\nv5 = strdup(v4);\naccess(v5, 0);\nfree(v5);",
+      "rationale": "仅添加了内存复制操作，但未对路径内容进行任何验证或过滤，路径遍历漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-22",
+      "before": "v6 = http_get_param(\"path\");\nopen(v6, 0);",
+      "after": "v6 = http_get_param(\"path\");\nif (v6 && *v6) {\n  open(v6, 0);\n}",
+      "rationale": "仅添加了空指针和空字符串检查，但未验证路径内容或过滤危险字符，路径遍历漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-22",
+      "before": "v7 = readConfigValue(\"log_file\");\nfopen(v7, \"a\");",
+      "after": "v7 = readConfigValue(\"log_file\");\nv8 = sanitizePath(v7);\nfopen(v8, \"a\");",
+      "rationale": "看似调用了sanitizePath函数，但该函数可能仅做了简单的格式清理而未真正过滤危险路径，路径遍历漏洞依然存在。",
+      "is_positive": false
+    }
+  ],
+  "CWE-77": [
+    {
+      "id": "CVE-2022-37704",
+      "cwe": "CWE-77",
+      "before": "envpa = (char **)safe_env_full(0LL);\nexecve(path, argva, envpa);",
+      "after": "envpa = (char **)safe_env_full(0LL);\nv27 = 0;\nfor (j = 0; envpa[j]; ++j)\n  ++v27;\nfor (k = 0; k < v27; ++k)\n{\n  if (!strncmp(envpa[k], \"RSH=\", 4uLL))\n  {\n    g_free(envpa[k]);\n    for (m = k; m < v27; ++m)\n      envpa[m] = envpa[m + 1];\n    envpa[v27 - 1] = 0LL;\n    break;\n  }\n}\nexecve(path, argva, envpa);",
+      "rationale": "在 execve 调用前，检查并删除环境变量 RSH 的值，防止其被用于执行恶意命令。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-1389",
+      "cwe": "CWE-77",
+      "before": "v10 = get_http_param(\"country\");\nsprintf(cmd_buf, \"set_locale %s\", v10);\npopen(cmd_buf, \"r\");",
+      "after": "v10 = get_http_param(\"country\");\nif (validate_locale(v10)) {\n  escaped = shell_escape(v10);\n  sprintf(cmd_buf, \"set_locale %s\", escaped);\n  popen(cmd_buf, \"r\");\n} else {\n  return_error();\n}",
+      "rationale": "在 popen 调用前，对 country 参数进行验证和 shell 转义，防止注入恶意命令。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2017-6361",
+      "cwe": "CWE-77",
+      "before": "msg = base64_decode(get_param(\"reboot_notice_msg\"));\nsprintf(cmd, \"/sbin/vjbod_util -i '%s' 1>>/dev/null 2>&1\", msg);\nsystem(cmd);",
+      "after": "msg = base64_decode(get_param(\"reboot_notice_msg\"));\nv15 = 0;\nwhile (msg[v15]) {\n  if (strchr(';\\&|$', msg[v15])) {\n    return_error(\"Invalid input\");\n  }\n  ++v15;\n}\nsprintf(cmd, \"/sbin/vjbod_util -i '%s' 1>>/dev/null 2>&1\", msg);\nsystem(cmd);",
+      "rationale": "在 system 调用前，检查并过滤 reboot_notice_msg 中的 shell 元字符，防止命令注入。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2015-2051",
+      "cwe": "CWE-77",
+      "before": "action = get_soap_action_header();\nsprintf(cmd, \"handle_hnap %s\", action);\nsystem(cmd);",
+      "after": "action = get_soap_action_header();\nv20 = 0;\nfor (i = 0; action[i]; ++i) {\n  if (!isalnum(action[i]) && action[i] != '_') {\n    g_free(action);\n    return_error();\n  }\n}\nsprintf(cmd, \"handle_hnap %s\", action);\nsystem(cmd);",
+      "rationale": "在 system 调用前，对 SOAPAction 头进行白名单过滤，只允许字母数字和下划线，防止注入恶意命令。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2024-40891",
+      "cwe": "CWE-77",
+      "before": "void cli_processCmd(char *input) {\n    if (find_cmd_handler(input) == NULL) {\n        prctl_runCommandInShellWithTimeout(input);\n    }\n}",
+      "after": "void cli_processCmd(char *input) {\n    const char *allowed_cmds[] = {\"haproxy\", \"nginx\", \"restart\"};\n    int is_allowed = 0;\n    for (int i = 0; i < 3; i++) {\n        if (strstr(input, allowed_cmds[i]) != NULL) {\n            is_allowed = 1;\n            break;\n        }\n    }\n    if (is_allowed && find_cmd_handler(input) != NULL) {\n        prctl_runCommandInShellWithTimeout(input);\n    } else {\n        cmsCli_print(\"Command not allowed\");  // 拒绝非法命令\n    }\n}",
+      "rationale": "引入命令白名单机制，仅允许执行预定义的安全命令（如haproxy/nginx），阻断任意命令注入。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2020-8515",
+      "cwe": "CWE-77",
+      "before": "char *keyPath = cgiGetValue(\"keyPath\");\nsnprintf(cmd, 256, \"openssl rsautl -inkey /tmp/rsa/private_key_%s -decrypt\", keyPath);\nsystem(cmd);",
+      "after": "char *keyPath = cgiGetValue(\"keyPath\");\nif (strlen(keyPath) > 30) { exit(1); }  // 限制输入长度≤30\nfor (int i = 0; i < strlen(keyPath); i++) {\n    if (!isxdigit(keyPath[i])) { exit(1); }\n}\nsnprintf(cmd, 256, \"openssl rsautl -inkey /tmp/rsa/private_key_%s -decrypt\", keyPath);\nsystem(cmd);",
+      "rationale": "通过长度校验和字符类型过滤（仅允许十六进制字符），防止恶意命令注入。",
+      "is_positive": true
+    },
+    {
+      "id": "",
+      "cwe": "CWE-77",
+      "before": "v2 = websGetVar(a1, (int)\"AdminID\", (int)\"\");\nsprintf(cmd, \"useradd %s\", v2);\nsystem(cmd);",
+      "after": "v2 = websGetVar(a1, (int)\"AdminID\", (int)\"byte_4A2D7C\");\nsprintf(cmd, \"useradd %s\", v2);\nsystem(cmd);",
+      "rationale": "仅将空字符串常量替换为变量，但未对用户输入进行任何验证或过滤，命令注入漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-77",
+      "before": "v3 = get_hostname();\nsprintf(cmd, \"ping -c 4 %s\", v3);\nsystem(cmd);",
+      "after": "v3 = get_hostname();\nif (strchr(v3, 32)) {  // 仅检查空格\n  return_error();\n}\nsprintf(cmd, \"ping -c 4 %s\", v3);\nsystem(cmd);",
+      "rationale": "仅过滤了空格字符，但未过滤其他shell特殊字符如;、&、|等，命令注入漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-77",
+      "before": "v4 = get_parameter(\"ip\");\nsprintf(buf, \"nslookup %s\", v4);\npopen(buf, \"r\");",
+      "after": "v4 = get_parameter(\"ip\");\nv5 = strdup(v4);\nsprintf(buf, \"nslookup %s\", v5);\npopen(buf, \"r\");\nfree(v5);",
+      "rationale": "仅添加了内存复制操作，但未对输入进行任何安全验证或过滤，命令注入漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-77",
+      "before": "v6 = get_env_var(\"USER_INPUT\");\nsystem(v6);",
+      "after": "v6 = get_env_var(\"USER_INPUT\");\nif (strlen(v6) < 100) {  // 仅限制长度\n  system(v6);\n}",
+      "rationale": "仅限制了输入长度，但未对输入内容进行任何安全验证或过滤，命令注入漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-77",
+      "before": "v7 = read_command();\nsprintf(cmd, \"/bin/sh -c '%s'\", v7);\nsystem(cmd);",
+      "after": "v7 = read_command();\nv8 = replace_quotes(v7);\nsprintf(cmd, \"/bin/sh -c '%s'\", v8);\nsystem(cmd);",
+      "rationale": "看似替换了引号字符，但未针对所有shell特殊字符进行全面过滤，命令注入漏洞依然存在。",
+      "is_positive": false
+    }
+  ]
+}
