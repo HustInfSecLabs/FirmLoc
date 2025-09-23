@@ -4,10 +4,13 @@ import re
 import json
 import subprocess
 import tiktoken
+import asyncio
+import concurrent.futures
 from openai import OpenAI
 from pathlib import Path
 import glob, time, random
-# from IDAwork import export_and_extract
+
+from model import AgentModel
 
 # 读取漏洞类型对应的Scenario和Property的JSON文件路径
 VULNERABILITY_SCENARIOS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'vulnerability_scenarios.json')
@@ -87,62 +90,56 @@ SUMMARY_PROMPT = """
 [漏洞分析结果 end]
 
 """
-# GPT 调用
-COST_TOKEN = 0
-TPM = 4000000
-MODEL = "deepseek-chat"  # 可换成 "gpt-4o-mini" / "deepseek-reasoner" 等
 
-# 根据 MODEL 自动设置 API key／base_url
-if MODEL == "gpt-4o-mini":
-    os.environ["OPENAI_API_KEY"] = "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"
-    MAX_WINDOWS_LENGTH = 120 * 1024
-if MODEL == "o3-mini-2025-01-31":
-    os.environ["OPENAI_API_KEY"] = "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"
-    MAX_WINDOWS_LENGTH = 120 * 1024
-if MODEL == "gpt-4o":
-    os.environ["OPENAI_API_KEY"] = "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"
-    MAX_WINDOWS_LENGTH = 120 * 1024
-elif MODEL == "deepseek-reasoner":
-    os.environ["OPENAI_API_KEY"] = "sk-586b5dbc658847f4a555ea5fd804be5a"
-    os.environ["OPENAI_BASE_URL"] = "https://api.deepseek.com/v1"
-elif MODEL == "glm-4.5":
-    os.environ["OPENAI_API_KEY"] = "b5ab63e977d24624b25c723cdedd596b.hKH1poPGWBQlg2Bn"
-    os.environ["OPENAI_BASE_URL"] = "https://open.bigmodel.cn/api/paas/v4"
-elif MODEL == "deepseek-chat":
-    os.environ["OPENAI_API_KEY"] = "sk-edc3857234ed4d72a9c497252bcc8d86"
-    os.environ["OPENAI_BASE_URL"] = "https://api.deepseek.com/v1"
 
-gpt_encoder = tiktoken.get_encoding("o200k_base")
+async def async_gpt_inference(
+    prompt: str,
+    temperature: float = 0,
+    max_tokens: int = 4096,
+    default_system_prompt: str = "You are a helpful assistant."
+) -> str:
+    """异步版本的gpt_inference函数，避免阻塞事件循环"""
+    # 创建一个执行器来运行同步的gpt_inference函数
+    loop = asyncio.get_event_loop()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            result = await loop.run_in_executor(
+                executor,
+                lambda: gpt_inference(prompt=prompt, temperature=temperature, default_system_prompt=default_system_prompt)
+            )
+        # 确保返回的是字符串类型
+        if isinstance(result, str):
+            return result
+        else:
+            # 如果不是字符串，转换为字符串
+            return str(result)
+    except Exception as e:
+        print(f"异步推理失败: {e}")
+        return f"异步推理失败: {str(e)}"
 
-def gpt_inference(prompt: str = None, temperature: int = 0, default_system_prompt: str = None, history: list = []):
-    global COST_TOKEN
-    client = OpenAI()
-    system_prompt = "You are a helpful security assistant." if default_system_prompt == None else default_system_prompt
-    messages = [{"role": "system", "content": system_prompt}]
-    for his in history:
-        q, a = his
-        messages.append({"role": "user", "content": q})
-        messages.append({"role": "assistant", "content": a})
-    messages.append({"role": "user", "content": prompt})
+def gpt_inference(prompt: str = None, temperature: int = 0, default_system_prompt: str = None, history: list = None):
+    try:
+        llm_diff_agent = AgentModel(model="DeepSeek")
+        
+        system_prompt = "You are a helpful security assistant." if default_system_prompt == None else default_system_prompt
+        messages = [{"role": "system", "content": system_prompt}]
+        # 使用None作为默认值，然后在函数内部创建空列表，避免可变默认参数问题
+        history = history or []
+        for his in history:
+            # 安全地解包历史记录中的问答对
+            if isinstance(his, tuple) and len(his) == 2:
+                q, a = his
+                messages.append({"role": "user", "content": q})
+                messages.append({"role": "assistant", "content": a})
+            else:
+                print(f"警告: 历史记录格式不正确: {his}")
+        messages.append({"role": "user", "content": prompt})
+        result = llm_diff_agent.chat(prompt=prompt)
 
-    # rate limit
-    prompt_length = len(gpt_encoder.encode(prompt))
-    # if MODEL in ["gpt-4o-mini", "o3-mini-2025-01-31", "gpt-4o"]:
-    #     if COST_TOKEN + prompt_length > TPM:
-    #         time.sleep(70)
-    #         COST_TOKEN = 0
-
-    if MODEL == "o3-mini-2025-01-31":
-        completion = client.chat.completions.create(model=MODEL, messages=messages)
-    else:
-        completion = client.chat.completions.create(model=MODEL, temperature=temperature, messages=messages)
-    COST_TOKEN += completion.usage.total_tokens
-
-    # rate limit
-    if MODEL == "deepseek_reasoner":
-        time.sleep(5)
-
-    return completion.choices[0].message.content
+        return result
+    except Exception as e:
+        print(f"GPT推理失败: {e}")
+        return f"GPT推理失败: {str(e)}"
 
 # 加载漏洞类型对应的Scenario和Property
 def load_vulnerability_scenarios():
@@ -449,6 +446,7 @@ class Refiner:
     def __init__(self, LOG_FILE):
         self.log = LOG_FILE
         self.agent = "Detection Agent"
+        self._task_cache = {}  # 初始化任务缓存字典
 
         #api_key = "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"
         #if not api_key:
@@ -498,7 +496,7 @@ Your Task is to judge if the C-like pseudocode generate by IDA pro has vulnerabi
 There are several context you can refer to:
 1. {cve_details if cve_details else ""}
 2. This vulnerability belongs to {cwe}.
-3. Your will be given the patched C-like psudeocode generated by IDA pro,
+3. You will be given the patched C-like psudeocode generated by IDA pro,
 which means you can confirm suspected vulnerability according to the code change.
 4. For each function pair analyzed, first determine if the changes are security-relevant according to the above criteria before including it in your report.
 
@@ -548,9 +546,16 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         """
         
         return rag_prompt
-        
-    def query2bot(self, fa, fb, cve_details=None, cwe=None) -> str:
+
+    async def async_query2bot(self, fa, fb, cve_details=None, cwe=None) -> str:
+        """异步版本的query2bot函数"""
         print(f"→ 开始分析 {os.path.basename(fa)} vs {os.path.basename(fb)}")
+        
+        # 检查缓存中是否已有结果
+        cache_key = (os.path.basename(fa), os.path.basename(fb))
+        if cache_key in self._task_cache:
+            print(f"← 从缓存获取 {os.path.basename(fa)} vs {os.path.basename(fb)} 的分析结果")
+            return self._task_cache[cache_key]
 
         # 读两个.c文件的内容
         try:
@@ -558,7 +563,7 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             b_content = open(fb, 'r', encoding='utf-8').read()
         except Exception as e:
             print(f"读取函数文件失败: {e}")
-            return
+            return f"读取函数文件失败: {str(e)}"
 
         prompt = self.make_prompt(
             f"File: {os.path.basename(fa)}\n{a_content}",
@@ -568,14 +573,14 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         )
 
         try:
-            result = gpt_inference(
+            result = await async_gpt_inference(
                 prompt=prompt,
                 temperature=0,
                 default_system_prompt="You are a security analysis assistant."
             )
         except Exception as e:
             print(f"GPT 推理失败: {e}")
-            return
+            return f"GPT 推理失败: {str(e)}"
 
         try:
             with open(self.log, 'a', encoding='utf-8') as w:
@@ -604,14 +609,17 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         if need_rag:
             print(f"→ 对 {os.path.basename(fa)} vs {os.path.basename(fb)} 进行二次判断")
             # 进行RAG二次判断
-            rag_result = self.rag_query2bot(fa, fb, cve_details, cwe)
-            return f"初次分析结果:\n{result}\n\nRAG二次分析结果:\n{rag_result}"
+            rag_result = await self.async_rag_query2bot(fa, fb, cve_details, cwe)
+            final_result = f"初次分析结果:\n{result}\n\nRAG二次分析结果:\n{rag_result}"
+        else:
+            final_result = result if result else "分析结果为空"
         
-        return result if result else None
-        
-    def rag_query2bot(self, fa, fb, cve_details=None, cwe=None) -> str:
-        """使用RAG方式进行二次判断"""
-        
+        # 缓存结果
+        self._task_cache[cache_key] = final_result
+        return final_result
+    
+    async def async_rag_query2bot(self, fa, fb, cve_details=None, cwe=None) -> str:
+        """异步版本的rag_query2bot函数"""
         # 读两个.c文件的内容
         try:
             a_content = open(fa, 'r', encoding='utf-8').read()
@@ -628,14 +636,14 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         )
 
         try:
-            result = gpt_inference(
+            result = await async_gpt_inference(
                 prompt=prompt,
                 temperature=0,
                 default_system_prompt="You are a security analysis assistant."
             )
         except Exception as e:
             print(f"GPT RAG推理失败: {e}")
-            return "GPT RAG推理失败"
+            return f"GPT RAG推理失败: {str(e)}"
 
         try:
             with open(self.log, 'a', encoding='utf-8') as w:
@@ -645,10 +653,9 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         except Exception as e:
             print(f"写RAG日志失败: {e}")
 
-        return result if result else None
+        return result if result else "RAG分析结果为空"
 
-
-
+# 主函数
 async def main(chat_id: str,
          history_root: str | Path,
          binary_filename: str,
@@ -708,29 +715,61 @@ async def main(chat_id: str,
     # 4. 开始调用大模型进行差异分析
     r = Refiner(LOG_FILE)
 
+    # 定义并行处理函数对的任务列表
+    tasks = []
+    func_paths = []
+    
+    # 为每个函数对创建一个任务
     for pre_func, post_func in func_mapping.items():
         pre_func_path = os.path.join(FOLDER_A, f"{pre_func}.c")
         post_func_path = os.path.join(FOLDER_B, f"{post_func}.c")
-
-        #print(f"→ 准备分析 {os.path.basename(pre_func_path)} vs {os.path.basename(post_func_path)}")
         
         if os.path.exists(pre_func_path) and os.path.exists(post_func_path):
-        # if os.path.basename(pre_func_path) == "sub_42DCCC.c":
-            result = r.query2bot(pre_func_path, post_func_path, cve_details, cwe)
-            if send_message:
-                await send_message(
-                    f"大模型分析 {os.path.basename(pre_func_path)} vs {os.path.basename(post_func_path)}结果：\n{result}",
-                    "message",
-                    agent = r.agent
-                )
+            tasks.append(r.async_query2bot(pre_func_path, post_func_path, cve_details, cwe))
+            func_paths.append((pre_func_path, post_func_path))
         else:
             print(f"缺少文件 {pre_func_path} 或 {post_func_path}，跳过")
+    
+    # 使用信号量控制并发数量，防止同时创建过多任务
+    concurrency_limit = 5  # 根据系统资源和API限制调整
+    semaphore = asyncio.Semaphore(concurrency_limit)
+    
+    # 包装任务以使用信号量
+    async def bounded_task(task, index):
+        async with semaphore:
+            try:
+                result = await task
+                # 确保返回正确格式的元组
+                return index, result
+            except Exception as e:
+                print(f"任务执行失败: {e}")
+                # 即使出现异常，也确保返回正确格式的元组
+                return index, f"分析失败: {str(e)}"
+    
+    # 创建受限制的任务列表
+    bounded_tasks = [bounded_task(task, i) for i, task in enumerate(tasks)]
+    
+    # 并行执行所有任务
+    results = await asyncio.gather(*bounded_tasks)
+    
+    # 按照原始顺序处理结果
+    ordered_results = sorted(results, key=lambda x: x[0])
+    
+    # 发送结果到客户端
+    for i, (_, result) in enumerate(ordered_results):
+        pre_func_path, post_func_path = func_paths[i]
+        if send_message:
+            await send_message(
+                f"大模型分析 {os.path.basename(pre_func_path)} vs {os.path.basename(post_func_path)}结果：\n{result}",
+                "message",
+                agent = r.agent
+            )
     # 5. 最后生成总结
     try:
         with open(LOG_FILE, 'r', encoding='utf-8') as f:
             results = f.read()
         summary_prompt = SUMMARY_PROMPT.replace("{$result$}", results)
-        summary = gpt_inference(
+        summary = await async_gpt_inference(
             prompt=summary_prompt,
             temperature=0,
             default_system_prompt="You are a security analysis summary assistant."
@@ -753,11 +792,22 @@ async def main(chat_id: str,
             )
     print("\n全部分析完成！")
 
+# 包装函数，保持向后兼容性
+async def llm_diff(chat_id: str, history_root: str, binary_filename: str, 
+                 pre_c: str = None, post_c: str = None, cve_details: str = None, 
+                 cwe: str = None, send_message=None):
+    """包装函数，保持与原代码的兼容性"""
+    return await main(chat_id, history_root, binary_filename, pre_c, post_c, 
+                     cve_details, cwe, send_message)
+
 if __name__ == "__main__":
-    main(
-        chat_id="chat-CVE-2019-20760",  
-        history_root=r"D:\HUSTCourse\402\chenyi_zhu\VulnAgent\agent\history",
-        binary_filename="proccgi",
-        pre_c=r"D:\HUSTCourse\402\chenyi_zhu\VulnAgent\agent\history\chat-CVE-2019-20760\ida\proccgi\proccgi26.c",
-        post_c=r"D:\HUSTCourse\402\chenyi_zhu\VulnAgent\agent\history\chat-CVE-2019-20760\ida\proccgi\proccgi26.c"
-    )
+    # 运行示例
+    asyncio.run(main(
+        chat_id="2025-09-22-9-1",  
+        history_root=r"/home/wzh/Desktop/Project/VulnAgent/history",
+        binary_filename="libsal.so.0.0",
+        pre_c=r"/home/wzh/Desktop/Project/VulnAgent/history/2025-09-22-9-1/ida/libsal.so.0.0/libsal.so.0.0_pseudo.c",
+        post_c=r"/home/wzh/Desktop/Project/VulnAgent/history/2025-09-22-9-1/ida/libsal.so.0.01/libsal.so.01.0_pseudo.c",
+        cve_details="Certain NETGEAR devices are affected by command injection by an unauthenticated attacker via the vulnerable /sqfs/lib/libsal.so.0.0 library used by a CGI application, as demonstrated by setup.cgi?token=';$HTTP_USER_AGENT;' with an OS command in the User-Agent field. This affects GC108P before 1.0.7.3, GC108PP before 1.0.7.3, GS108Tv3 before 7.0.6.3, GS110TPPv1 before 7.0.6.3, GS110TPv3 before 7.0.6.3, GS110TUPv1 before 1.0.4.3, GS710TUPv1 before 1.0.4.3, GS716TP before 1.0.2.3, GS716TPP before 1.0.2.3, GS724TPPv1 before 2.0.4.3, GS724TPv2 before 2.0.4.3, GS728TPPv2 before 6.0.6.3, GS728TPv2 before 6.0.6.3, GS752TPPv1 before 6.0.6.3, GS752TPv2 before 6.0.6.3, MS510TXM before 1.0.2.3, and MS510TXUP before 1.0.2.3.",
+        cwe="CWE-78",
+    ))
