@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class IdaToolkit(BaseToolkit):
     r"""A class representing a toolkit for Ida binary analysis."""
     
-    async def get_screenshots(self, input_file_path: str, output_dir: str, 
+    async def get_screenshots(self, input_file_path: str, output_dir: str, ida_version: str = "ida32",
                         screenshot_url: str = "http://10.12.189.40:5000/reversing_analyze_screenshot") -> List[str]:
         r"""Get screenshots from the screenshot service.
         
@@ -40,7 +40,11 @@ class IdaToolkit(BaseToolkit):
         with open(input_file_path, 'rb') as f:
             files = {'file': (file_name, f)}
             logger.info(f"[1/3], Sending file to screenshot service: {screenshot_url}")
-            screenshot_response = requests.post(screenshot_url, files=files)
+            screenshot_response = requests.post(
+                screenshot_url,
+                files=files,
+                data={'ida_version': ida_version.lower()}
+            )
         
         if screenshot_response.status_code != 200:
             logger.warning(f"Screenshot service failed: HTTP {screenshot_response.status_code}")

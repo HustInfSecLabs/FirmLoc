@@ -6,9 +6,10 @@ import re
 import tiktoken
 import os
 import subprocess
+import stat
 
 PROMPT = """You are a security analyst who specializes in analyzing binary files that may have vulnerabilities based on the names of affected services/programs and their vulnerability types mentioned in CVE descriptions and other information.
-You need to find relevant binary files that may have vulnerabilities in the directory structure [directory] based on the firmware file directory structure [directory] and CVE information [CVE details] of the {binary_filename} device provided below.
+You need to find relevant binary files that may have vulnerabilities in the executable binary list [directory] (extracted from the firmware directory) and CVE information [CVE details] of the {binary_filename} device provided below.
 
 Strictly output in the following format:
 {{
@@ -28,7 +29,7 @@ Strictly output in the following format:
 ]
 }}
 
-Among them, suspicious_binaries can output up to 5, and the output results are sorted by relevance, with the most suspicious ones in the front. If the specific suspicious binary file cannot be determined, combine your knowledge base, vulnerability description and file directory to give the most likely binary file with the vulnerability.
+Among them, suspicious_binaries can output up to 3, and the output results are sorted by relevance, with the most suspicious ones in the front. If the specific suspicious binary file cannot be determined, combine your knowledge base, vulnerability description and file directory to give the most likely binary file with the vulnerability.
 
 If the directory structure passed in cannot be analyzed or no suspicious binary file related to the provided CVE is found in the directory, error and analysis results are returned.
 Example error message output:
@@ -70,7 +71,7 @@ class BinaryFilterAgent(Agent):
         super().__init__(chat_model)
         
     def _get_directory_structure(self, directory_path: str) -> str:
-        # 使用tree命令获取目录结构
+        # 使用du -ah命令获取目录结构
         try:
             result = subprocess.run(
                 ['du','-ah', '.'],
@@ -81,7 +82,37 @@ class BinaryFilterAgent(Agent):
             )
             return result.stdout
         except Exception as e:
-            raise RuntimeError(f"执行tree命令获取目录结构时发生错误: {str(e)}")
+            raise RuntimeError(f"执行du -ah命令获取目录结构时发生错误: {str(e)}")
+
+    def _get_executable_binaries(self, directory_path: str) -> str:
+        executable_files = []
+        directory = Path(directory_path)
+
+        for root, _, files in os.walk(directory_path):
+            for filename in files:
+                file_path = Path(root) / filename
+                try:
+                    stat_result = file_path.stat()
+                except (OSError, ValueError):
+                    continue
+
+                if not stat.S_ISREG(stat_result.st_mode):
+                    continue
+
+                if stat_result.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                    try:
+                        relative_path = file_path.relative_to(directory)
+                    except ValueError:
+                        relative_path = file_path
+                    executable_files.append(str(relative_path))
+
+        if not executable_files:
+            return "未在提供的目录中找到可执行二进制文件。"
+
+        executable_files.sort()
+        lines = [path for path in executable_files]
+
+        return "\n".join(lines)
         
     def process(self, binary_filename: str, extracted_files_path: str, cve_details: str) -> dict:
         try:
@@ -92,9 +123,13 @@ class BinaryFilterAgent(Agent):
             
             print(f"directory_structure:\n{directory_structure}")
 
+            executable_binaries = self._get_executable_binaries(extracted_files_path)
+
+            print(f"executable_binaries:\n{executable_binaries}")
+
             prompt = PROMPT.format(
                 binary_filename = binary_filename,
-                directory=directory_structure,
+                directory=executable_binaries,
                 cve_details=cve_details
             )
 
@@ -104,7 +139,7 @@ class BinaryFilterAgent(Agent):
             print(f"Prompt token 数: {len(token_ids)}")
 
             response = self.chat_model.chat(prompt)
-            # print(f"大模型原始返回结果：{response}")
+            print(f"大模型原始返回结果：{response}")
 
             # 提取markdown格式的JSON块
             json_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", response, re.IGNORECASE)

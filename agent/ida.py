@@ -32,7 +32,7 @@ async def ida_process(input_file_path: str, output_dir: str = None,
     config.update_tool_status("Binwalk", "IDA Decompiler")
     if on_status_update:
         on_status_update(None, tool, tool_status)
-    result_list = await IDAAgent.get_screenshots(input_file_path ,os.path.join(output_dir, "screenshots") if output_dir else None)
+    result_list = await IDAAgent.get_screenshots(input_file_path ,os.path.join(output_dir, "screenshots") if output_dir else None, ida_version=ida_version)
     # result_dict = {
     #     "screenshots": ["12343.png", "12344.png"],
     #     "binexport": ["binfilename.BinExport", "binfilename.idb"],
@@ -69,9 +69,9 @@ async def ida_process(input_file_path: str, output_dir: str = None,
         )
         await asyncio.sleep(1)
 
-    files = await IDAAgent.get_binexport(input_file_path, output_dir)
+    files = await IDAAgent.get_binexport(input_file_path, output_dir, ida_version=ida_version)
     copy_file(os.path.join(output_dir, os.path.basename(input_file_path) + ".BinExport"), os.path.join("test"))
 
-    c_file = await IDAAgent.get_pseudo_c(input_file_path, output_dir)
+    c_file = await IDAAgent.get_pseudo_c(input_file_path, output_dir, ida_version=ida_version)
 
     return files
