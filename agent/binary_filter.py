@@ -83,8 +83,51 @@ class BinaryFilterAgent(Agent):
             return result.stdout
         except Exception as e:
             raise RuntimeError(f"执行du -ah命令获取目录结构时发生错误: {str(e)}")
+    def _is_ida_analysable(self, file_path: Path) -> bool:
+        """
+        判断文件是否为 IDA 可以分析的二进制类型。
+        优先通过读取文件头（magic bytes）判断常见格式（ELF、PE、Mach-O、脚本 shebang 等），
+        若无法确定则回退到调用系统 `file` 命令做检测（如果可用）。
+        """
+        try:
+            with open(file_path, 'rb') as f:
+                header = f.read(8)
+        except (OSError, ValueError):
+            return False
+
+        # ELF: 0x7f 'E' 'L' 'F'
+        if header.startswith(b'\x7fELF'):
+            return True
+        # PE (Windows executable and DLL): 'MZ'
+        if header.startswith(b'MZ'):
+            return True
+        # Mach-O magic numbers
+        mach_magic = [b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe']
+        if header[:4] in mach_magic:
+            return True
+        # Script with shebang
+        if header.startswith(b'#!'):
+            return True
+
+        # Fallback: use `file` command if available to detect shared object / executable descriptions
+        try:
+            result = subprocess.run(['file', '-b', str(file_path)], capture_output=True, text=True, check=False)
+            desc = result.stdout.lower()
+            # 包含这些关键字的通常是可分析的二进制/共享库/可执行文件
+            keywords = ['elf', 'pe32', 'ms-dos', 'mach-o', 'shared object', 'executable', 'dynamically linked']
+            if any(k in desc for k in keywords):
+                return True
+        except Exception:
+            # 忽略 file 调用的任何错误，返回 False
+            pass
+
+        return False
 
     def _get_executable_binaries(self, directory_path: str) -> str:
+        """
+        原来的逻辑只根据 Unix 执行位判断，这会漏掉很多没有执行位但仍然是二进制库的文件（例如 .so）。
+        现在的逻辑为：如果文件有执行位，或被判断为 IDA 可分析类型，则视为“可执行二进制”并返回。
+        """
         executable_files = []
         directory = Path(directory_path)
 
@@ -99,7 +142,16 @@ class BinaryFilterAgent(Agent):
                 if not stat.S_ISREG(stat_result.st_mode):
                     continue
 
-                if stat_result.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                has_exec_bit = bool(stat_result.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+                is_ida_bin = False
+                # 如果没有执行位，尝试判断是否为可被 IDA 分析的二进制格式（比如 ELF shared objects）
+                if not has_exec_bit:
+                    try:
+                        is_ida_bin = self._is_ida_analysable(file_path)
+                    except Exception:
+                        is_ida_bin = False
+
+                if has_exec_bit or is_ida_bin:
                     try:
                         relative_path = file_path.relative_to(directory)
                     except ValueError:
