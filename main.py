@@ -19,6 +19,8 @@ from log import logger
 
 app = FastAPI()
 
+if not os.path.exists("images"):
+    os.makedirs("images")
 app.mount("/static/images", StaticFiles(directory="images"), name="static")
 
 path = config_manager.config["result.path"]["savedir"]
@@ -148,8 +150,8 @@ async def chat(websocket: WebSocket):
         nonlocal last_pong
         while not stop_event.is_set():
             await asyncio.sleep(10)  # 每10秒发送一次pong
-            if (datetime.now() - last_pong).total_seconds() > 1200:
-                logger.warning("No pong received in 20 minutes, closing WebSocket.")
+            if (datetime.now() - last_pong).total_seconds() > 36000:
+                logger.warning("No pong received in 10 hours, closing WebSocket.")
                 stop_event.set()
                 try:
                     await websocket.close(code=1008)
