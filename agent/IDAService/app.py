@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, abort
+from flask import Flask, request, send_file, abort, jsonify
 import tempfile
 import os, sys, zipfile
 import subprocess
@@ -7,23 +7,26 @@ import logging
 from datetime import datetime
 import pyautogui
 import time
+import json
+import re
 
 # Flask服务端口
 port = 5000
 
 # 配置 PYTHONHOME 和 PYTHONPATH 环境变量
-PYTHONHOME = r"C:\ProgramData\Miniconda3"
-PYTHONPATH = r"C:\ProgramData\Miniconda3\Lib;C:\ProgramData\Miniconda3\DLLs"
+PYTHONHOME = r"C:\Users\WangZihao\AppData\Local\Programs\Python\Python313"
+PYTHONPATH = r"C:\Users\WangZihao\AppData\Local\Programs\Python\Python313\Lib;C:\Users\WangZihao\AppData\Local\Programs\Python\Python313\DLLs"
 
 # 配置ida、idat路径
-IDA32_PATH = r"D:\software\IDA_Pro_v7.5_Portable\ida"  # ida32安装路径
-IDA64_PATH = r"D:\software\IDA_Pro_v7.5_Portable\ida64"  # ida64安装路径
-IDAT32_PATH = r"D:\software\IDA_Pro_v7.5_Portable\idat"
-IDAT64_PATH = r"D:\software\IDA_Pro_v7.5_Portable\idat64"
+IDA32_PATH = r"C:\tools\IDA_Pro_9.1\ida.exe"  # ida32安装路径
+IDA64_PATH = r"C:\tools\IDA_Pro_9.1\ida.exe"  # ida64安装路径
+IDAT32_PATH = r"C:\tools\IDA_Pro_9.1\idat.exe"
+IDAT64_PATH = r"C:\tools\IDA_Pro_9.1\idat.exe"
 
 # 配置分析脚本路径, 确保绝对路径
-ANALYZE_SCRIPT = os.path.abspath("analyse.py")
+BINEXPORT_SCRIPT = os.path.abspath("export_binexport.py")
 EXPORT_SCRIPT = os.path.abspath("export_hexrays.py")
+ANALYZE_SCRIPT = os.path.abspath("analyze.py")
 
 # 最大文件大小限制
 MAX_FILE_SIZE = 1024 * 1024 * 500  # 500MB
@@ -44,7 +47,7 @@ def setup_logger():
     
     # 配置日志格式和级别
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(log_file),
@@ -60,8 +63,9 @@ logger = setup_logger()
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
-logger.info(f"Analyze script path: {ANALYZE_SCRIPT}")
+logger.info(f"Analyze script path: {BINEXPORT_SCRIPT}")
 logger.info(f"Export script path: {EXPORT_SCRIPT}")
+logger.info(f"Analyze script path: {ANALYZE_SCRIPT}")
 
 # 创建base输出目录：ida_output\{日期}
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -233,9 +237,9 @@ def analyze():
         ida_version = request.form.get('ida_version', 'ida').lower()
         if ida_version == 'ida64':
             print("Using IDA64")
-            IDA_PATH = IDA64_PATH
+            IDAT_PATH = IDAT64_PATH
         else:
-            IDA_PATH = IDA32_PATH
+            IDAT_PATH = IDAT32_PATH
         
         # 构建当天日期目录路径
         date_str = datetime.now().strftime('%Y%m%d')
@@ -254,27 +258,27 @@ def analyze():
         
         # 运行IDA分析
         cmd = [
-            IDA_PATH,
+            IDAT_PATH,
             '-A',  # 自动模式
             '-T',  # 不显示界面
-            f'-S\"{ANALYZE_SCRIPT}\"',  # 执行脚本
+            f'-S\"{BINEXPORT_SCRIPT}\"',  # 执行脚本
             bin_path
         ]
         logger.info(f"Executing: {' '.join(cmd)}")
         
         try:
+            proc_env = os.environ.copy()
+            proc_env.update({
+                "PYTHONHOME": PYTHONHOME,
+                "PYTHONPATH": PYTHONPATH
+            })
             result = subprocess.run(
                 cmd,
                 cwd=analysis_dir,  # 在工作目录执行
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=TIMEOUT,
-                env={
-                    "PATH": os.environ["PATH"],
-                    "SYSTEMROOT": os.environ["SYSTEMROOT"],
-                    "PYTHONHOME": PYTHONHOME,
-                    "PYTHONPATH": PYTHONPATH
-                },
+                env=proc_env,
             )
         except subprocess.TimeoutExpired:
             abort(408, "Analysis timeout")
@@ -289,8 +293,13 @@ def analyze():
         
         # 获取生成文件（假设脚本生成同名的.BinExport文件）
         export_path = bin_path + '.BinExport'
-        idb_path = bin_path + '.idb'
-        if not os.path.exists(export_path) or not os.path.exists(idb_path):
+        if ida_version == 'ida64':
+            idb_path = bin_path + '.i64'
+        else:
+            idb_path = bin_path + '.idb'
+        logger.info(f"Looking for export file: {export_path} and idb file: {idb_path}")
+        logger.info(f"Export file exists: {os.path.exists(export_path)}")
+        if not os.path.exists(export_path):
             logger.error(f"Export file not found: {export_path} or {idb_path}")
             abort(500, f"BinExport file not generated: {export_path}")
         
@@ -298,7 +307,7 @@ def analyze():
         zip_filename = os.path.join(analysis_dir, f"ida_analysis_{binary_name}.zip")
         with zipfile.ZipFile(zip_filename, 'w') as zipf:
             zipf.write(export_path, os.path.basename(export_path))
-            zipf.write(idb_path, os.path.basename(idb_path))
+            # zipf.write(idb_path, os.path.basename(idb_path))
 
         # 返回zip文件
         return send_file(
@@ -410,6 +419,136 @@ def export_pseudo_c():
         abort(500, f"Pseudo C export error: {str(e)}")
      
 
+@app.route('/get_function_call_info', methods=['POST'])
+def get_function_call_info():
+    """获取特定函数的调用链信息"""
+    try:
+        # 获取请求参数
+        binary_name = request.form.get('binary_name')
+        function_name = request.form.get('function_name')
+        
+        if not binary_name or not function_name:
+            abort(400, "Missing required parameters: binary_name or function_name")
+
+        # 获取IDA版本参数 (默认为ida32)
+        ida_version = request.form.get('ida_version', 'ida').lower()
+        if ida_version == 'ida64':
+            logger.info("Using IDA64 for function call info")
+            ida_path = IDA64_PATH
+        else:
+            ida_path = IDA32_PATH
+
+        # 构建当天日期目录路径
+        date_str = datetime.now().strftime('%Y%m%d')
+        analysis_dir = os.path.join(ida_output_dir, date_str)
+        # 确保工作目录存在，避免 Windows 下 cwd 非法导致 [WinError 267]
+        os.makedirs(analysis_dir, exist_ok=True)
+        
+        # 查找目标文件（支持绝对路径或位于 analysis_dir 的文件名）
+        bin_path = os.path.join(analysis_dir, binary_name)
+        if not os.path.exists(bin_path):
+            abort(404, f"Binary file not found: {binary_name}")
+
+        logger.info(f"Getting call info for function {function_name} in file {bin_path}")
+        
+        # 调用IDA运行analyze.py分析目标函数
+        try:
+            # 构建IDA命令
+            # 注意：不在 -S 参数中传递 --func，而是通过环境变量 IDA_FUNC_NAME 传递
+            # Windows下需要特别注意引号的处理
+            cmd = [
+                ida_path,
+                '-A',  # 自动模式
+                f'-S{ANALYZE_SCRIPT}',  # 注意：移除引号，因为subprocess.run会自动处理路径
+                bin_path
+            ]
+            
+            logger.info(f"Running IDA command: {' '.join(cmd)}")
+            logger.info(f"Function name passed via IDA_FUNC_NAME environment variable: {function_name}")
+            
+            # 执行命令，通过环境变量传递函数名
+            proc_env = os.environ.copy()
+            proc_env.update({
+                "PYTHONHOME": PYTHONHOME,
+                "PYTHONPATH": PYTHONPATH,
+                "IDA_FUNC_NAME": function_name  # 通过环境变量传递函数名
+            })
+            
+            logger.debug(f"Environment variables: IDA_FUNC_NAME={function_name}")
+
+            result = subprocess.run(
+                cmd,
+                cwd=analysis_dir,  # 在工作目录执行
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=TIMEOUT,
+                env=proc_env,
+            )
+            
+            stdout_text = result.stdout.decode(errors='ignore').strip()
+            stderr_text = result.stderr.decode(errors='ignore').strip()
+
+            if stdout_text:
+                logger.debug(f"IDA stdout: {stdout_text}")
+            if stderr_text:
+                logger.debug(f"IDA stderr: {stderr_text}")
+
+            # 检查执行结果
+            if result.returncode != 0:
+                error_msg = stderr_text or stdout_text or f"IDA exited with code {result.returncode}"
+                logger.error(f"IDA Error (code {result.returncode}): {error_msg}")
+                abort(500, f"IDA analysis failed: {error_msg}")
+            
+            # 读取生成的JSON结果文件
+            # 查找分析结果文件
+            json_files = []
+            for filename in os.listdir(analysis_dir):
+                if not filename.endswith('.json'):
+                    continue
+                if not (filename.startswith('ida_slice_') or filename.startswith('ida_combined_analysis_')):
+                    continue
+                if function_name in filename:
+                    json_files.append(os.path.join(analysis_dir, filename))
+            
+            if not json_files:
+                logger.error(f"Analysis result file not found for function {function_name}")
+                abort(500, "Analysis result file not found")
+            
+            # 使用最新的结果文件
+            json_files.sort(key=os.path.getmtime, reverse=True)
+            result_file = json_files[0]
+            
+            # 读取结果
+            with open(result_file, 'r', encoding='utf-8') as f:
+                analysis_result = json.load(f)
+            
+            # 构建响应数据
+            response_data = {
+                "function_name": function_name,
+                "binary_name": binary_name,
+                "function_info": analysis_result.get("function", {}),
+                "sinks": analysis_result.get("sinks", []),
+                "callers": analysis_result.get("callers", {}),
+                "chains": analysis_result.get("chains", []),
+                "assessments": analysis_result.get("nl_assessments", [])
+            }
+            
+            logger.info(f"Successfully retrieved call info for function {function_name}")
+            return jsonify(response_data), 200
+            
+        except subprocess.TimeoutExpired:
+            logger.error("IDA analysis timed out")
+            abort(408, "Analysis timeout")
+        except Exception as e:
+            logger.error(f"Error getting function call info: {str(e)}", exc_info=True)
+            abort(500, f"Failed to get function call info: {str(e)}")
+            
+    except Exception as e:
+        logger.error(f"Error in get_function_call_info: {str(e)}", exc_info=True)
+        abort(500, f"Internal server error: {str(e)}")
+     
+
 if __name__ == '__main__':
     from waitress import serve
     serve(app, host="0.0.0.0", port=port)
+
