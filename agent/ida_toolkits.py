@@ -14,7 +14,7 @@ class IdaToolkit(BaseToolkit):
     r"""A class representing a toolkit for Ida binary analysis."""
     
     async def get_screenshots(self, input_file_path: str, output_dir: str, ida_version: str = "ida32",
-                        screenshot_url: str = "http://10.12.189.40:5000/reversing_analyze_screenshot") -> List[str]:
+                        screenshot_url: str = "http://localhost:5000/reversing_analyze_screenshot") -> List[str]:
         r"""Get screenshots from the screenshot service.
         
         Args:
@@ -68,7 +68,7 @@ class IdaToolkit(BaseToolkit):
     
     async def get_binexport(self, input_file_path: str, output_dir: str, 
                         ida_version: str = "ida32", 
-                        bin_export_url: str = "http://10.12.189.40:5000/export_binexport") -> List[str]:
+                        bin_export_url: str = "http://localhost:5000/export_binexport") -> List[str]:
         r"""Get BinExport and IDB files from the analysis service.
         
         Args:
@@ -121,7 +121,7 @@ class IdaToolkit(BaseToolkit):
 
     async def get_pseudo_c(self, input_file_path: str, output_dir: str,
                         ida_version: str = "ida32",
-                        pseudo_c_url: str = "http://10.12.189.40:5000/export_pseudo_c") -> str:
+                        pseudo_c_url: str = "http://localhost:5000/export_pseudo_c") -> str:
         r"""Get pseudo C code from the analysis service.
         
         Args:

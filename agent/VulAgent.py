@@ -3,11 +3,12 @@ import os
 import time
 import json
 import ast
+import asyncio
 from fastapi import WebSocket
 from pathlib import Path
 from typing import Set
 
-from model import ChatModel, QwenChatModel, AgentModel
+from model import ChatModel, AgentModel
 from agent import UserAgent, PlannerAgent, ida
 from state import ProgressEnum
 from agent.bindiff_agent import BindiffAgent
@@ -157,6 +158,7 @@ class VulnAgent:
         self.agent = "Intelligence Agent"
         self.tool = None
         self.state = ProgressEnum.RUNNING
+        #  注释了的地方
         await self.send_message("情报收集智能体收集CVE相关信息",
                                  message_type="header1",
                                 agent=self.agent,)
@@ -185,6 +187,8 @@ class VulnAgent:
                                 message_type="header1",
                                 agent=self.agent) 
         files = self.files
+
+        print(f"固件文件列表: {files}")
         
         binwalk_results = []
 
@@ -199,6 +203,9 @@ class VulnAgent:
             logger.info(f"Binwalk result: {binwalk_result}")
             binwalk_results.append(binwalk_result)
 
+        #  注释了的地方
+        cve_details = "QNAP QTS and QuTS hero are affected by multiple vulnerabilities in various CGI scripts located in the /cgi-bin/ directory. These vulnerabilities allow unauthenticated attackers to execute arbitrary commands with root privileges by sending specially crafted HTTP requests to the affected CGI scripts. The vulnerabilities arise due to insufficient input validation and sanitization of user-supplied data in the affected scripts."
+        cwe = "CWE-78"
         cve_details = ""
         cwe = ""
         with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
@@ -207,7 +214,10 @@ class VulnAgent:
             cve_details = json.dumps(content['vulnerabilities'][0]['cve']['descriptions'][0]["value"])
             cwe = json.dumps(content['vulnerabilities'][0]['cve']['weaknesses'][0]["description"][0]['value'])
 
+
+
         print(f"cve_details: {cve_details}")
+        #  注释了的地方
         self.config_manager.update_agent_status("Binwalk Agent", "Binary Filter Agent")
         self.config_manager.update_tool_status("Binwalk", "Binary Filter")
 
@@ -227,6 +237,7 @@ class VulnAgent:
 
         suspicious_files = [os.path.join(name['binary_path']) for name in llm_result["suspicious_binaries"]]
         # suspicious_files = ['alphapd']
+        # suspicious_files = ['_0.extracted/home/httpd/cgi-bin/userConfig.cgi', '_0.extracted/home/httpd/cgi-bin/authLogin.cgi','_0.extracted/home/httpd/cgi-bin/sysinfoReq.cgi']
         print(f"可疑文件列表: {suspicious_files}")
         self.tool = None
         formatted_lines = [f"{i+1}. {path}" for i, path in enumerate(suspicious_files)]
@@ -235,8 +246,8 @@ class VulnAgent:
         await self.send_message(f"可疑文件: {suspicious_lines}",
                                     message_type="message",
                                     agent=self.agent)
-        idadir = os.path.join("/home/wzh/Desktop/Project/VulnAgent/history", self.chat_id, "ida")
-        bindiffdir = os.path.join("/home/wzh/Desktop/Project/VulnAgent/history", self.chat_id, "bindiff")
+        idadir = os.path.join(self.config_dir, self.chat_id, "ida")
+        bindiffdir = os.path.join(self.config_dir, self.chat_id, "bindiff")
         for file in suspicious_files:
             file1 = os.path.join(binwalk_results[0]['extracted_files_path'], file) 
             file2 = os.path.join(binwalk_results[1]['extracted_files_path'], file)
@@ -276,9 +287,9 @@ class VulnAgent:
                                     message_type="header1",
                                 agent=self.agent) 
 
-
-            result1 = await ida.ida_process(input_file_path=file1, output_dir=output_path1, ida_version="ida32", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
-            result2 = await ida.ida_process(input_file_path=file2, output_dir=output_path2, ida_version="ida32", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)  
+            ida_service_url = config.config["IDA_SERVICE"]["service_url"]
+            await ida.ida_process(input_file_path=file1, output_dir=output_path1, ida_service_url=ida_service_url, ida_version="ida64", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
+            await ida.ida_process(input_file_path=file2, output_dir=output_path2, ida_service_url=ida_service_url, ida_version="ida64", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
             output_file1 = os.path.join("test", f"{os.path.basename(file1)}.BinExport")
             output_file2 = os.path.join("test", f"{os.path.basename(file2)}.BinExport")
             output_dir = os.path.join(bindiffdir, f"{os.path.basename(file1)}")
