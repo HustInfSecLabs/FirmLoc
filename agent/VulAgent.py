@@ -158,7 +158,6 @@ class VulnAgent:
         self.agent = "Intelligence Agent"
         self.tool = None
         self.state = ProgressEnum.RUNNING
-        #  注释了的地方
         await self.send_message("情报收集智能体收集CVE相关信息",
                                  message_type="header1",
                                 agent=self.agent,)
@@ -187,8 +186,6 @@ class VulnAgent:
                                 message_type="header1",
                                 agent=self.agent) 
         files = self.files
-
-        print(f"固件文件列表: {files}")
         
         binwalk_results = []
 
@@ -203,9 +200,6 @@ class VulnAgent:
             logger.info(f"Binwalk result: {binwalk_result}")
             binwalk_results.append(binwalk_result)
 
-        #  注释了的地方
-        cve_details = "QNAP QTS and QuTS hero are affected by multiple vulnerabilities in various CGI scripts located in the /cgi-bin/ directory. These vulnerabilities allow unauthenticated attackers to execute arbitrary commands with root privileges by sending specially crafted HTTP requests to the affected CGI scripts. The vulnerabilities arise due to insufficient input validation and sanitization of user-supplied data in the affected scripts."
-        cwe = "CWE-78"
         cve_details = ""
         cwe = ""
         with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
@@ -214,10 +208,7 @@ class VulnAgent:
             cve_details = json.dumps(content['vulnerabilities'][0]['cve']['descriptions'][0]["value"])
             cwe = json.dumps(content['vulnerabilities'][0]['cve']['weaknesses'][0]["description"][0]['value'])
 
-
-
         print(f"cve_details: {cve_details}")
-        #  注释了的地方
         self.config_manager.update_agent_status("Binwalk Agent", "Binary Filter Agent")
         self.config_manager.update_tool_status("Binwalk", "Binary Filter")
 
@@ -237,7 +228,6 @@ class VulnAgent:
 
         suspicious_files = [os.path.join(name['binary_path']) for name in llm_result["suspicious_binaries"]]
         # suspicious_files = ['alphapd']
-        # suspicious_files = ['_0.extracted/home/httpd/cgi-bin/userConfig.cgi', '_0.extracted/home/httpd/cgi-bin/authLogin.cgi','_0.extracted/home/httpd/cgi-bin/sysinfoReq.cgi']
         print(f"可疑文件列表: {suspicious_files}")
         self.tool = None
         formatted_lines = [f"{i+1}. {path}" for i, path in enumerate(suspicious_files)]
