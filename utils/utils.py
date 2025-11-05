@@ -8,9 +8,79 @@ from datetime import datetime
 from log import logger
 
 
+def looks_like_firmware(file_path: str, min_size: int = 64 * 1024) -> bool:
+    """启发式判断一个无/非标准扩展名的文件是否像固件镜像。
+    判据：
+    - 尺寸阈值（默认 >=64KB）避免将小型文本/配置文件误判。
+    - 常见压缩/打包/文件系统/镜像魔数（gzip/xz/bzip2/zstd/lz4/tar/cpio/squashfs/jffs2/ubi/uImage 等）。
+    - 回退到二进制启发式检测（is_binary_file）。
+
+    返回 True 表示高度可疑为固件或固件容器。
+    """
+    try:
+        size = os.path.getsize(file_path)
+        if size < min_size:
+            return False
+
+        # 读取足够覆盖 tar 的 ustar 位置（偏移 257），再多读一点余量
+        with open(file_path, 'rb') as f:
+            head = f.read(560)
+
+        # 压缩格式
+        if head.startswith(b"\x1f\x8b"):  # gzip
+            return True
+        if head.startswith(b"\xFD7zXZ\x00"):  # xz
+            return True
+        if head.startswith(b"BZh"):  # bzip2
+            return True
+        if head.startswith(b"\x28\xB5\x2F\xFD"):  # zstd
+            return True
+        if head.startswith(b"\x04\x22\x4D\x18"):  # lz4 frame
+            return True
+        if head.startswith(b"\x5d\x00\x00\x80\x00"):  # lzma (常见 header)
+            return True
+
+        # 打包/归档
+        if len(head) >= 262 and head[257:262] == b"ustar":  # tar
+            return True
+        if head[:6] in {b"070701", b"070702", b"070707"}:  # cpio(newc/crc/odc)
+            return True
+
+        # 常见固件/文件系统镜像魔数
+        if head.startswith(b"\x27\x05\x19\x56"):  # U-Boot uImage
+            return True
+        # squashfs 魔数在头部可见为 hsqs 或 sqsh（不同端序展示）
+        if head.find(b"hsqs", 0, 64) != -1 or head.find(b"sqsh", 0, 64) != -1:
+            return True
+        # JFFS2 常见节点魔数 0x1985（小端 0x85 0x19），不完全可靠，但可作为弱信号
+        if head.startswith(b"\x85\x19"):
+            return True
+        # UBI/UBIFS 头部常见标识
+        if head.find(b"UBI#", 0, 64) != -1:
+            return True
+        # cramfs 魔数 0x28cd3d45（字节序列 E=\xcd( 常见于头部）
+        if head.find(b"E=\xcd(", 0, 64) != -1:
+            return True
+
+        # 名称启发式（配合尺寸阈值）
+        lower_name = os.path.basename(file_path).lower()
+        name_hints = (
+            "rootfs", "kernel", "uimage", "image", "firmware",
+            "sysupgrade", "factory", "squashfs", "ubi", "ubifs",
+        )
+        if any(h in lower_name for h in name_hints):
+            return True
+
+        # 回退：一般二进制/可执行的启发式（ELF/PE 或高二进制特征）
+        return is_binary_file(file_path)
+    except Exception:
+        # 保守处理：发生异常时不认为是固件
+        return False
+
+
 def get_firmware_files(directory: str, recursive: bool = False) -> List:
         """
-        获取指定目录下的固件文件
+    获取指定目录下的固件文件（支持无扩展名的固件，如 rootfs2）。
         :param directory: 目标目录路径
         :param recursive: 是否递归搜索子目录
         :return: 匹配的固件文件路径列表
@@ -48,11 +118,19 @@ def get_firmware_files(directory: str, recursive: bool = False) -> List:
         for item in file_iterator:
             try:
                 # 过滤：必须是文件，且扩展名匹配
-                if item.is_file() and item.suffix.lower() in firmware_extensions:
-                    firmware_files.append(str(item.resolve()))
+                if item.is_file():
+                    suffix = item.suffix.lower()
+                    # 1) 扩展名直接命中
+                    if suffix in firmware_extensions:
+                        firmware_files.append(str(item.resolve()))
+                        continue
+                    # 2) 无扩展名或非常见扩展名，进行启发式判定
+                    if suffix == '' or suffix not in firmware_extensions:
+                        if looks_like_firmware(str(item)):
+                            firmware_files.append(str(item.resolve()))
             except (PermissionError, OSError) as e:
                 # 处理无法访问的文件
-                print(f"跳过无法访问的文件: {item} - {str(e)}")
+                logger.warning(f"跳过无法访问的文件: {item} - {str(e)}")
                 continue
         # （按文件名升序）
         firmware_files.sort(key=lambda x: x.lower())
