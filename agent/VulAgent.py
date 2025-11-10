@@ -135,6 +135,11 @@ class VulnAgent:
             print(f"文件路径：{full_path}")
             print(f"文件大小：{size_bytes} 字节")
 
+        if len(self.files) != 2:
+            error_msg = "请上传两个固件文件以进行比较分析。"
+            await self.send_message(error_msg, message_type="message")
+            logger.error(error_msg)
+            return error_msg
         self.tasks = """
 ## 1.使用Binwalk提取固件文件
 ## 2.筛选出可能存在漏洞的二进制文件
