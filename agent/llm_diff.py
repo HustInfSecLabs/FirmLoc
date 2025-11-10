@@ -13,6 +13,8 @@ import glob, time, random
 from datetime import datetime
 
 from model import AgentModel
+from log import logger
+
 
 # 读取漏洞类型对应的Scenario和Property的JSON文件路径
 VULNERABILITY_SCENARIOS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'vulnerability_scenarios.json')
@@ -116,7 +118,7 @@ async def async_gpt_inference(
             # 如果不是字符串，转换为字符串
             return str(result)
     except Exception as e:
-        print(f"异步推理失败: {e}")
+        logger.error(f"异步推理失败: {e}")
         return f"异步推理失败: {str(e)}"
 
 def gpt_inference(prompt: str = None, temperature: int = 0, default_system_prompt: str = None, history: list = None):
@@ -134,14 +136,14 @@ def gpt_inference(prompt: str = None, temperature: int = 0, default_system_promp
                 messages.append({"role": "user", "content": q})
                 messages.append({"role": "assistant", "content": a})
             else:
-                print(f"警告: 历史记录格式不正确: {his}")
+                logger.warning(f"历史记录格式不正确: {his}")
         messages.append({"role": "user", "content": prompt})
         result = llm_diff_agent.chat(prompt=prompt)
 
         return result
     except Exception as e:
-        print(f"GPT推理失败: {e}")
-        return f"GPT推理失败: {str(e)}"
+        logger.error(f"大模型推理失败: {e}")
+        return f"大模型推理失败: {str(e)}"
 
 # 加载漏洞类型对应的Scenario和Property
 def load_vulnerability_scenarios():
@@ -153,7 +155,7 @@ def load_vulnerability_scenarios():
         with open(VULNERABILITY_SCENARIOS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        print(f"加载漏洞场景文件失败: {e}")
+        logger.error(f"加载漏洞场景文件失败: {e}")
         return {}
 
 # 保存漏洞类型对应的Scenario和Property
@@ -164,7 +166,7 @@ def save_vulnerability_scenarios(scenarios):
             json.dump(scenarios, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
-        print(f"保存漏洞场景文件失败: {e}")
+        logger.error(f"保存漏洞场景文件失败: {e}")
         return False
 
 # 生成指定漏洞类型的Scenario和Property
@@ -183,7 +185,7 @@ def generate_vulnerability_scenario(vulnerability_type):
         scenario_data = json.loads(result)
         return scenario_data
     except Exception as e:
-        print(f"生成漏洞场景失败: {e}")
+        logger.error(f"生成漏洞场景失败: {e}")
         return None
 
 # 获取指定漏洞类型的Scenario和Property
@@ -215,14 +217,14 @@ def load_cwe_samples(samples_path=None):
             os.path.join(os.path.dirname(__file__), "..", "data", "cwe_samples.json")
         )
         if not os.path.exists(samples_path):
-            print(f"无法找到cwe_samples.json文件，默认路径: {samples_path}")
+            logger.warning(f"无法找到cwe_samples.json文件，默认路径: {samples_path}")
             return {}
     
     try:
         with open(samples_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        print(f"加载cwe_samples.json失败: {e}")
+        logger.error(f"加载cwe_samples.json失败: {e}")
         return {}
 
 # 根据CWE类型选择正负样例
@@ -230,7 +232,7 @@ def select_cwe_samples(cwe_type, samples, num_positive=2, num_negative=2):
     """根据CWE类型选择指定数量的正负样例"""
     cwe_samples = samples.get(cwe_type, [])
     if not cwe_samples:
-        print(f"未找到{cwe_type}类型的样例")
+        logger.warning(f"未找到{cwe_type}类型的样例")
         return [], []
     
     # 分离正负样例
@@ -286,7 +288,7 @@ def locate_paths(chat_id: str, history_root: str | Path, binary_filename: str) -
     ida_dir  = root / "ida"
     bd_dir   = root / "bindiff" /binary_filename
 
-    print("DEBUG  bd_dir =")
+    logger.debug("DEBUG  bd_dir =")
     # print("DEBUG  items  =", [p.name for p in bd_dir.iterdir()])
     # matches = sorted(bd_dir.glob("*.results"))
     # print("DEBUG  matches=", [m.name for m in matches])
@@ -428,13 +430,13 @@ def write_extracted(pseudo_file, base_names, out_dir):
     lines = open(pseudo_file,'r',encoding='utf-8').read().splitlines(keepends=True)
     for base in base_names:
         if base not in funcs:
-            print(f"未找到函数 “{base}”")
+            logger.warning(f"未找到函数 “{base}”")
             continue
         i,j = funcs[base]
         out = os.path.join(out_dir, f"{base}.c")
         with open(out,'w',encoding='utf-8') as w:
             w.writelines(lines[i:j])
-        print(f"  extracted {base} → {out}")
+        logger.info(f"extracted {base} → {out}")
 
 class Refiner:
     def __init__(self, LOG_FILE):
@@ -565,110 +567,152 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             
             # 由于这是一个异步函数，我们需要使用asyncio.to_thread来包装同步的requests调用
             loop = asyncio.get_event_loop()
+            logger.info(f"调用 get_function_call_info | bin={binary_name} func={function_name}")
             response = await loop.run_in_executor(
                 None, 
                 lambda: requests.post(url, data=data, timeout=60)  # 增加超时时间以适应IDA分析
             )
             
             if response.status_code == 200:
-                return response.json()
+                # 期望返回结构应与 IDA 导出 JSON 一致，包含 data_flow 字段
+                # 这里不做结构转换，直接按原样返回，留给上层格式化时筛选关键字段
+                payload = response.json()
+                logger.debug(f"get_function_call_info 返回大小: {len(json.dumps(payload, ensure_ascii=False))} 字节")
+                return payload
             else:
-                print(f"API调用失败，状态码: {response.status_code}")
-                print(f"响应内容: {response.text}")
+                logger.error(f"API调用失败，状态码: {response.status_code}")
+                logger.error(f"响应内容: {response.text}")
                 return {}
         except Exception as e:
-            print(f"API调用异常: {e}")
+            logger.error(f"API调用异常: {e}")
             return {}
     
-    def format_func_call_info(self, call_info):
-        """格式化函数调用链信息为可读文本"""
-        if not call_info:
+    def _format_key_param_data_flow(self, call_info: dict) -> str:
+        """仅提取关键参数的数据流，格式化为简洁文本，供大模型参考。
+
+        规则：
+        - 以 chains 中的 sink 参数为入口；
+        - 只保留高风险来源的参数：http_header / network_socket / user_input / file_read；
+        - 若参数为变量(variable)，但其溯源(rhs_class 或 origin)显示为上述高风险来源，也纳入；
+        - 优先从 data_flow.backward_flow 提取该变量的切片起点(使用语句)及最近的定义语句；
+        - 生成简洁的“源 -> 变量传播 -> sink”路径描述。
+        """
+        if not isinstance(call_info, dict) or not call_info:
             return ""
-        
-        formatted_info = []
-        
-        # 从新的响应格式中提取信息
-        # 添加函数信息
-        if "function_info" in call_info:
-            func_info = call_info["function_info"]
-            if isinstance(func_info, dict):
-                # 如果function_info是字典，提取其中的信息
-                if "name" in func_info:
-                    formatted_info.append(f"函数名: {func_info['name']}")
-                if "address" in func_info:
-                    formatted_info.append(f"函数地址: {func_info['address']}")
-                if "size" in func_info:
-                    formatted_info.append(f"函数大小: {func_info['size']} 字节")
-            else:
-                # 否则直接显示
-                formatted_info.append(f"函数信息: {func_info}")
-        
-        # 添加风险函数（sinks）
-        if "sinks" in call_info and call_info["sinks"]:
-            sinks = call_info["sinks"]
-            if isinstance(sinks, list):
-                formatted_info.append(f"风险函数: {', '.join(sinks)}")
-            else:
-                formatted_info.append(f"风险函数: {sinks}")
-        
-        # 添加调用者（callers）
-        if "callers" in call_info and call_info["callers"]:
-            callers = call_info["callers"]
-            if isinstance(callers, list):
-                formatted_info.append(f"调用该函数的函数: {', '.join(callers)}")
-            else:
-                formatted_info.append(f"调用该函数的函数: {callers}")
-        
-        # 添加函数调用链（chains）
-        if "chains" in call_info and call_info["chains"]:
-            chains = call_info["chains"]
-            if isinstance(chains, list):
-                # 格式化调用链，每个调用链占一行
-                for i, chain in enumerate(chains, 1):
-                    if isinstance(chain, list):
-                        formatted_info.append(f"调用链 {i}: {' -> '.join(chain)}")
-                    else:
-                        formatted_info.append(f"调用链 {i}: {chain}")
-            else:
-                formatted_info.append(f"调用链: {chains}")
-        
-        # 添加评估结果（assessments）
-        if "assessments" in call_info and call_info["assessments"]:
-            assessments = call_info["assessments"]
-            if isinstance(assessments, dict):
-                for key, value in assessments.items():
-                    formatted_info.append(f"{key}: {value}")
-            else:
-                formatted_info.append(f"评估结果: {assessments}")
-        
-        # # 兼容旧格式
-        # if not formatted_info:  # 如果上面的新格式处理没有添加任何信息
-        #     # 添加函数名（旧格式）
-        #     if "function_name" in call_info:
-        #         formatted_info.append(f"函数名: {call_info['function_name']}")
-            
-        #     # 添加被调用函数（旧格式）
-        #     if "callees" in call_info and call_info["callees"]:
-        #         formatted_info.append(f"被调用函数: {', '.join(call_info['callees'])}")
-            
-        #     # 添加函数调用链（旧格式）
-        #     if "call_chain" in call_info and call_info["call_chain"]:
-        #         formatted_info.append(f"函数调用链: {' -> '.join(call_info['call_chain'])}")
-            
-        #     # 添加函数特征（旧格式）
-        #     if "features" in call_info and call_info["features"]:
-        #         formatted_info.append(f"函数特征: {call_info['features']}")
-        
-        return "\n".join(formatted_info)
+
+        high_risk_sources = {"http_header", "network_socket", "user_input", "file_read"}
+
+        def short(s: str, n: int = 200) -> str:
+            s = s or ""
+            return s if len(s) <= n else s[:n] + "..."
+
+        lines = []
+        func = call_info.get("function", {})
+        fname = func.get("name") or call_info.get("function_name")
+        if fname:
+            lines.append(f"[函数] {fname}")
+
+        # 准备索引：data_flow 便于快速检索
+        df = call_info.get("data_flow", {}) or {}
+        backward_flow = df.get("backward_flow", {}) or {}
+
+        chains = call_info.get("chains", []) or []
+        logger.debug(f"_format_key_param_data_flow: sinks={len(chains)}")
+        for sink in chains:
+            callee = sink.get("callee")
+            snippet = sink.get("snippet")
+            args = sink.get("args", []) or []
+
+            # 每个 sink 单独一段
+            if callee:
+                lines.append(f"[Sink] {callee}")
+            if snippet:
+                lines.append(f"  代码片段: {short(snippet)}")
+
+            for arg in args:
+                a_text = (arg or {}).get("text", "")
+                a_idx = (arg or {}).get("arg_index")
+                classification = ((arg or {}).get("classification") or {}).get("type", "")
+
+                # 判断是否为关键参数
+                # 1) 直接是高风险来源
+                is_key = classification in high_risk_sources
+
+                # 2) 若为变量/未知，检查其溯源链条中的 rhs_class / origin 类型
+                origin_types = set()
+                for ch in (arg or {}).get("chains", []) or []:
+                    rhs = (ch or {}).get("rhs_class") or {}
+                    o = (ch or {}).get("origin") or {}
+                    if isinstance(rhs, dict):
+                        t = rhs.get("type")
+                        if t:
+                            origin_types.add(t)
+                    if isinstance(o, dict):
+                        t = o.get("type")
+                        if t:
+                            origin_types.add(t)
+                if origin_types & high_risk_sources:
+                    is_key = True
+
+                if not is_key:
+                    # 跳过非关键参数/常量等
+                    continue
+
+                # 输出参数头
+                hdr = f"  [关键参数] arg{a_idx}: {a_text} ({classification or 'unknown'})"
+                if origin_types:
+                    hdr += f" | 溯源: {', '.join(sorted(origin_types))}"
+                lines.append(hdr)
+
+                # 3) 尝试从 backward_flow 裁剪关键路径
+                var_name = a_text.strip()
+                # 只在变量名字看起来像标识符时检索逆向切片
+                if re.match(r'^[A-Za-z_]\w*$', var_name) and var_name in backward_flow:
+                    entries = backward_flow.get(var_name) or []
+                    # 选取与 sink 语句最相关的一条（优先包含 sink 语句的）
+                    picked = None
+                    if isinstance(entries, list):
+                        # 粗略挑选第一条
+                        picked = entries[0] if entries else None
+                    if isinstance(picked, dict):
+                        use_text = picked.get("use_stmt_text")
+                        if use_text:
+                            lines.append(f"    使用点: {short(use_text)}")
+                        slices = picked.get("slices", []) or []
+                        # 展示最多 2 条最近定义
+                        shown = 0
+                        for sl in slices:
+                            def_stmt = (sl or {}).get("def_stmt") or {}
+                            dtext = def_stmt.get("text")
+                            if dtext:
+                                lines.append(f"    定义: {short(dtext)}")
+                                shown += 1
+                            if shown >= 2:
+                                break
+
+                # 4) 若 chains 中已有明显链路，提炼 1-2 条关键信息
+                for ch in (arg or {}).get("chains", []) or []:
+                    rhs = (ch or {}).get("rhs_class") or {}
+                    detail = rhs.get("detail") if isinstance(rhs, dict) else None
+                    if detail:
+                        lines.append(f"    溯源片段: {short(detail)}")
+
+        # 若无任何关键参数，返回空字符串，避免干扰 RAG 提示
+        if len(lines) <= (1 if fname else 0):
+            return ""
+        text = "\n".join(lines)
+        logger.debug(f"关键参数数据流上下文长度: {len(text)}")
+        return text
+    
         
     async def async_query2bot(self, fa, fb, cve_details=None, cwe=None) -> str:
         """异步版本的query2bot函数"""
-        print(f"→ 开始分析 {os.path.basename(fa)} vs {os.path.basename(fb)}")
+        logger.info(f"开始分析 {os.path.basename(fa)} vs {os.path.basename(fb)}")
         
         # 检查缓存中是否已有结果
         cache_key = (os.path.basename(fa), os.path.basename(fb))
         if cache_key in self._task_cache:
-            print(f"← 从缓存获取 {os.path.basename(fa)} vs {os.path.basename(fb)} 的分析结果")
+            logger.info(f"从缓存获取 {os.path.basename(fa)} vs {os.path.basename(fb)} 的分析结果")
             return self._task_cache[cache_key]
 
         # 读两个.c文件的内容
@@ -676,7 +720,7 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             a_content = open(fa, 'r', encoding='utf-8').read()
             b_content = open(fb, 'r', encoding='utf-8').read()
         except Exception as e:
-            print(f"读取函数文件失败: {e}")
+            logger.error(f"读取函数文件失败: {e}")
             return f"读取函数文件失败: {str(e)}"
 
         prompt = self.make_prompt(
@@ -693,16 +737,16 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
                 default_system_prompt="You are a security analysis assistant."
             )
         except Exception as e:
-            print(f"大模型推理失败: {e}")
+            logger.error(f"大模型推理失败: {e}")
             return f"大模型推理失败: {str(e)}"
 
         try:
             with open(self.log, 'a', encoding='utf-8') as w:
                 w.write(f"=== {os.path.basename(fa)} vs {os.path.basename(fb)} ===\n")
                 w.write(result + "\n\n")
-            print(f"写入分析结果到日志 {self.log}")
+            logger.info(f"写入分析结果到日志 {self.log}")
         except Exception as e:
-            print(f"写日志失败: {e}")
+            logger.error(f"写日志失败: {e}")
         
         # 检查是否需要进行二次判断
         need_rag = False
@@ -731,7 +775,7 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
                     if (
                         isinstance(sm, str) and isinstance(pm, str)
                         and sm.strip().lower() == "yes"
-                        and pm.strip().lower() == "yes"
+                        or pm.strip().lower() == "yes"
                     ):
                         need_rag = True
 
@@ -748,7 +792,7 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
                         need_rag = True
         
         if need_rag:
-            print(f"→ 对 {os.path.basename(fa)} vs {os.path.basename(fb)} 进行二次判断")
+            logger.info(f"对 {os.path.basename(fa)} vs {os.path.basename(fb)} 进行二次判断")
             # 进行RAG二次判断
             rag_result = await self.async_rag_query2bot(fa, fb, cve_details, cwe)
             final_result = f"初次分析结果:\n{result}\n\nRAG二次分析结果:\n{rag_result}"
@@ -766,7 +810,7 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             a_content = open(fa, 'r', encoding='utf-8').read()
             b_content = open(fb, 'r', encoding='utf-8').read()
         except Exception as e:
-            print(f"读取函数文件失败: {e}")
+            logger.error(f"读取函数文件失败: {e}")
             return "读取函数文件失败"
 
         # 提取函数名
@@ -797,27 +841,25 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
 
             post_binary_name = f"{name_part}1{ext}"
 
-            print(f"尝试获取函数调用链信息: {pre_func_name} 和 {post_func_name} | chat_id={chat_id}, pre_bin={pre_binary_name}, post_bin={post_binary_name}")
+            logger.info(f"尝试获取函数调用链信息: {pre_func_name} 和 {post_func_name} | chat_id={chat_id}, pre_bin={pre_binary_name}, post_bin={post_binary_name}")
 
-            # 获取补丁前函数调用链
+            # 获取补丁前/后的函数调用链 JSON（包含 data_flow）
             pre_func_call_info = await self.get_function_call_info(pre_binary_name, pre_func_name)
-
-            # 获取补丁后函数调用链（按规则生成的唯一 post 名称）
             post_func_call_info = await self.get_function_call_info(post_binary_name, post_func_name)
             
-            # 格式化函数调用链信息
-            pre_func_context = self.format_func_call_info(pre_func_call_info)
-            post_func_context = self.format_func_call_info(post_func_call_info)
+            # 仅提取“关键参数的数据流”提供给大模型
+            pre_func_context = self._format_key_param_data_flow(pre_func_call_info)
+            post_func_context = self._format_key_param_data_flow(post_func_call_info)
 
             # 控制台输出上下文，便于快速排查
             if pre_func_context:
-                print("[RAG] 补丁前函数上下文:\n" + pre_func_context)
+                logger.debug("[RAG] 补丁前函数上下文:\n" + pre_func_context)
             else:
-                print("[RAG] 补丁前函数上下文: <empty>")
+                logger.debug("[RAG] 补丁前函数上下文: <empty>")
             if post_func_context:
-                print("[RAG] 补丁后函数上下文:\n" + post_func_context)
+                logger.debug("[RAG] 补丁后函数上下文:\n" + post_func_context)
             else:
-                print("[RAG] 补丁后函数上下文: <empty>")
+                logger.debug("[RAG] 补丁后函数上下文: <empty>")
 
             # 将函数上下文信息记录到日志文件
             try:
@@ -828,15 +870,15 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
                     w.write("[Post]\n")
                     w.write((post_func_context or "<empty>") + "\n\n")
             except Exception as _e:
-                print(f"写入函数上下文到日志失败: {_e}")
+                logger.error(f"写入函数上下文到日志失败: {_e}")
             
         except Exception as e:
-            print(f"获取函数调用链信息失败: {e}")
+            logger.error(f"获取函数调用链信息失败: {e}")
             pre_func_context = ""  # 如果获取失败，使用空字符串
             post_func_context = ""
         
         # 记录获取到的函数上下文信息
-        print(f"函数上下文信息获取完成")
+        logger.info("函数上下文信息获取完成")
         
         # 生成带有函数调用链信息的提示词
         prompt = self.make_rag_prompt(
@@ -855,8 +897,8 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
                 default_system_prompt="You are a security analysis assistant."
             )
         except Exception as e:
-            print(f"GPT RAG推理失败: {e}")
-            return f"GPT RAG推理失败: {str(e)}"
+            logger.error(f"RAG推理失败: {e}")
+            return f"RAG推理失败: {str(e)}"
 
         try:
             with open(self.log, 'a', encoding='utf-8') as w:
@@ -867,9 +909,9 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
                 w.write("[Post]\n")
                 w.write((post_func_context or "<empty>") + "\n")
                 w.write(result + "\n\n")
-            print(f"写入RAG分析结果到日志 {self.log}")
+            logger.info(f"写入RAG分析结果到日志 {self.log}")
         except Exception as e:
-            print(f"写RAG日志失败: {e}")
+            logger.error(f"写RAG日志失败: {e}")
 
         # 在返回的输出中追加上下文，便于前端/调用方查看（不干扰模型输出的 JSON 本体，先给 JSON 再给上下文）
         if result:
@@ -896,21 +938,21 @@ async def main(chat_id: str,
 
     globals().update(paths)        # 直接把常量名注入全局
 
-    print("路径确认：")
+    logger.info("路径确认：")
     for k, v in paths.items():
-        print(f"{k:<12}= {v}")
-    print()
+        logger.info(f"{k:<12}= {v}")
+    logger.info("")
 
 
-    print(f"\n补丁前伪C路径: {pre_c}")
-    print(f"补丁后伪C路径: {post_c}")
+    logger.info(f"补丁前伪C路径: {pre_c}")
+    logger.info(f"补丁后伪C路径: {post_c}")
 
     # 2. 从 BinDiff 结果中解析函数对应关系
     func_mapping = parse_result_funcs(RESULTS_FILE)
-    print(f"补丁变化函数对数量: {len(func_mapping)}\n")
+    logger.info(f"补丁变化函数对数量: {len(func_mapping)}")
 
     if not func_mapping:
-        print("没有解析到变化的函数对，退出")
+        logger.warning("没有解析到变化的函数对，退出")
         await send_message("没有解析到变化的函数对",
                            "message",
                            agent="Detection Agent")
@@ -936,7 +978,7 @@ async def main(chat_id: str,
             tasks.append(r.async_query2bot(pre_func_path, post_func_path, cve_details, cwe))
             func_paths.append((pre_func_path, post_func_path))
         else:
-            print(f"缺少文件 {pre_func_path} 或 {post_func_path}，跳过")
+            logger.warning(f"缺少文件 {pre_func_path} 或 {post_func_path}，跳过")
     
     # 使用信号量控制并发数量，防止同时创建过多任务
     concurrency_limit = 5  # 根据系统资源和API限制调整
@@ -950,7 +992,7 @@ async def main(chat_id: str,
                 # 确保返回正确格式的元组
                 return index, result
             except Exception as e:
-                print(f"任务执行失败: {e}")
+                logger.error(f"任务执行失败: {e}")
                 # 即使出现异常，也确保返回正确格式的元组
                 return index, f"分析失败: {str(e)}"
     
@@ -982,8 +1024,8 @@ async def main(chat_id: str,
             temperature=0,
             default_system_prompt="You are a security analysis summary assistant."
         )
-        print("\n总结报告：")
-        print(summary)
+        logger.info("总结报告：")
+        logger.info(summary)
         if send_message:
             await send_message(
                 f"漏洞分析总结：\n{summary}",
@@ -991,14 +1033,14 @@ async def main(chat_id: str,
                 agent=r.agent
             )
     except Exception as e:
-        print(f"生成总结失败: {e}")
+        logger.error(f"生成总结失败: {e}")
         if send_message:
             await send_message(
                 f"未分析出差异结果",
                 "message",
                 agent=r.agent
             )
-    print("\n全部分析完成！")
+    logger.info("全部分析完成！")
 
 # 包装函数，保持向后兼容性
 async def llm_diff(chat_id: str, history_root: str, binary_filename: str, 

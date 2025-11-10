@@ -522,19 +522,9 @@ def get_function_call_info():
             with open(result_file, 'r', encoding='utf-8') as f:
                 analysis_result = json.load(f)
             
-            # 构建响应数据
-            response_data = {
-                "function_name": function_name,
-                "binary_name": binary_name,
-                "function_info": analysis_result.get("function", {}),
-                "sinks": analysis_result.get("sinks", []),
-                "callers": analysis_result.get("callers", {}),
-                "chains": analysis_result.get("chains", []),
-                "assessments": analysis_result.get("nl_assessments", [])
-            }
-            
+            # 直接返回完整结果，保证结构与生成的 JSON 文件一致（含 data_flow 字段）
             logger.info(f"Successfully retrieved call info for function {function_name}")
-            return jsonify(response_data), 200
+            return jsonify(analysis_result), 200
             
         except subprocess.TimeoutExpired:
             logger.error("IDA analysis timed out")
