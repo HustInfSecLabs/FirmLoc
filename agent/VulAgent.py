@@ -6,7 +6,7 @@ import ast
 import asyncio
 from fastapi import WebSocket
 from pathlib import Path
-from typing import Set
+from typing import Optional, Set
 
 from model import ChatModel, AgentModel
 from agent import UserAgent, PlannerAgent, ida
@@ -25,13 +25,25 @@ from config import config_manager as config
 
 
 class VulnAgent:
-    def __init__(self, chat_id: str, user_input: str, websocket: WebSocket, user_model: ChatModel = AgentModel("DeepSeek"), planner_model: ChatModel = AgentModel("DeepSeek"), config_dir: str = './history'):
+    def __init__(
+        self,
+        chat_id: str,
+        user_input: str,
+        websocket: WebSocket,
+        cve_id: Optional[str] = None,
+        binary_filename: Optional[str] = None,
+        user_model: ChatModel = AgentModel("DeepSeek"),
+        planner_model: ChatModel = AgentModel("DeepSeek"),
+        config_dir: str = './history'
+    ):
         self.user_model = user_model
         self.planner_model = planner_model
         self.config_dir = config_dir
         self.chat_id = str(chat_id)
         self.user_input = user_input
         self.websocket = websocket
+        self.cve_id = cve_id
+        self.binary_filename = binary_filename
         
         self.is_last = False
         self.agent = None
@@ -119,6 +131,12 @@ class VulnAgent:
         :return: 聊天响应
         """
 
+        if not self.cve_id or not self.binary_filename:
+            error_msg = "缺少CVE编号或目标二进制文件名称，无法继续执行分析。"
+            await self.send_message(error_msg, message_type="message")
+            logger.error(error_msg)
+            return error_msg
+
         def show_file_info(full_path: str):
             """
             给定目录路径和文件名，打印文件的完整路径以及文件大小。
@@ -166,7 +184,7 @@ class VulnAgent:
         await self.send_message("情报收集智能体收集CVE相关信息",
                                  message_type="header1",
                                 agent=self.agent,)
-        search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id=config.config["CVE"]["cve_id"]) # CVE-2019-20760 CVE-2021-20090 CVE-2024-39226
+        search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id=self.cve_id)
         logger.info(f"Online search result: {search_result}")
 
         with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
@@ -222,7 +240,7 @@ class VulnAgent:
                                  message_type="header1",
                                 agent=self.agent)
         llm_result = self.BinaryFilterAgent.process(
-            binary_filename=config.config["CVE"]["binary_filename"],
+            binary_filename=self.binary_filename,
             extracted_files_path=binwalk_results[0]['extracted_files_path'],
             cve_details=cve_details
         )
