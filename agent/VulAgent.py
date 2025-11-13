@@ -223,6 +223,14 @@ class VulnAgent:
             logger.info(f"Binwalk result: {binwalk_result}")
             binwalk_results.append(binwalk_result)
 
+        # 检查是否有提取失败的情况
+        failed_results = [r for r in binwalk_results if r.get('status') == 'error']
+        if failed_results:
+            error_msg = f"固件提取失败: {'; '.join([r.get('message', '未知错误') for r in failed_results])}"
+            await self.send_message(error_msg, message_type="message", agent=self.agent)
+            logger.error(error_msg)
+            return error_msg
+
         cve_details = ""
         cwe = ""
         with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
