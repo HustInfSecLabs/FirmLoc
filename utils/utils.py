@@ -227,6 +227,88 @@ def rename_file_with_b64_timestamp(file_path):
     logger.info(f"文件重命名成功: {file_path} -> {new_path}")
     return new_path
 
+def get_binary_architecture(file_path: str) -> str:
+    """
+    检测二进制文件的架构（32位或64位），返回对应的 IDA 版本
+    
+    Args:
+        file_path: 二进制文件路径
+        
+    Returns:
+        str: "ida" (32位), "ida64" (64位), 或 "ida64" (默认/无法识别时)
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(64)  # 读取足够的字节来判断
+            
+            if len(header) < 5:
+                logger.warning(f"文件太小，无法判断架构: {file_path}，默认使用 ida64")
+                return "ida64"
+            
+            # ELF 文件格式判断
+            if header.startswith(b'\x7FELF'):
+                # ELF 类型在第5个字节 (offset 4)
+                # 1 = 32-bit, 2 = 64-bit
+                ei_class = header[4]
+                if ei_class == 1:
+                    logger.info(f"检测到 32位 ELF 文件: {file_path}")
+                    return "ida"
+                elif ei_class == 2:
+                    logger.info(f"检测到 64位 ELF 文件: {file_path}")
+                    return "ida64"
+                else:
+                    logger.warning(f"未知 ELF 类型: {ei_class}，默认使用 ida64")
+                    return "ida64"
+            
+            # PE 文件格式判断 (Windows)
+            elif header.startswith(b'MZ'):
+                # PE header offset at 0x3C
+                if len(header) >= 0x3C + 4:
+                    pe_offset = int.from_bytes(header[0x3C:0x3C+4], byteorder='little')
+                    
+                    # 需要读取更多字节来获取 PE 头信息
+                    f.seek(0)
+                    pe_data = f.read(pe_offset + 24)
+                    
+                    if len(pe_data) >= pe_offset + 24:
+                        # 检查 PE 签名
+                        if pe_data[pe_offset:pe_offset+4] == b'PE\0\0':
+                            # Machine type at PE_offset + 4
+                            machine_type = int.from_bytes(
+                                pe_data[pe_offset+4:pe_offset+6], 
+                                byteorder='little'
+                            )
+                            # 0x014c = IMAGE_FILE_MACHINE_I386 (32-bit)
+                            # 0x8664 = IMAGE_FILE_MACHINE_AMD64 (64-bit)
+                            if machine_type == 0x014c:
+                                logger.info(f"检测到 32位 PE 文件: {file_path}")
+                                return "ida"
+                            elif machine_type == 0x8664:
+                                logger.info(f"检测到 64位 PE 文件: {file_path}")
+                                return "ida64"
+                
+                logger.warning(f"无法确定 PE 文件架构，默认使用 ida64: {file_path}")
+                return "ida64"
+            
+            # Mach-O 文件格式判断 (macOS)
+            elif header[:4] in [b'\xFE\xED\xFA\xCE', b'\xCE\xFA\xED\xFE']:
+                # 32-bit Mach-O
+                logger.info(f"检测到 32位 Mach-O 文件: {file_path}")
+                return "ida"
+            elif header[:4] in [b'\xFE\xED\xFA\xCF', b'\xCF\xFA\xED\xFE']:
+                # 64-bit Mach-O
+                logger.info(f"检测到 64位 Mach-O 文件: {file_path}")
+                return "ida64"
+            
+            # 未知格式，默认使用 64 位
+            logger.warning(f"未识别的文件格式，默认使用 ida64: {file_path}")
+            return "ida64"
+            
+    except Exception as e:
+        logger.error(f"检测文件架构时发生错误: {file_path}, {str(e)}")
+        return "ida64"  # 出错时默认使用 64 位
+
+
 def is_binary_file(file_path: str) -> bool:
     """Check if a file is a binary executable (ELF, PE) or non-text file.
     Args:

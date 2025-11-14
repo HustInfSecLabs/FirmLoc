@@ -19,7 +19,7 @@ from agent.llm_diff import main as llm_diff
 from agent.binary_filter import BinaryFilterAgent
 from log import logger
 from utils import ConfigManager, PlanManager
-from utils.utils import get_firmware_files, copy_file, is_binary_file
+from utils.utils import get_firmware_files, copy_file, is_binary_file, get_binary_architecture
 from config import config_manager as config
 
 
@@ -309,8 +309,16 @@ class VulnAgent:
                                 agent=self.agent) 
 
             ida_service_url = config.config["IDA_SERVICE"]["service_url"]
-            await ida.ida_process(input_file_path=file1, output_dir=output_path1, ida_service_url=ida_service_url, ida_version="ida64", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
-            await ida.ida_process(input_file_path=file2, output_dir=output_path2, ida_service_url=ida_service_url, ida_version="ida64", config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
+            
+            # 自动检测文件架构并选择合适的 IDA 版本
+            ida_version_file1 = get_binary_architecture(file1)
+            ida_version_file2 = get_binary_architecture(file2)
+            
+            logger.info(f"文件1 ({file1}) 使用 IDA 版本: {ida_version_file1}")
+            logger.info(f"文件2 ({file2}) 使用 IDA 版本: {ida_version_file2}")
+            
+            await ida.ida_process(input_file_path=file1, output_dir=output_path1, ida_service_url=ida_service_url, ida_version=ida_version_file1, config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
+            await ida.ida_process(input_file_path=file2, output_dir=output_path2, ida_service_url=ida_service_url, ida_version=ida_version_file2, config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
             output_file1 = os.path.join("test", f"{os.path.basename(file1)}.BinExport")
             output_file2 = os.path.join("test", f"{os.path.basename(file2)}.BinExport")
             output_dir = os.path.join(bindiffdir, f"{os.path.basename(file1)}")
