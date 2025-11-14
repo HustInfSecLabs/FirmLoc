@@ -125,15 +125,34 @@ class BinaryFilterAgent(Agent):
 
     def _get_executable_binaries(self, directory_path: str) -> str:
         """
-        原来的逻辑只根据 Unix 执行位判断，这会漏掉很多没有执行位但仍然是二进制库的文件（例如 .so）。
-        现在的逻辑为：如果文件有执行位，或被判断为 IDA 可分析类型，则视为“可执行二进制”并返回。
+        获取所有可执行的二进制文件（包括没有执行位但是 IDA 可分析的文件）
+        
+        固件提取后，很多二进制文件会丢失执行权限位，因此不能只依赖执行位判断。
+        改进策略：
+        1. 优先通过文件格式判断（ELF/PE/Mach-O等）
+        2. 如果无法通过格式判断，再检查执行权限位
+        3. 过滤掉明显的非二进制文件（如 .txt, .sh, .conf 等）
         """
         executable_files = []
         directory = Path(directory_path)
+        
+        # 排除的文件扩展名（配置文件、文本文件、脚本等）
+        excluded_extensions = {
+            '.txt', '.md', '.conf', '.cfg', '.xml', '.json', '.yaml', '.yml',
+            '.html', '.htm', '.css', '.js', '.log', '.ini', '.properties',
+            '.sh', '.py', '.pl', '.rb', '.lua',  # 脚本文件
+            '.list', '.control', '.pat',  # opkg 和配置文件
+        }
 
         for root, _, files in os.walk(directory_path):
             for filename in files:
                 file_path = Path(root) / filename
+                
+                # 检查文件扩展名，跳过明显的非二进制文件
+                file_ext = file_path.suffix.lower()
+                if file_ext in excluded_extensions:
+                    continue
+                
                 try:
                     stat_result = file_path.stat()
                 except (OSError, ValueError):
@@ -142,16 +161,17 @@ class BinaryFilterAgent(Agent):
                 if not stat.S_ISREG(stat_result.st_mode):
                     continue
 
+                # 策略1: 优先通过文件格式判断（这样能捕获没有执行位的二进制文件）
+                try:
+                    is_analysable = self._is_ida_analysable(file_path)
+                except Exception:
+                    is_analysable = False
+                
+                # 策略2: 检查执行权限位（作为补充判断）
                 has_exec_bit = bool(stat_result.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
-                is_ida_bin = False
-                # 如果没有执行位，尝试判断是否为可被 IDA 分析的二进制格式（比如 ELF shared objects）
-                if not has_exec_bit:
-                    try:
-                        is_ida_bin = self._is_ida_analysable(file_path)
-                    except Exception:
-                        is_ida_bin = False
-
-                if has_exec_bit or is_ida_bin:
+                
+                # 只要满足任一条件就认为是可执行二进制
+                if is_analysable or has_exec_bit:
                     try:
                         relative_path = file_path.relative_to(directory)
                     except ValueError:
@@ -162,9 +182,7 @@ class BinaryFilterAgent(Agent):
             return "未在提供的目录中找到可执行二进制文件。"
 
         executable_files.sort()
-        lines = [path for path in executable_files]
-
-        return "\n".join(lines)
+        return "\n".join(executable_files)
         
     def process(self, binary_filename: str, extracted_files_path: str, cve_details: str) -> dict:
         try:
