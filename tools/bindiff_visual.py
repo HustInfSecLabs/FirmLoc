@@ -53,7 +53,7 @@ COORDINATES = {
 }
 
 DELAY_SHORT = 0.5
-DELAY_LONG = 1
+DELAY_LONG = 2
 
 
 def bindiff_ui(diff_name: str, output_image: str):

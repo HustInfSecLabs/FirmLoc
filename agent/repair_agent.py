@@ -262,12 +262,13 @@ def save_llm_result(dir_path, result=None, error=None, tb_str=None, extra_log=""
 def run_repair_agent(base_dir: str, websocket_sender):    
     try:
         llm = ChatOpenAI(
-            model=config_manager.config["LLM.GPT"]["model_name"],
+            model=config_manager.config["LLM.DeepSeek"]["model_name"],
             temperature=0,
             max_tokens=None,
             timeout=None,
             max_retries=3,
-            api_key = config_manager.config["LLM.GPT"]["api_key"]
+            base_url=config_manager.config["LLM.DeepSeek"]["base_url"],
+            api_key = config_manager.config["LLM.DeepSeek"]["api_key"]
         )
         tools = build_tools(base_dir, websocket_sender)
         prompt = hub.pull("hwchase17/react")
