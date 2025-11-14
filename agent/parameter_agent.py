@@ -11,7 +11,11 @@ EXTRACTION_PROMPT = (
     "你是一个专业的安全分析助手，擅长从用户的自然语言需求中提取结构化参数。\n"
     "请从用户输入中提取以下关键字段：\n"
     "- cve_id：形如 CVE-YYYY-NNNN 的编号（区分大小写）。如果没有明确的CVE编号，请返回空字符串。\n"
-    "- binary_filename：需要分析的目标固件或二进制文件名称。如果用户没有提供，请返回空字符串。\n\n"
+    "- binary_filename：需要分析的目标固件或二进制文件名称。可以是：\n"
+    "  * 完整的文件名（如 firmware.bin、httpd）\n"
+    "  * 设备型号（如 Netgear R9000、DIR-878）\n"
+    "  * 产品名称（如 DSL-AC3100）\n"
+    "  只要用户明确指出要分析的目标，都应提取到此字段。如果完全没有提及任何设备或文件，才返回空字符串。\n\n"
     "严格按照下述 JSON 模板输出（禁止输出额外解释或Markdown标记）：\n"
     "{\n"
     "  \"cve_id\": \"\",          // 字符串，若缺失请保持为空字符串\n"
@@ -140,8 +144,10 @@ class ParameterAgent(Agent):
         binary_name = None
         heuristics: List[Tuple[str, str]] = [
             (r"binary\s*(?:name|filename|file)?\s*(?:is|=|:)?\s*([\w .\-]+)", "binary keyword"),
+            (r"(?:固件|文件|二进制)名(?:称)?(?:是|为|:|：)\s*([\w .\-]+)", "zh filename is"),
             (r"目标(?:固件|二进制)[^\w]*([\w .\-]{3,})", "zh target"),
             (r"设备名称[:：]\s*([\w .\-]+)", "device name"),
+            (r"分析\s*([\w .\-]+)\s*(?:固件|设备|路由器)", "zh analyze device"),
         ]
 
         for pattern, source in heuristics:
