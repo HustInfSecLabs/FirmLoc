@@ -439,10 +439,12 @@ def write_extracted(pseudo_file, base_names, out_dir):
         logger.info(f"extracted {base} → {out}")
 
 class Refiner:
-    def __init__(self, LOG_FILE):
+    def __init__(self, LOG_FILE, pre_binary_name=None, post_binary_name=None):
         self.log = LOG_FILE
         self.agent = "Detection Agent"
         self._task_cache = {}  # 初始化任务缓存字典
+        self.pre_binary_name = pre_binary_name  # 保存补丁前二进制文件名
+        self.post_binary_name = post_binary_name  # 保存补丁后二进制文件名
 
         #api_key = "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"
         #if not api_key:
@@ -793,8 +795,12 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         
         if need_rag:
             logger.info(f"对 {os.path.basename(fa)} vs {os.path.basename(fb)} 进行二次判断")
-            # 进行RAG二次判断
-            rag_result = await self.async_rag_query2bot(fa, fb, cve_details, cwe)
+            # 进行RAG二次判断，传递二进制文件名
+            rag_result = await self.async_rag_query2bot(
+                fa, fb, cve_details, cwe,
+                pre_binary_name=self.pre_binary_name,
+                post_binary_name=self.post_binary_name
+            )
             final_result = f"初次分析结果:\n{result}\n\nRAG二次分析结果:\n{rag_result}"
         else:
             final_result = result if result else "分析结果为空"
@@ -803,8 +809,17 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         self._task_cache[cache_key] = final_result
         return final_result
     
-    async def async_rag_query2bot(self, fa, fb, cve_details=None, cwe=None) -> str:
-        """异步版本的rag_query2bot函数，获取函数调用链信息并添加到提示词中"""
+    async def async_rag_query2bot(self, fa, fb, cve_details=None, cwe=None, pre_binary_name=None, post_binary_name=None) -> str:
+        """异步版本的rag_query2bot函数，获取函数调用链信息并添加到提示词中
+        
+        Args:
+            fa: 补丁前的伪C文件路径
+            fb: 补丁后的伪C文件路径
+            cve_details: CVE详情
+            cwe: CWE信息
+            pre_binary_name: 补丁前二进制文件名（如果提供则直接使用，不再推断）
+            post_binary_name: 补丁后二进制文件名（如果提供则直接使用，不再推断）
+        """
         # 读两个.c文件的内容
         try:
             a_content = open(fa, 'r', encoding='utf-8').read()
@@ -817,32 +832,40 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         pre_func_name = os.path.basename(fa).split('.')[0]
         post_func_name = os.path.basename(fb).split('.')[0]
         
-        # 尝试从文件路径推断二进制文件名（不依赖 locate_paths，不使用 dummy）
+        # 尝试获取二进制文件名
         try:
-            # 约定结构：history/<chat_id>/bindiff/<binary_filename>/diff_xxx/folder_a|folder_b/<func>.c
-            fa_dir = os.path.dirname(fa)
-            fb_dir = os.path.dirname(fb)
+            # 如果外部已经传入了准确的二进制文件名，直接使用
+            if pre_binary_name and post_binary_name:
+                logger.info(f"使用传入的二进制文件名: pre={pre_binary_name}, post={post_binary_name}")
+            else:
+                # 否则从文件路径推断（旧逻辑，兼容没有传入参数的情况）
+                # 约定结构：history/<chat_id>/bindiff/<binary_filename>/diff_xxx/folder_a|folder_b/<func>.c
+                fa_dir = os.path.dirname(fa)
+                fb_dir = os.path.dirname(fb)
+    
+                # 提取 chat_id 与 pre 二进制名
+                # 结构：folder_a -> diff_xxx -> <binary_filename> -> bindiff -> <chat_id>
+                binary_filename = os.path.basename(os.path.dirname(os.path.dirname(fa_dir)))
+                chat_id = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(fa_dir)))))
+                history_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(fa_dir)))))
+    
+                # 使用 bindiff 目录名作为补丁前二进制名
+                pre_binary_name = binary_filename
+    
+                # 根据“在文件名后缀之前插入 1”的规则生成补丁后二进制名
+                # 规则示例：
+                #  - libsal.so.0.0 -> libsal.so.01.0 （在最后一段 .数字 段之前对前一段数字追加 1）
+                #  - setup.cgi      -> setup1.cgi   （在扩展名前插入 1）
+                basename = os.path.basename(binary_filename)
+                name_part, ext = os.path.splitext(basename)
+    
+                post_binary_name = f"{name_part}1{ext}"
+    
 
-            # 提取 chat_id 与 pre 二进制名
-            # 结构：folder_a -> diff_xxx -> <binary_filename> -> bindiff -> <chat_id>
-            binary_filename = os.path.basename(os.path.dirname(os.path.dirname(fa_dir)))
-            chat_id = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(fa_dir)))))
-            history_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(fa_dir)))))
+                logger.info(f"从路径推断的二进制文件名: pre={pre_binary_name}, post={post_binary_name}")
 
-            # 使用 bindiff 目录名作为补丁前二进制名
-            pre_binary_name = binary_filename
-
-            # 根据“在文件名后缀之前插入 1”的规则生成补丁后二进制名
-            # 规则示例：
-            #  - libsal.so.0.0 -> libsal.so.01.0 （在最后一段 .数字 段之前对前一段数字追加 1）
-            #  - setup.cgi      -> setup1.cgi   （在扩展名前插入 1）
-            basename = os.path.basename(binary_filename)
-            name_part, ext = os.path.splitext(basename)
-
-            post_binary_name = f"{name_part}1{ext}"
-
-            logger.info(f"尝试获取函数调用链信息: {pre_func_name} 和 {post_func_name} | chat_id={chat_id}, pre_bin={pre_binary_name}, post_bin={post_binary_name}")
-
+            logger.info(f"尝试获取函数调用链信息: {pre_func_name} 和 {post_func_name} | pre_bin={pre_binary_name}, post_bin={post_binary_name}")
+            logger.info(f"尝试获取函数调用链信息: {pre_func_name} 和 {post_func_name} | pre_bin={pre_binary_name}, post_bin={post_binary_name}")
             # 获取补丁前/后的函数调用链 JSON（包含 data_flow）
             pre_func_call_info = await self.get_function_call_info(pre_binary_name, pre_func_name)
             post_func_call_info = await self.get_function_call_info(post_binary_name, post_func_name)
@@ -927,6 +950,7 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
 async def main(chat_id: str,
          history_root: str | Path,
          binary_filename: str,
+         post_binary_filename: str = None,  # 新增参数：实际的补丁后文件名
          pre_c: str = None, post_c: str = None, cve_details: str = None, cwe: str = None, send_message=None):
     # ---------- 动态定位 ----------
     paths = locate_paths(chat_id, history_root, binary_filename)
@@ -963,7 +987,8 @@ async def main(chat_id: str,
     write_extracted(post_c, func_mapping.values(), FOLDER_B) # 补丁后
 
     # 4. 开始调用大模型进行差异分析
-    r = Refiner(LOG_FILE)
+    # 传递实际的二进制文件名到 Refiner
+    r = Refiner(LOG_FILE, pre_binary_name=binary_filename, post_binary_name=post_binary_filename)
 
     # 定义并行处理函数对的任务列表
     tasks = []

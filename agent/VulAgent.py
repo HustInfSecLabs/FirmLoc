@@ -348,7 +348,8 @@ class VulnAgent:
                 history_root=self.config_dir,
                 pre_c=os.path.join(output_path1,f"{os.path.basename(file1)}_pseudo.c"),
                 post_c=os.path.join(output_path2,f"{os.path.basename(file2)}_pseudo.c"),
-                binary_filename = os.path.basename(file1),
+                binary_filename=os.path.basename(file1),
+                post_binary_filename=os.path.basename(file2),  # 传递实际的补丁后文件名
                 cve_details=cve_details,
                 cwe=cwe,
                 send_message=self.send_message
