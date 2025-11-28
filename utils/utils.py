@@ -98,6 +98,9 @@ def get_firmware_files(directory: str, recursive: bool = False) -> List:
             '.gz',   # 压缩固件
             '.upd',  # 通用更新文件
             '.w',
+            '.exe',  # Windows 可执行
+            '.dll',  # Windows 动态库
+            '.so',   # Linux 共享库（用于已解包的二进制）
         }
 
         # 验证目录是否存在

@@ -2,11 +2,11 @@ import asyncio
 import os
 import time
 import json
-import ast
 import asyncio
+from enum import Enum
 from fastapi import WebSocket
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional, Set, List
 
 from model import ChatModel, AgentModel
 from agent import UserAgent, PlannerAgent, ida
@@ -23,6 +23,12 @@ from utils.utils import get_firmware_files, copy_file, is_binary_file, get_binar
 from config import config_manager as config
 
 
+class AnalysisMode(str, Enum):
+    AUTO = "auto"
+    FIRMWARE = "firmware"
+    BINARY_PAIR = "binary_pair"
+
+
 
 class VulnAgent:
     def __init__(
@@ -33,8 +39,9 @@ class VulnAgent:
         cve_id: Optional[str] = None,
         binary_filename: Optional[str] = None,
         user_model: ChatModel = AgentModel("DeepSeek"),
-        planner_model: ChatModel = AgentModel("DeepSeek"),
-        config_dir: str = './history'
+        planner_model: ChatModel = AgentModel("Qwen"),
+        config_dir: str = './history',
+        analysis_mode: str = AnalysisMode.AUTO.value
     ):
         self.user_model = user_model
         self.planner_model = planner_model
@@ -53,6 +60,12 @@ class VulnAgent:
         self.tool_result = None
 
         self.files = get_firmware_files(f"{self.config_dir}/{self.chat_id}")
+        hint = (analysis_mode or AnalysisMode.AUTO.value).lower()
+        if hint not in {mode.value for mode in AnalysisMode}:
+            logger.warning("未知分析模式 %s，回退到 auto", hint)
+            hint = AnalysisMode.AUTO.value
+        self.analysis_mode_hint = hint
+        self.resolved_mode: Optional[AnalysisMode] = None
 
         self._init_bot()
 
@@ -79,6 +92,65 @@ class VulnAgent:
         self.results = None
         self.state = ProgressEnum.NOT_STARTED
     
+
+    def _determine_analysis_mode(self) -> AnalysisMode:
+        if self.analysis_mode_hint != AnalysisMode.AUTO.value:
+            mode = AnalysisMode(self.analysis_mode_hint)
+            self.resolved_mode = mode
+            return mode
+
+        mode = AnalysisMode.FIRMWARE
+        if len(self.files) == 2 and all(self._looks_like_executable(path) for path in self.files):
+            mode = AnalysisMode.BINARY_PAIR
+        self.resolved_mode = mode
+        return mode
+
+    def _looks_like_executable(self, file_path: str) -> bool:
+        try:
+            with open(file_path, 'rb') as f:
+                header = f.read(4)
+        except OSError:
+            return False
+
+        if header.startswith(b'\x7fELF'):
+            return True
+        if header.startswith(b'MZ'):
+            return True
+        mach_magics = {
+            b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe',
+            b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe'
+        }
+        if header in mach_magics:
+            return True
+        return False
+
+    def _build_binary_pair_entries(self) -> List[dict]:
+        binaries = sorted(self.files)
+        if len(binaries) < 2:
+            raise ValueError("binary_pair 模式需要至少两个可执行文件")
+        first, second = binaries[:2]
+        if not (self._looks_like_executable(first) and self._looks_like_executable(second)):
+            raise ValueError("提供的文件不是可执行二进制，无法跳过 Binwalk")
+        display_name = self.binary_filename or Path(first).name
+        return [{
+            "name": display_name,
+            "pre": first,
+            "post": second,
+            "relative_path": Path(first).name,
+            "post_relative_path": Path(second).name
+        }]
+
+    def _load_cve_details(self, search_result_path: str) -> tuple[str, str]:
+        try:
+            with open(search_result_path, 'r', encoding='utf-8') as f:
+                content = json.load(f)
+            cve = content['vulnerabilities'][0]['cve']
+            details = json.dumps(cve['descriptions'][0]["value"])
+            cwe = json.dumps(cve['weaknesses'][0]["description"][0]['value'])
+            return details, cwe
+        except (FileNotFoundError, KeyError, json.JSONDecodeError, IndexError) as exc:
+            logger.warning("解析 CVE 详情失败: %s", exc)
+            return "", ""
 
     def on_status_update(self, command=None, tool=None, tool_status=None, tool_result=None):
         if command is not None:
@@ -137,28 +209,26 @@ class VulnAgent:
             logger.error(error_msg)
             return error_msg
 
-        def show_file_info(full_path: str):
-            """
-            给定目录路径和文件名，打印文件的完整路径以及文件大小。
-            """
-            
-            # 检查文件是否存在
-            if not os.path.isfile(full_path):
-                print(f"[错误] 文件不存在：{full_path}")
-                return
-            
-            # 获取文件大小（字节）
-            size_bytes = os.path.getsize(full_path)
-            
-            print(f"文件路径：{full_path}")
-            print(f"文件大小：{size_bytes} 字节")
+        resolved_mode = self._determine_analysis_mode()
+        files = self.files
 
-        if len(self.files) != 2:
-            error_msg = "请上传两个固件文件以进行比较分析。"
+        if resolved_mode == AnalysisMode.FIRMWARE and len(files) != 2:
+            error_msg = "固件模式需要上传两个固件镜像。"
             await self.send_message(error_msg, message_type="message")
             logger.error(error_msg)
             return error_msg
-        self.tasks = """
+
+        def show_file_info(full_path: str):
+            """给定文件路径打印大小，便于排查。"""
+            if not os.path.isfile(full_path):
+                print(f"[错误] 文件不存在：{full_path}")
+                return
+            size_bytes = os.path.getsize(full_path)
+            print(f"文件路径：{full_path}")
+            print(f"文件大小：{size_bytes} 字节")
+
+        if resolved_mode == AnalysisMode.FIRMWARE:
+            self.tasks = """
 ## 1.使用Binwalk提取固件文件
 ## 2.筛选出可能存在漏洞的二进制文件
 ## 3.使用IDA导出两个不同版本二进制文件的.Binexport文件
@@ -166,8 +236,15 @@ class VulnAgent:
 ## 5.分析BinDiff的结果，找出可能存在漏洞的函数
 ## 6.使用IDA导出函数的伪C代码
 ## 7.使用Detection Agent分析函数的伪C代码
-        """
-        logger.info(f"Tasks: {self.tasks}")
+            """
+        else:
+            self.tasks = """
+## 1.校验用户上传的二进制/Windows 程序对，无需解包
+## 2.直接为两个版本生成IDA BinExport文件
+## 3.使用BinDiff分析两个版本差异
+## 4.Detection Agent 分析伪C代码并输出漏洞研判报告
+            """
+        logger.info("Tasks: %s", self.tasks)
 
         self.plan_manager = PlanManager(
             chat_id=self.chat_id,
@@ -183,9 +260,9 @@ class VulnAgent:
         self.state = ProgressEnum.RUNNING
         await self.send_message("情报收集智能体收集CVE相关信息",
                                  message_type="header1",
-                                agent=self.agent,)
+                                 agent=self.agent)
         search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id=self.cve_id)
-        logger.info(f"Online search result: {search_result}")
+        logger.info("Online search result: %s", search_result)
 
         with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
             tool_content = [
@@ -194,7 +271,7 @@ class VulnAgent:
                     "content": f"{f.read()}"
                 }
             ]
-            await self.send_message(f"调用在线搜索API访问https://services.nvd.nist.gov",
+            await self.send_message("调用在线搜索API访问https://services.nvd.nist.gov",
                                         message_type="command",
                                         tool_type="graphics",
                                         tool_content=tool_content,
@@ -202,88 +279,128 @@ class VulnAgent:
                                         tool="Online Search",
                                         tool_status="running")
 
-        self.config_manager.update_agent_status("Intelligence Agent", "Binwalk Agent")
-        self.agent = "Binwalk Agent"
-        self.tool = None
-        await self.send_message("Binwalk Agent提取固件文件",
-                                message_type="header1",
-                                agent=self.agent) 
-        files = self.files
-        
-        binwalk_results = []
+        cve_details, cwe = self._load_cve_details(search_result['search_result_path'])
+        analysis_pairs: List[dict] = []
 
-        for file in files:
-            binwalk_result = await self.BinwalkAgent.process(
-                task_id=self.chat_id,
-                firmware_path=str(file),
-                config=self.config_manager,
-                send_message=self.send_message,
-                on_status_update=self.on_status_update)
-            print(binwalk_result)
-            logger.info(f"Binwalk result: {binwalk_result}")
-            binwalk_results.append(binwalk_result)
+        if resolved_mode == AnalysisMode.FIRMWARE:
+            self.config_manager.update_agent_status("Intelligence Agent", "Binwalk Agent")
+            self.agent = "Binwalk Agent"
+            await self.send_message("Binwalk Agent提取固件文件",
+                                    message_type="header1",
+                                    agent=self.agent)
+            binwalk_results = []
+            for file in files:
+                binwalk_result = await self.BinwalkAgent.process(
+                    task_id=self.chat_id,
+                    firmware_path=str(file),
+                    config=self.config_manager,
+                    send_message=self.send_message,
+                    on_status_update=self.on_status_update)
+                logger.info("Binwalk result: %s", binwalk_result)
+                binwalk_results.append(binwalk_result)
 
-        # 检查是否有提取失败的情况
-        failed_results = [r for r in binwalk_results if r.get('status') == 'error']
-        if failed_results:
-            error_msg = f"固件提取失败: {'; '.join([r.get('message', '未知错误') for r in failed_results])}"
-            await self.send_message(error_msg, message_type="message", agent=self.agent)
+            failed_results = [r for r in binwalk_results if r.get('status') == 'error']
+            if failed_results:
+                error_msg = f"固件提取失败: {'; '.join([r.get('message', '未知错误') for r in failed_results])}"
+                await self.send_message(error_msg, message_type="message", agent=self.agent)
+                logger.error(error_msg)
+                return error_msg
+
+            self.config_manager.update_agent_status("Binwalk Agent", "Binary Filter Agent")
+            self.config_manager.update_tool_status("Binwalk", "Binary Filter")
+            self.agent = "Binary Filter Agent"
+            await self.send_message("Binary Filter Agent筛选可疑文件列表",
+                                     message_type="header1",
+                                     agent=self.agent)
+
+            llm_result = self.BinaryFilterAgent.process(
+                binary_filename=self.binary_filename,
+                extracted_files_path=binwalk_results[0]['extracted_files_path'],
+                cve_details=cve_details
+            )
+            logger.info("LLM result: %s", llm_result)
+
+            if llm_result.get("status") != "success" or not llm_result.get("suspicious_binaries"):
+                error_msg = llm_result.get("message", "BinaryFilter 未返回可疑二进制")
+                await self.send_message(error_msg, message_type="message", agent=self.agent)
+                logger.error(error_msg)
+                return error_msg
+
+            suspicious_files = [os.path.join(item['binary_path']) for item in llm_result["suspicious_binaries"]]
+            formatted_lines = [f"{i+1}. {path}" for i, path in enumerate(suspicious_files)]
+            await self.send_message("可疑文件:\n" + '\n'.join(formatted_lines),
+                                    message_type="message",
+                                    agent=self.agent)
+
+            for entry in llm_result["suspicious_binaries"]:
+                relative_path = entry.get("binary_path", "").strip() or entry.get("binary_name", "").strip()
+                if not relative_path:
+                    continue
+                relative_path = os.path.normpath(relative_path.lstrip("./"))
+                file1 = os.path.join(binwalk_results[0]['extracted_files_path'], relative_path)
+                file2 = os.path.join(binwalk_results[1]['extracted_files_path'], relative_path)
+                analysis_pairs.append({
+                    "name": entry.get("binary_name", Path(relative_path).name),
+                    "pre": file1,
+                    "post": file2,
+                    "relative_path": relative_path
+                })
+
+            if not analysis_pairs:
+                error_msg = "Binary Filter 未能提供有效的二进制路径。"
+                await self.send_message(error_msg, message_type="message", agent=self.agent)
+                logger.error(error_msg)
+                return error_msg
+
+        else:
+            self.config_manager.update_agent_status("Intelligence Agent", "Binwalk Agent")
+            self.agent = "Binwalk Agent"
+            await self.send_message("检测到可执行程序输入，自动跳过 Binwalk 解包阶段。",
+                                    message_type="header1",
+                                    agent=self.agent)
+            self.config_manager.update_agent_status("Binwalk Agent", "Binary Filter Agent")
+            self.config_manager.update_tool_status("Binwalk", "Binary Filter")
+            self.agent = "Binary Filter Agent"
+            await self.send_message("Binary Filter Agent 直接使用用户提供的二进制对。",
+                                    message_type="header1",
+                                    agent=self.agent)
+            try:
+                analysis_pairs = self._build_binary_pair_entries()
+            except ValueError as exc:
+                await self.send_message(str(exc), message_type="message", agent=self.agent)
+                logger.error(str(exc))
+                return str(exc)
+
+            summary_lines = [
+                f"{idx+1}. {Path(pair['pre']).name} ↔ {Path(pair['post']).name}"
+                for idx, pair in enumerate(analysis_pairs)
+            ]
+            await self.send_message("二进制对列表:\n" + '\n'.join(summary_lines),
+                                    message_type="message",
+                                    agent=self.agent)
+
+        self.config_manager.update_agent_status("Binary Filter Agent", "IDA Agent")
+        self.config_manager.update_tool_status("Binary Filter", "IDA Decompiler")
+
+        idadir = os.path.join(self.config_dir, self.chat_id, "ida")
+        bindiffdir = os.path.join(self.config_dir, self.chat_id, "bindiff")
+        if not analysis_pairs:
+            error_msg = "未找到可用于后续分析的二进制文件。"
+            await self.send_message(error_msg, message_type="message")
             logger.error(error_msg)
             return error_msg
 
-        cve_details = ""
-        cwe = ""
-        with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
-            content = f.read()
-            content = json.loads(content)
-            cve_details = json.dumps(content['vulnerabilities'][0]['cve']['descriptions'][0]["value"])
-            cwe = json.dumps(content['vulnerabilities'][0]['cve']['weaknesses'][0]["description"][0]['value'])
-
-        print(f"cve_details: {cve_details}")
-        self.config_manager.update_agent_status("Binwalk Agent", "Binary Filter Agent")
-        self.config_manager.update_tool_status("Binwalk", "Binary Filter")
-
-        self.agent = "Binwalk Agent"
-        await self.send_message("Binary Filter Agent筛选可疑文件列表",
-                                 message_type="header1",
-                                agent=self.agent)
-        llm_result = self.BinaryFilterAgent.process(
-            binary_filename=self.binary_filename,
-            extracted_files_path=binwalk_results[0]['extracted_files_path'],
-            cve_details=cve_details
-        )
-        # llm_result = ast.literal_eval(config.config["LLM_RESULT"]["llm_result"])
-        print(f"LLM result: {llm_result}")
-        logger.info(f"LLM result: {llm_result}")
-
-
-        suspicious_files = [os.path.join(name['binary_path']) for name in llm_result["suspicious_binaries"]]
-        # suspicious_files = ['alphapd']
-        print(f"可疑文件列表: {suspicious_files}")
-        self.tool = None
-        formatted_lines = [f"{i+1}. {path}" for i, path in enumerate(suspicious_files)]
-
-        suspicious_lines = '\n'.join(formatted_lines)
-        await self.send_message(f"可疑文件: {suspicious_lines}",
-                                    message_type="message",
-                                    agent=self.agent)
-        idadir = os.path.join(self.config_dir, self.chat_id, "ida")
-        bindiffdir = os.path.join(self.config_dir, self.chat_id, "bindiff")
-        for file in suspicious_files:
-            file1 = os.path.join(binwalk_results[0]['extracted_files_path'], file) 
-            file2 = os.path.join(binwalk_results[1]['extracted_files_path'], file)
-            # file1 = os.path.join('history', self.chat_id, 'alphapd14') 
-            # file2 = os.path.join('history', self.chat_id, 'alphapd16')
-            # 检查文件是否存在
+        for pair in analysis_pairs:
+            file1 = pair["pre"]
+            file2 = pair["post"]
+            display_name = pair.get("name", Path(file1).name)
             if not os.path.isfile(file1):
                 print(f"文件不存在: {file1}")
                 continue
             if not os.path.isfile(file2):
                 print(f"文件不存在: {file2}")
                 continue
-            # 检查是否为二进制文件
             if not is_binary_file(file1) or not is_binary_file(file2):
-                self.agent = None
                 await self.send_message(f"文件 {file1} 不是二进制文件，跳过分析。",
                                         message_type="header2",
                                         agent=self.agent)
@@ -296,65 +413,55 @@ class VulnAgent:
             show_file_info(file2)
             file2 = copy_file(file2, os.path.dirname(file2))
 
-
-            self.config_manager.update_agent_status("Binwalk Agent", "IDA Agent")
-            self.config_manager.update_tool_status("Binwalk", "IDA Decompiler")
             self.tool = "IDA Decompiler"
             self.tool_status = "running"
             self.agent = "IDA Agent"
-            self.tool = None
-            # self.command = f"ida -o {output_file1} {file1}"
-            await self.send_message(f"IDA Agent分析二进制文件{file.split('./', 1)[-1]}",
+            await self.send_message(f"IDA Agent分析二进制文件{display_name}",
                                     message_type="header1",
-                                agent=self.agent) 
+                                    agent=self.agent)
 
             ida_service_url = config.config["IDA_SERVICE"]["service_url"]
-            
-            # 自动检测文件架构并选择合适的 IDA 版本
             ida_version_file1 = get_binary_architecture(file1)
             ida_version_file2 = get_binary_architecture(file2)
-            
-            logger.info(f"文件1 ({file1}) 使用 IDA 版本: {ida_version_file1}")
-            logger.info(f"文件2 ({file2}) 使用 IDA 版本: {ida_version_file2}")
-            
+            logger.info("文件1 (%s) 使用 IDA 版本: %s", file1, ida_version_file1)
+            logger.info("文件2 (%s) 使用 IDA 版本: %s", file2, ida_version_file2)
+
             await ida.ida_process(input_file_path=file1, output_dir=output_path1, ida_service_url=ida_service_url, ida_version=ida_version_file1, config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
             await ida.ida_process(input_file_path=file2, output_dir=output_path2, ida_service_url=ida_service_url, ida_version=ida_version_file2, config=self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
             output_file1 = os.path.join("test", f"{os.path.basename(file1)}.BinExport")
             output_file2 = os.path.join("test", f"{os.path.basename(file2)}.BinExport")
             output_dir = os.path.join(bindiffdir, f"{os.path.basename(file1)}")
 
-
             self.config_manager.update_agent_status("IDA Agent", "Bindiff Agent")
             self.config_manager.update_tool_status("IDA Decompiler", "Bindiff")
             self.tool = "Bindiff"
             self.tool_status = "running"
             self.agent = "Bindiff Agent"
-            self.tool = None
             await self.send_message("Bindiff Agent对比两个二进制文件",
                                     message_type="header1",
-                                agent=self.agent) 
+                                    agent=self.agent)
 
             bindiff_result = await self.BindiffAgent.execute(output_file1, output_file2, output_dir, self.config_manager, send_message=self.send_message, on_status_update=self.on_status_update)
-            print(bindiff_result)
+            logger.info("Bindiff result: %s", bindiff_result)
 
             self.agent = "Detection Agent"
             self.tool = None
             self.config_manager.update_agent_status("Bindiff Agent", "Detection Agent")
             await self.send_message("Detection Agent分析Bindiff结果",
                                     message_type="header1",
-                                agent=self.agent)
+                                    agent=self.agent)
             await llm_diff(
                 chat_id=self.chat_id,
                 history_root=self.config_dir,
-                pre_c=os.path.join(output_path1,f"{os.path.basename(file1)}_pseudo.c"),
-                post_c=os.path.join(output_path2,f"{os.path.basename(file2)}_pseudo.c"),
+                pre_c=os.path.join(output_path1, f"{os.path.basename(file1)}_pseudo.c"),
+                post_c=os.path.join(output_path2, f"{os.path.basename(file2)}_pseudo.c"),
                 binary_filename=os.path.basename(file1),
-                post_binary_filename=os.path.basename(file2),  # 传递实际的补丁后文件名
+                post_binary_filename=os.path.basename(file2),
                 cve_details=cve_details,
                 cwe=cwe,
                 send_message=self.send_message
-            ) 
-        
+            )
+
         self.is_last = True
         self.state = ProgressEnum.COMPLETED
         response = ""
