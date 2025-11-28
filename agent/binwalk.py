@@ -1,4 +1,6 @@
 import os
+import shlex
+import shutil
 import subprocess
 import json
 import configparser
@@ -32,16 +34,33 @@ class BinwalkAgent(Agent):
         """装饰器: 自动清理工具函数的输入参数"""
         @wraps(func)
         def wrapper(input_str: str = "") -> str:
-            cleaned_input = input_str.strip() if input_str else ""
-            return func(cleaned_input)
+            cleaned_input = (input_str or "").strip()
+            if not cleaned_input:
+                return func("")
+            first_line = cleaned_input.splitlines()[0].strip()
+            for stop_token in ("Observ", "Observation:", "Observation"):
+                if stop_token in first_line:
+                    first_line = first_line.split(stop_token)[0].strip()
+            return func(first_line)
         return wrapper
         
     def _create_error_response(self, status: str, message: str) -> Dict[str, str]:
         """统一的错误响应格式"""
         return {'status': status, 'message': message}
     
-    def _create_tools(self, task_id: str, firmware_path: str, work_dir: Path, firmware_dir: Path) -> List[Tool]:
+    def _create_tools(self, task_id: str, firmware_path: str, work_dir: Path, firmware_dir: Path, local_firmware_path: Path) -> List[Tool]:
         """创建 Agent 可用的工具集"""
+        local_firmware_name = local_firmware_path.name
+
+        def _resolve_file_path(path_str: str) -> Path:
+            cleaned = (path_str or "").strip().strip('"')
+            if not cleaned:
+                return local_firmware_path
+            candidate = Path(cleaned).expanduser()
+            if not candidate.is_absolute():
+                candidate = (firmware_dir / candidate).resolve()
+            candidate = candidate.resolve()
+            return candidate
         
         @self._sanitize_input
         def execute_binwalk_command(command: str) -> str:
@@ -53,7 +72,25 @@ class BinwalkAgent(Agent):
                 命令执行结果
             """
             try:
-                full_command = ['binwalk'] + command.split()
+                args = shlex.split(command) if command else []
+
+                def _has_existing_file(arguments: List[str]) -> bool:
+                    for arg in arguments:
+                        stripped = arg.strip('"')
+                        if not stripped or stripped.startswith('-'):
+                            continue
+                        candidate = Path(stripped).expanduser()
+                        if candidate.exists():
+                            return True
+                        rel_candidate = (firmware_dir / stripped).resolve()
+                        if rel_candidate.exists():
+                            return True
+                    return False
+
+                if not _has_existing_file(args):
+                    args.append(local_firmware_name)
+
+                full_command = ['binwalk'] + args
                 result = subprocess.run(
                     full_command,
                     capture_output=True,
@@ -81,8 +118,9 @@ class BinwalkAgent(Agent):
                 文件类型信息
             """
             try:
+                target = _resolve_file_path(file_path)
                 result = subprocess.run(
-                    ['file', file_path],
+                    ['file', str(target)],
                     capture_output=True,
                     text=True,
                     timeout=10
@@ -108,7 +146,8 @@ class BinwalkAgent(Agent):
                     return 0
             
             try:
-                full_path = firmware_dir / directory if directory and directory != "." else firmware_dir
+                dir_arg = directory.strip().strip('"') if directory else ''
+                full_path = firmware_dir / dir_arg if dir_arg and dir_arg != "." else firmware_dir
                 if not full_path.exists():
                     return f"错误: 目录不存在 - {full_path}"
                 
@@ -132,10 +171,12 @@ class BinwalkAgent(Agent):
             """
             try:
                 firmware_name = os.path.basename(firmware_path)
-                extracted_dirs = sorted(
-                    glob.glob(f"{firmware_dir}/_{firmware_name}*.extracted"), 
-                    key=os.path.getmtime
-                )
+                search_roots = [firmware_dir, Path(firmware_path).parent]
+                extracted_dirs = []
+                for root in search_roots:
+                    pattern = root / f"_{firmware_name}*.extracted"
+                    extracted_dirs.extend(glob.glob(str(pattern)))
+                extracted_dirs = sorted(set(extracted_dirs), key=os.path.getmtime)
                 
                 if not extracted_dirs:
                     return "未找到提取的目录"
@@ -308,6 +349,12 @@ Thought: {agent_scratchpad}"""
         
         firmware_dir = work_dir / firmware_name
         os.makedirs(firmware_dir, exist_ok=True)
+        local_firmware_path = firmware_dir / firmware_name
+        try:
+            if not local_firmware_path.exists() or os.path.getsize(local_firmware_path) != os.path.getsize(firmware_path):
+                shutil.copy2(firmware_path, local_firmware_path)
+        except Exception as copy_err:
+            return self._create_error_response('error', f'复制固件文件失败: {copy_err}')
         
         # 更新状态
         config.update_tool_status("Online Search", "Binwalk")
@@ -317,7 +364,7 @@ Thought: {agent_scratchpad}"""
         
         try:
             # 创建工具集和 LLM
-            tools = self._create_tools(task_id, firmware_path, work_dir, firmware_dir)
+            tools = self._create_tools(task_id, firmware_path, work_dir, firmware_dir, local_firmware_path)
             llm = self._initialize_llm()
             
             # 创建 ReAct Agent
@@ -332,7 +379,7 @@ Thought: {agent_scratchpad}"""
             )
             
             # 准备输入
-            question = f"请使用 binwalk 提取固件文件 {firmware_path}。首先检查文件类型，然后选择合适的参数进行提取，最后验证提取是否成功。"
+            question = f"请使用 binwalk 提取固件文件 {local_firmware_path}。首先检查文件类型，然后选择合适的参数进行提取，最后验证提取是否成功。"
             
             # 发送思考消息
             if send_message:
@@ -379,15 +426,23 @@ Thought: {agent_scratchpad}"""
                 json.dump(agent_log, f, ensure_ascii=False, indent=2)
             
             # 检查提取结果
-            extracted_dirs = sorted(
-                glob.glob(f"{firmware_dir}/_{firmware_name}*.extracted"), 
-                key=os.path.getmtime
-            )
+            search_roots = [firmware_dir, Path(firmware_path).parent]
+            extracted_dirs = []
+            for root in search_roots:
+                pattern = root / f"_{firmware_name}*.extracted"
+                extracted_dirs.extend(glob.glob(str(pattern)))
+            extracted_dirs = sorted(set(extracted_dirs), key=os.path.getmtime)
             
             if not extracted_dirs:
                 raise RuntimeError("Agent 执行完成但未找到提取的目录")
             
-            actual_extracted_path = extracted_dirs[-1]
+            actual_extracted_path = Path(extracted_dirs[-1])
+            if not str(actual_extracted_path).startswith(str(firmware_dir)):
+                dest_path = firmware_dir / actual_extracted_path.name
+                if dest_path.exists():
+                    shutil.rmtree(dest_path)
+                shutil.move(str(actual_extracted_path), str(dest_path))
+                actual_extracted_path = dest_path
             
             # 更新状态
             config.update_tool_status("Binwalk")
