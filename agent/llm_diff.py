@@ -330,8 +330,8 @@ def locate_paths(chat_id: str, history_root: str | Path, binary_filename: str) -
 
 # 正则：匹配 bindiff 行并捕获相似度、函数名
 res_pat = re.compile(
-  r'^[0-9A-F]{8}\s+[0-9A-F]{8}\s+'
-  r'(?P<sim>0\.\d+|1(?:\.0)?)\s+.*?"(?P<fn1>[^"]+)"\s*"(?P<fn2>[^"]+)"'
+    r'^[0-9A-Fa-f]{8,16}\s+[0-9A-Fa-f]{8,16}\s+'
+    r'(?P<sim>0\.\d+|1(?:\.0)?)\s+.*?"(?P<fn1>[^"]+)"\s*"(?P<fn2>[^"]+)"'
 )
 
 def demangle(mangled: str) -> str:
