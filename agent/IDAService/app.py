@@ -18,15 +18,16 @@ PYTHONHOME = r"C:\Users\WangZihao\AppData\Local\Programs\Python\Python313"
 PYTHONPATH = r"C:\Users\WangZihao\AppData\Local\Programs\Python\Python313\Lib;C:\Users\WangZihao\AppData\Local\Programs\Python\Python313\DLLs"
 
 # 配置ida、idat路径
-IDA32_PATH = r"C:\tools\IDA_Pro_9.1\ida.exe"  # ida32安装路径
-IDA64_PATH = r"C:\tools\IDA_Pro_9.1\ida.exe"  # ida64安装路径
-IDAT32_PATH = r"C:\tools\IDA_Pro_9.1\idat.exe"
-IDAT64_PATH = r"C:\tools\IDA_Pro_9.1\idat.exe"
+IDA32_PATH = r"C:\tools\IDA\ida.exe"  # ida32安装路径
+IDA64_PATH = r"C:\tools\IDA\ida.exe"  # ida64安装路径
+IDAT32_PATH = r"C:\tools\IDA\idat.exe"
+IDAT64_PATH = r"C:\tools\IDA\idat.exe"
 
 # 配置分析脚本路径, 确保绝对路径
 BINEXPORT_SCRIPT = os.path.abspath("export_binexport.py")
 EXPORT_SCRIPT = os.path.abspath("export_hexrays.py")
 ANALYZE_SCRIPT = os.path.abspath("analyze.py")
+WAIT_SCRIPT = os.path.abspath("wait_for_analysis.py")
 
 # 最大文件大小限制
 MAX_FILE_SIZE = 1024 * 1024 * 500  # 500MB
@@ -150,29 +151,48 @@ def analyze_with_screenshot():
         logger.info(f"File saved to: {bin_path}")
         
         # 运行IDA分析
+        marker_path = os.path.join(analysis_dir, "analysis_done.marker")
         cmd = [
             IDA_PATH,
             '-A',  # 自动模式
+            f'-S"{WAIT_SCRIPT}"',
             bin_path
         ]
         print(cmd)
         
         try:
             # 启动IDA进程
+            env = {
+                "PATH": os.environ["PATH"],
+                "SYSTEMROOT": os.environ["SYSTEMROOT"],
+                "PYTHONHOME": PYTHONHOME,
+                "PYTHONPATH": PYTHONPATH,
+                "IDA_ANALYSIS_MARKER": marker_path
+            }
             ida_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env={
-                    "PATH": os.environ["PATH"],
-                    "SYSTEMROOT": os.environ["SYSTEMROOT"],
-                    "PYTHONHOME": PYTHONHOME,
-                    "PYTHONPATH": PYTHONPATH
-                },
+                env=env,
             )
             
-            # 等待IDA窗口出现
-            time.sleep(4)
+            # 等待IDA分析完成（检查marker文件）
+            logger.info("Waiting for IDA analysis to complete...")
+            start_wait = time.time()
+            analysis_completed = False
+            while time.time() - start_wait < 300:  # 最多等待5分钟
+                if os.path.exists(marker_path):
+                    analysis_completed = True
+                    break
+                if ida_process.poll() is not None:
+                    logger.error("IDA process exited unexpectedly")
+                    break
+                time.sleep(1)
+            
+            if not analysis_completed:
+                logger.warning("Analysis timeout or failed, proceeding with screenshots anyway")
+            else:
+                logger.info(f"Analysis completed in {time.time() - start_wait:.2f} seconds")
             
             # 获取反汇编的截图
             screenshot_path_1 = take_screenshot(filename=uploaded_file.filename, stage="disassembly")
