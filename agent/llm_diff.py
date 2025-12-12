@@ -104,19 +104,22 @@ async def async_gpt_inference(
 ) -> str:
     """异步版本的gpt_inference函数，避免阻塞事件循环"""
     # 创建一个执行器来运行同步的gpt_inference函数
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            result = await loop.run_in_executor(
-                executor,
-                lambda: gpt_inference(prompt=prompt, temperature=temperature, default_system_prompt=default_system_prompt)
-            )
+        # 使用默认的执行器，避免每次创建新的ThreadPoolExecutor
+        result = await loop.run_in_executor(
+            None,
+            lambda: gpt_inference(prompt=prompt, temperature=temperature, default_system_prompt=default_system_prompt)
+        )
         # 确保返回的是字符串类型
         if isinstance(result, str):
             return result
         else:
             # 如果不是字符串，转换为字符串
             return str(result)
+    except asyncio.CancelledError:
+        logger.warning("推理任务被取消")
+        raise
     except Exception as e:
         logger.error(f"异步推理失败: {e}")
         return f"异步推理失败: {str(e)}"
@@ -445,6 +448,16 @@ class Refiner:
         self._task_cache = {}  # 初始化任务缓存字典
         self.pre_binary_name = pre_binary_name  # 保存补丁前二进制文件名
         self.post_binary_name = post_binary_name  # 保存补丁后二进制文件名
+        
+        # 二进制文件锁，防止对同一文件的并发 IDA 分析
+        self._binary_locks = {}
+        self._lock_access_lock = asyncio.Lock()  # 保护 _binary_locks 的访问
+
+    async def _get_lock_for_binary(self, binary_name):
+        async with self._lock_access_lock:
+            if binary_name not in self._binary_locks:
+                self._binary_locks[binary_name] = asyncio.Lock()
+            return self._binary_locks[binary_name]
 
         #api_key = "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"
         #if not api_key:
