@@ -186,12 +186,12 @@ class WebSocketChatSession:
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._heartbeat_task
 
         if self._agent_task:
             self._agent_task.cancel()
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._agent_task
 
         if self.chat_id is not None:
