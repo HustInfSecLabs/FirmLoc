@@ -3,9 +3,10 @@ IDA Binary Analysis Tool
 分析二进制程序的数据流、控制流和调用链
 """
 from __future__ import annotations
-import idaapi, idautils, idc, ida_hexrays, ida_nalt
+import idaapi, idautils, idc, ida_hexrays, ida_nalt, ida_auto
 import re, json, os, sys, argparse
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+from collections import deque
 import logging
 from datetime import datetime
 
@@ -29,10 +30,16 @@ logger = setup_logger()
 
 # 配置常量
 SINK_KEYWORDS = [
-    "system", "popen", "execl", "execv", "execve", "CreateProcessA", "CreateProcessW",
-    "sprintf", "vsprintf", "strcpy", "strncpy", "fopen", "fgets"
+    "system", "doSystem", "websSafeSystem", "systemCmd", "systemCmd2", "ExecuteCmd",
+    "popen", "execl", "execv", "execve", "CreateProcessA", "CreateProcessW",
+    "sprintf", "vsprintf", "snprintf", "strcpy", "strncpy", "memcpy",
+    "fopen", "fgets", "gets"
 ]
 MAX_CALLER_DEPTH = 4
+
+# 缓存（减少重复反编译/解析）
+FUNCTION_CONTEXT_CACHE: Dict[int, Dict[str, Any]] = {}
+CALLER_CACHE: Dict[Tuple[int, int], Dict[int, List[Dict[str, Any]]]] = {}
 
 def get_output_dir():
     """获取输出目录"""
@@ -115,15 +122,61 @@ def decompile_fallback(ea: int) -> str:
     except Exception as e:
         return "// fallback decompile failed: " + str(e)
 
+SINK_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(kw) for kw in SINK_KEYWORDS) + r")\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _extract_call_args(text: str, start_idx: int) -> Tuple[str, int]:
+    """给定'('的起始位置，提取与之匹配的参数字符串及结束位置"""
+    depth = 1
+    idx = start_idx + 1
+    in_str: Optional[str] = None
+    escape = False
+    while idx < len(text):
+        ch = text[idx]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == in_str:
+                in_str = None
+        else:
+            if ch in ('"', "'"):
+                in_str = ch
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    return text[start_idx + 1:idx], idx
+        idx += 1
+    return text[start_idx + 1:idx], idx
+
+
 def find_sinks_in_text(text: str) -> List[Dict[str,Any]]:
-    """查找文本中的sink函数调用"""
-    sinks = []
-    for kw in SINK_KEYWORDS:
-        pat = re.compile(r'\b' + re.escape(kw) + r'\s*\((.*?)\)', re.S)
-        for m in pat.finditer(text):
-            snippet = text[max(0, text.rfind('\n', 0, m.start())+1):text.find('\n', m.end())].strip()
-            args = split_args_top_level(m.group(1))
-            sinks.append({"callee": kw, "snippet": snippet, "args_raw": args, "pos": m.start()})
+    """查找文本中的sink函数调用（支持嵌套括号和显式类型转换）"""
+    sinks: List[Dict[str, Any]] = []
+    for match in SINK_PATTERN.finditer(text):
+        callee = match.group(1)
+        open_paren_idx = text.find('(', match.start())
+        if open_paren_idx == -1:
+            continue
+        args_str, end_idx = _extract_call_args(text, open_paren_idx)
+        snippet_start = text.rfind('\n', 0, match.start()) + 1
+        snippet_end = text.find('\n', end_idx)
+        if snippet_end == -1:
+            snippet_end = len(text)
+        snippet = text[snippet_start:snippet_end].strip()
+        args = split_args_top_level(args_str)
+        sinks.append({
+            "callee": callee,
+            "snippet": snippet,
+            "args_raw": args,
+            "pos": match.start(),
+        })
     return sinks
 
 def split_args_top_level(argstr: str) -> List[str]:
@@ -188,9 +241,13 @@ def classify_expr(expr: str) -> Dict[str,Any]:
 
 def find_callers(func_ea: int, max_depth: int = MAX_CALLER_DEPTH) -> Dict[int, List[Dict[str,Any]]]:
     """查找函数调用者"""
-    res = {}
+    cache_key = (func_ea, max_depth)
+    if cache_key in CALLER_CACHE:
+        return CALLER_CACHE[cache_key]
+
+    res: Dict[int, List[Dict[str, Any]]] = {}
     seen_funcs = set()
-    
+
     def walk(ea, depth):
         if depth > max_depth:
             return
@@ -199,29 +256,43 @@ def find_callers(func_ea: int, max_depth: int = MAX_CALLER_DEPTH) -> Dict[int, L
             caller_func = idaapi.get_func(call_ea)
             caller_ea = caller_func.start_ea if caller_func else None
             caller_name = get_func_name(caller_ea) if caller_ea else "<unknown>"
-            
+
             call_text = ""
-            args = []
+            args: List[str] = []
             if caller_ea:
-                txt = decompile_text(caller_ea)
+                ctx = get_function_context(caller_ea)
+                txt = ctx.get("text", "")
                 fname = get_func_name(ea)
-                pattern = re.compile(re.escape(fname) + r'\s*\((.*?)\)', re.S)
-                m = pattern.search(txt)
-                if m:
-                    args = split_args_top_level(m.group(1))
-                    call_text = txt[max(0, txt.rfind('\n',0,m.start())+1):txt.find('\n', m.end())].strip()
-                
+                if fname:
+                    pattern = re.compile(r'\b' + re.escape(fname) + r'\s*\((.*?)\)', re.S)
+                    match = None
+                    for m in pattern.finditer(txt):
+                        match = m
+                        break
+                    if match:
+                        args = split_args_top_level(match.group(1))
+                        start_line = txt.rfind('\n', 0, match.start())
+                        end_line = txt.find('\n', match.end())
+                        start = 0 if start_line == -1 else start_line + 1
+                        end = match.end() if end_line == -1 else end_line
+                        call_text = txt[start:end].strip()
+
+            if not call_text:
+                call_text = idc.generate_disasm_line(call_ea, 0) or ""
+
             res.setdefault(caller_ea or 0, []).append({
-                "call_ea": call_ea, 
-                "call_text": call_text, 
-                "args": args
+                "call_ea": call_ea,
+                "call_text": call_text,
+                "args": args,
+                "caller_name": caller_name
             })
-            
+
             if caller_ea and caller_ea not in seen_funcs:
                 seen_funcs.add(caller_ea)
-                walk(caller_ea, depth+1)
-    
+                walk(caller_ea, depth + 1)
+
     walk(func_ea, 0)
+    CALLER_CACHE[cache_key] = res
     return res
 
 # 文本分析和后向切片
@@ -295,6 +366,218 @@ def build_def_map_from_text(cfunc_text: str) -> List[Dict[str,Any]]:
     logger.info(f"解析完成: {len(stmts)} 个语句，{total_defines} 个变量定义")
     return stmts
 
+
+def extract_function_params_from_text(text: str) -> List[str]:
+    """从反编译文本中提取函数参数名"""
+    if not text:
+        return []
+    header = text.split('{', 1)[0]
+    paren_start = header.find('(')
+    paren_end = header.rfind(')')
+    if paren_start == -1 or paren_end == -1 or paren_end <= paren_start:
+        return []
+    params_str = header[paren_start + 1:paren_end]
+    parts = split_args_top_level(params_str)
+    params = []
+    for part in parts:
+        token = part.strip().strip(';')
+        if not token or token.lower() == 'void':
+            continue
+        token = token.replace('__int64', ' ').replace('__fastcall', ' ')
+        token = token.strip()
+        if not token:
+            continue
+        # 名称通常在结尾
+        pieces = re.split(r'\s+', token)
+        name = pieces[-1] if pieces else token
+        name = name.strip('*&')
+        name = re.sub(r'\[.*?\]$', '', name)
+        if name:
+            params.append(name)
+    return params
+
+
+def get_function_context(func_ea: int) -> Dict[str, Any]:
+    """获取函数的反编译文本、语句映射和参数缓存"""
+    if func_ea in FUNCTION_CONTEXT_CACHE:
+        return FUNCTION_CONTEXT_CACHE[func_ea]
+
+    text = decompile_text(func_ea)
+    stmts = build_def_map_from_text(text)
+    params = extract_function_params_from_text(text)
+    ctx = {
+        "text": text,
+        "stmts": stmts,
+        "params": params
+    }
+    FUNCTION_CONTEXT_CACHE[func_ea] = ctx
+    return ctx
+
+
+def extract_params_from_expression(func_ea: int, expr: str) -> List[int]:
+    """在表达式中查找与参数同名的变量"""
+    if not expr:
+        return []
+    ctx = get_function_context(func_ea)
+    params = ctx.get("params", [])
+    hits = []
+    for idx, pname in enumerate(params):
+        if not pname:
+            continue
+        if re.search(r'\b' + re.escape(pname) + r'\b', expr):
+            hits.append(idx)
+    return hits
+
+
+def map_variable_to_param_indices(func_ea: int, varname: Optional[str], max_hops: int = 6) -> List[int]:
+    """通过后向切片尝试将局部变量映射到参数索引"""
+    if not varname:
+        return []
+    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', varname):
+        return []
+
+    ctx = get_function_context(func_ea)
+    stmts = ctx.get("stmts", [])
+    params = ctx.get("params", [])
+    if not stmts or not params:
+        return []
+
+    try:
+        last_idx = max(idx for idx, stmt in enumerate(stmts)
+                       if varname in stmt.get("defines", []) or varname in stmt.get("uses", []))
+    except ValueError:
+        last_idx = len(stmts)
+
+    hits = set()
+    queue = deque([(last_idx, varname, 0)])
+    visited = set()
+
+    while queue:
+        start_idx, token, depth = queue.popleft()
+        if depth > max_hops:
+            continue
+        key = (start_idx, token)
+        if key in visited:
+            continue
+        visited.add(key)
+        for sidx in range(start_idx - 1, -1, -1):
+            stmt = stmts[sidx]
+            if token in stmt.get("defines", []):
+                for used in stmt.get("uses", []):
+                    if used in params:
+                        hits.add(params.index(used))
+                    elif re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', used) and used != token:
+                        queue.append((sidx, used, depth + 1))
+                break
+
+    return sorted(hits)
+
+
+def find_param_origins(func_ea: int, arg_expr: str, classification: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """识别sink参数最终关联的当前函数入参"""
+    ctx = get_function_context(func_ea)
+    params = ctx.get("params", [])
+    if not params:
+        return []
+
+    hits = set()
+
+    if classification.get("type") == "variable" and classification.get("detail") in params:
+        hits.add(params.index(classification["detail"]))
+
+    if classification.get("type") == "variable":
+        hits.update(map_variable_to_param_indices(func_ea, classification.get("detail")))
+    elif classification.get("type") in ("composite", "unknown"):
+        # 复合表达式中可能包含参数名
+        hits.update(extract_params_from_expression(func_ea, arg_expr))
+
+    hits.update(extract_params_from_expression(func_ea, arg_expr))
+
+    origins = []
+    for idx in sorted(hits):
+        name = params[idx] if idx < len(params) else f"arg{idx}"
+        origins.append({"index": idx, "name": name})
+    return origins
+
+
+def build_cross_function_paths(func_ea: int, param_idx: int, max_depth: int = MAX_CALLER_DEPTH) -> List[List[Dict[str, Any]]]:
+    """沿调用链追踪指定参数，生成跨函数路径"""
+    ctx = get_function_context(func_ea)
+    params = ctx.get("params", [])
+    start_step = {
+        "function_ea": func_ea,
+        "function_name": get_func_name(func_ea),
+        "param_index": param_idx,
+        "param_name": params[param_idx] if param_idx < len(params) else f"arg{param_idx}"
+    }
+
+    paths: List[List[Dict[str, Any]]] = []
+
+    def dfs(current_ea: int, current_param_idx: int, depth: int, chain: List[Dict[str, Any]], visited: set):
+        if depth >= max_depth:
+            paths.append(list(chain))
+            return
+
+        direct_callers = find_callers(current_ea, 0)
+        if not direct_callers:
+            paths.append(list(chain))
+            return
+
+        extended = False
+        for caller_ea, calllist in direct_callers.items():
+            if caller_ea == 0:
+                continue
+            caller_name = get_func_name(caller_ea) or (calllist[0].get("caller_name") if calllist else "<unknown>")
+            for call in calllist:
+                args = call.get("args", [])
+                if current_param_idx >= len(args):
+                    continue
+                arg_expr = args[current_param_idx]
+                arg_class = classify_expr(arg_expr)
+                step = {
+                    "function_ea": caller_ea,
+                    "function_name": caller_name,
+                    "arg_expr": arg_expr,
+                    "arg_classification": arg_class,
+                    "call_text": call.get("call_text", "")
+                }
+                chain.append(step)
+
+                next_param_indices: List[int] = []
+                if arg_class.get("type") == "variable":
+                    next_param_indices = map_variable_to_param_indices(caller_ea, arg_class.get("detail"))
+                elif arg_class.get("type") in ("composite", "unknown"):
+                    next_param_indices = extract_params_from_expression(caller_ea, arg_expr)
+
+                next_param_indices = [idx for idx in next_param_indices if idx is not None]
+
+                if next_param_indices:
+                    for next_idx in next_param_indices:
+                        key = (caller_ea, next_idx)
+                        if key in visited:
+                            continue
+                        dfs(caller_ea, next_idx, depth + 1, chain, visited | {key})
+                        extended = True
+                else:
+                    paths.append(list(chain))
+
+                chain.pop()
+
+        if not extended:
+            paths.append(list(chain))
+
+    dfs(func_ea, param_idx, 0, [start_step], {(func_ea, param_idx)})
+    # 去重
+    unique_paths = []
+    seen = set()
+    for path in paths:
+        key = json.dumps(path, default=str, ensure_ascii=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_paths.append(path)
+    return unique_paths
+
 def backward_slice_on_var(stmts: List[Dict[str,Any]], use_stmt_idx: int, varname: str, max_hops=10) -> List[Dict[str,Any]]:
     """后向切片：从使用点向前查找变量定义"""
     chains = []
@@ -322,6 +605,58 @@ def backward_slice_on_var(stmts: List[Dict[str,Any]], use_stmt_idx: int, varname
     
     return chains
 
+def extract_control_flow_context(text: str, target_char_idx: int) -> List[str]:
+    """
+    Extract control flow conditions (if, while, for) wrapping the target position.
+    """
+    # Calculate line index
+    lines = text.splitlines(keepends=True)
+    current_pos = 0
+    target_line_idx = 0
+    for i, line in enumerate(lines):
+        if current_pos + len(line) > target_char_idx:
+            target_line_idx = i
+            break
+        current_pos += len(line)
+        
+    # Now scan backwards for indentation
+    clean_lines = [l.rstrip() for l in lines]
+    if target_line_idx >= len(clean_lines):
+        return []
+
+    target_line = clean_lines[target_line_idx]
+    target_indent = len(target_line) - len(target_line.lstrip())
+    conditions = []
+    
+    current_indent = target_indent
+    captured_at_current_level = False
+    
+    for i in range(target_line_idx - 1, -1, -1):
+        line = clean_lines[i].strip()
+        if not line: continue
+        
+        raw_line = clean_lines[i]
+        indent = len(raw_line) - len(raw_line.lstrip())
+        
+        if indent < current_indent:
+            # We stepped out to a new level
+            current_indent = indent
+            captured_at_current_level = False
+            
+            if line.startswith(("if", "else", "while", "for", "do", "switch", "case", "default")):
+                conditions.insert(0, line)
+                captured_at_current_level = True
+            
+        elif indent == current_indent:
+            # Same level. Check if we missed the control statement for this block
+            # (e.g. because of brace-on-next-line style)
+            if not captured_at_current_level:
+                if line.startswith(("if", "else", "while", "for", "do", "switch", "case", "default")):
+                    conditions.insert(0, line)
+                    captured_at_current_level = True
+    
+    return conditions
+
 # 主要分析函数
 def analyze_function(func_ea: int) -> Dict[str,Any]:
     """分析函数的安全性"""
@@ -345,9 +680,16 @@ def analyze_function(func_ea: int) -> Dict[str,Any]:
     
     # 分析每个sink的参数链
     chains = []
+    control_flow_paths = set()
     for sink in sinks:
         sink_info = {"callee": sink["callee"], "snippet": sink["snippet"], "args": []}
         
+        # Extract control flow
+        cf_ctx = extract_control_flow_context(text, sink["pos"])
+        if cf_ctx:
+            path_str = " -> ".join(cf_ctx) + " -> " + sink["callee"]
+            control_flow_paths.add(path_str)
+
         for idx, arg in enumerate(sink["args_raw"]):
             cl = classify_expr(arg)
             arginfo = {"arg_index": idx, "text": arg, "classification": cl, "chains": []}
@@ -364,6 +706,22 @@ def analyze_function(func_ea: int) -> Dict[str,Any]:
                     arginfo["chains"].append({"defined_at": dstmt, "rhs_class": rcl})
             else:
                 arginfo["chains"].append({"origin": cl})
+
+            # 跨函数溯源（基于参数）
+            param_origins = find_param_origins(func_ea, arg, cl)
+            if param_origins:
+                arginfo["param_origins"] = param_origins
+                cross_paths = []
+                for origin in param_origins:
+                    paths = build_cross_function_paths(func_ea, origin["index"], MAX_CALLER_DEPTH)
+                    if paths:
+                        cross_paths.append({
+                            "param_index": origin["index"],
+                            "param_name": origin["name"],
+                            "paths": paths
+                        })
+                if cross_paths:
+                    arginfo["cross_function_paths"] = cross_paths
             
             sink_info["args"].append(arginfo)
         chains.append(sink_info)
@@ -383,6 +741,7 @@ def analyze_function(func_ea: int) -> Dict[str,Any]:
         "sinks": sinks,
         "callers": callers_named,
         "chains": chains,
+        "control_flow": list(control_flow_paths),
         "nl_assessments": assessments
     }
     
@@ -549,6 +908,12 @@ def find_function_by_name(func_name: str) -> Optional[int]:
 def main():
     """主程序入口"""
     logger.info("IDA函数安全分析工具启动")
+    
+    # 等待IDA自动分析完成
+    logger.info("等待IDA自动分析完成...")
+    ida_auto.auto_wait()
+    logger.info("IDA自动分析已完成")
+
     try:
         parser = argparse.ArgumentParser(description='IDA函数安全分析工具')
         parser.add_argument('--func', '-n', help='要分析的函数名')

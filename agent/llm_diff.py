@@ -11,9 +11,11 @@ from openai import OpenAI
 from pathlib import Path
 import glob, time, random
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from model import AgentModel
 from log import logger
+from agent.data_flow_utils import format_key_param_data_flow, format_vuln_context
 
 
 # 读取漏洞类型对应的Scenario和Property的JSON文件路径
@@ -571,153 +573,51 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
 
     async def get_function_call_info(self, binary_name, function_name):
         """调用IDA服务获取函数调用链信息"""
-        try:
-            # 调用app.py中的API端点
-            url = "http://10.12.189.21:5000/get_function_call_info"
-            data = {
-                "binary_name": binary_name,
-                "function_name": function_name,
-                "ida_version": "ida64"  # 使用64位IDA
-            }
-            
-            # 由于这是一个异步函数，我们需要使用asyncio.to_thread来包装同步的requests调用
-            loop = asyncio.get_event_loop()
-            logger.info(f"调用 get_function_call_info | bin={binary_name} func={function_name}")
-            response = await loop.run_in_executor(
-                None, 
-                lambda: requests.post(url, data=data, timeout=60)  # 增加超时时间以适应IDA分析
-            )
-            
-            if response.status_code == 200:
-                # 期望返回结构应与 IDA 导出 JSON 一致，包含 data_flow 字段
-                # 这里不做结构转换，直接按原样返回，留给上层格式化时筛选关键字段
-                payload = response.json()
-                logger.debug(f"get_function_call_info 返回大小: {len(json.dumps(payload, ensure_ascii=False))} 字节")
-                return payload
-            else:
-                logger.error(f"API调用失败，状态码: {response.status_code}")
-                logger.error(f"响应内容: {response.text}")
+        # 获取该二进制文件的锁，确保串行访问
+        lock = await self._get_lock_for_binary(binary_name)
+        
+        async with lock:
+            try:
+                # 调用app.py中的API端点
+                url = "http://10.12.189.21:5000/get_function_call_info"
+                data = {
+                    "binary_name": binary_name,
+                    "function_name": function_name,
+                    "ida_version": "ida64"  # 使用64位IDA
+                }
+                
+                # 由于这是一个异步函数，我们需要使用asyncio.to_thread来包装同步的requests调用
+                loop = asyncio.get_event_loop()
+                logger.info(f"调用 get_function_call_info | url={url} | bin={binary_name} func={function_name}")
+                
+                def _request():
+                    try:
+                        # 增加超时时间，因为可能需要等待IDA启动和分析
+                        return requests.post(url, data=data, timeout=120)
+                    except requests.exceptions.ConnectionError:
+                        return None
+
+                response = await loop.run_in_executor(None, _request)
+                
+                if response is None:
+                    logger.error(f"无法连接到 IDA 服务: {url}")
+                    return {}
+
+                if response.status_code == 200:
+                    # 期望返回结构应与 IDA 导出 JSON 一致，包含 data_flow 字段
+                    # 这里不做结构转换，直接按原样返回，留给上层格式化时筛选关键字段
+                    payload = response.json()
+                    logger.debug(f"get_function_call_info 返回大小: {len(json.dumps(payload, ensure_ascii=False))} 字节")
+                    return payload
+                else:
+                    logger.error(f"API调用失败，状态码: {response.status_code}")
+                    logger.error(f"响应内容: {response.text}")
+                    return {}
+            except Exception as e:
+                logger.error(f"API调用异常: {e}")
                 return {}
-        except Exception as e:
-            logger.error(f"API调用异常: {e}")
-            return {}
     
-    def _format_key_param_data_flow(self, call_info: dict) -> str:
-        """仅提取关键参数的数据流，格式化为简洁文本，供大模型参考。
-
-        规则：
-        - 以 chains 中的 sink 参数为入口；
-        - 只保留高风险来源的参数：http_header / network_socket / user_input / file_read；
-        - 若参数为变量(variable)，但其溯源(rhs_class 或 origin)显示为上述高风险来源，也纳入；
-        - 优先从 data_flow.backward_flow 提取该变量的切片起点(使用语句)及最近的定义语句；
-        - 生成简洁的“源 -> 变量传播 -> sink”路径描述。
-        """
-        if not isinstance(call_info, dict) or not call_info:
-            return ""
-
-        high_risk_sources = {"http_header", "network_socket", "user_input", "file_read"}
-
-        def short(s: str, n: int = 200) -> str:
-            s = s or ""
-            return s if len(s) <= n else s[:n] + "..."
-
-        lines = []
-        func = call_info.get("function", {})
-        fname = func.get("name") or call_info.get("function_name")
-        if fname:
-            lines.append(f"[函数] {fname}")
-
-        # 准备索引：data_flow 便于快速检索
-        df = call_info.get("data_flow", {}) or {}
-        backward_flow = df.get("backward_flow", {}) or {}
-
-        chains = call_info.get("chains", []) or []
-        logger.debug(f"_format_key_param_data_flow: sinks={len(chains)}")
-        for sink in chains:
-            callee = sink.get("callee")
-            snippet = sink.get("snippet")
-            args = sink.get("args", []) or []
-
-            # 每个 sink 单独一段
-            if callee:
-                lines.append(f"[Sink] {callee}")
-            if snippet:
-                lines.append(f"  代码片段: {short(snippet)}")
-
-            for arg in args:
-                a_text = (arg or {}).get("text", "")
-                a_idx = (arg or {}).get("arg_index")
-                classification = ((arg or {}).get("classification") or {}).get("type", "")
-
-                # 判断是否为关键参数
-                # 1) 直接是高风险来源
-                is_key = classification in high_risk_sources
-
-                # 2) 若为变量/未知，检查其溯源链条中的 rhs_class / origin 类型
-                origin_types = set()
-                for ch in (arg or {}).get("chains", []) or []:
-                    rhs = (ch or {}).get("rhs_class") or {}
-                    o = (ch or {}).get("origin") or {}
-                    if isinstance(rhs, dict):
-                        t = rhs.get("type")
-                        if t:
-                            origin_types.add(t)
-                    if isinstance(o, dict):
-                        t = o.get("type")
-                        if t:
-                            origin_types.add(t)
-                if origin_types & high_risk_sources:
-                    is_key = True
-
-                if not is_key:
-                    # 跳过非关键参数/常量等
-                    continue
-
-                # 输出参数头
-                hdr = f"  [关键参数] arg{a_idx}: {a_text} ({classification or 'unknown'})"
-                if origin_types:
-                    hdr += f" | 溯源: {', '.join(sorted(origin_types))}"
-                lines.append(hdr)
-
-                # 3) 尝试从 backward_flow 裁剪关键路径
-                var_name = a_text.strip()
-                # 只在变量名字看起来像标识符时检索逆向切片
-                if re.match(r'^[A-Za-z_]\w*$', var_name) and var_name in backward_flow:
-                    entries = backward_flow.get(var_name) or []
-                    # 选取与 sink 语句最相关的一条（优先包含 sink 语句的）
-                    picked = None
-                    if isinstance(entries, list):
-                        # 粗略挑选第一条
-                        picked = entries[0] if entries else None
-                    if isinstance(picked, dict):
-                        use_text = picked.get("use_stmt_text")
-                        if use_text:
-                            lines.append(f"    使用点: {short(use_text)}")
-                        slices = picked.get("slices", []) or []
-                        # 展示最多 2 条最近定义
-                        shown = 0
-                        for sl in slices:
-                            def_stmt = (sl or {}).get("def_stmt") or {}
-                            dtext = def_stmt.get("text")
-                            if dtext:
-                                lines.append(f"    定义: {short(dtext)}")
-                                shown += 1
-                            if shown >= 2:
-                                break
-
-                # 4) 若 chains 中已有明显链路，提炼 1-2 条关键信息
-                for ch in (arg or {}).get("chains", []) or []:
-                    rhs = (ch or {}).get("rhs_class") or {}
-                    detail = rhs.get("detail") if isinstance(rhs, dict) else None
-                    if detail:
-                        lines.append(f"    溯源片段: {short(detail)}")
-
-        # 若无任何关键参数，返回空字符串，避免干扰 RAG 提示
-        if len(lines) <= (1 if fname else 0):
-            return ""
-        text = "\n".join(lines)
-        logger.debug(f"关键参数数据流上下文长度: {len(text)}")
-        return text
+    # method removed; logic now resides in agent.data_flow_utils
     
         
     async def async_query2bot(self, fa, fb, cve_details=None, cwe=None) -> str:
@@ -884,8 +784,8 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             post_func_call_info = await self.get_function_call_info(post_binary_name, post_func_name)
             
             # 仅提取“关键参数的数据流”提供给大模型
-            pre_func_context = self._format_key_param_data_flow(pre_func_call_info)
-            post_func_context = self._format_key_param_data_flow(post_func_call_info)
+            pre_func_context = format_vuln_context(pre_func_call_info)
+            post_func_context = format_vuln_context(post_func_call_info)
 
             # 控制台输出上下文，便于快速排查
             if pre_func_context:
@@ -1091,11 +991,11 @@ async def llm_diff(chat_id: str, history_root: str, binary_filename: str,
 if __name__ == "__main__":
     # 运行示例
     asyncio.run(main(
-        chat_id="2025-09-26-660-1",  
+        chat_id="2025-11-25-9465-1",  
         history_root=r"/home/wzh/Desktop/Project/VulnAgent/history",
-        binary_filename="libsal.so.0.0",
-        pre_c=r"/home/wzh/Desktop/Project/VulnAgent/history/2025-09-26-660-1/ida/libsal.so.0.0/libsal.so.0.0_pseudo.c",
-        post_c=r"/home/wzh/Desktop/Project/VulnAgent/history/2025-09-26-660-1/ida/libsal.so.0.01/libsal.so.01.0_pseudo.c",
-        cve_details="Certain NETGEAR devices are affected by command injection by an unauthenticated attacker via the vulnerable /sqfs/lib/libsal.so.0.0 library used by a CGI application, as demonstrated by setup.cgi?token=';$HTTP_USER_AGENT;' with an OS command in the User-Agent field. This affects GC108P before 1.0.7.3, GC108PP before 1.0.7.3, GS108Tv3 before 7.0.6.3, GS110TPPv1 before 7.0.6.3, GS110TPv3 before 7.0.6.3, GS110TUPv1 before 1.0.4.3, GS710TUPv1 before 1.0.4.3, GS716TP before 1.0.2.3, GS716TPP before 1.0.2.3, GS724TPPv1 before 2.0.4.3, GS724TPv2 before 2.0.4.3, GS728TPPv2 before 6.0.6.3, GS728TPv2 before 6.0.6.3, GS752TPPv1 before 6.0.6.3, GS752TPv2 before 6.0.6.3, MS510TXM before 1.0.2.3, and MS510TXUP before 1.0.2.3.",
+        binary_filename="rumpusd.exe",
+        pre_c=r"/home/wzh/Desktop/Project/VulnAgent/history/2025-11-25-9465-1/ida/rumpusd.exe/rumpusd.exe_pseudo.c",
+        post_c=r"/home/wzh/Desktop/Project/VulnAgent/history/2025-11-25-9465-1/ida/rumpusd10.exe1/rumpusd101.exe_pseudo.c",
+        cve_details="CWE-78 Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')",
         cwe="CWE-78",
     ))
