@@ -605,56 +605,82 @@ def backward_slice_on_var(stmts: List[Dict[str,Any]], use_stmt_idx: int, varname
     
     return chains
 
-def extract_control_flow_context(text: str, target_char_idx: int) -> List[str]:
+def extract_control_flow_context(
+    text: str,
+    target_char_idx: int,
+    snippet: Optional[str] = None,
+    window: int = 40,
+) -> List[str]:
+    """Extract enclosing control-flow statements (if/while/for/switch) for a sink.
+
+    Hex-Rays pseudo-C often uses brace blocks with limited indentation, so relying on
+    indentation alone is fragile. This helper prefers:
+    1) locating the sink `snippet` line (if provided), otherwise using `target_char_idx`
+    2) scanning backwards while tracking brace depth
+    3) capturing the nearest control statement that opens each enclosing brace level
     """
-    Extract control flow conditions (if, while, for) wrapping the target position.
-    """
-    # Calculate line index
-    lines = text.splitlines(keepends=True)
-    current_pos = 0
-    target_line_idx = 0
-    for i, line in enumerate(lines):
-        if current_pos + len(line) > target_char_idx:
-            target_line_idx = i
-            break
-        current_pos += len(line)
-        
-    # Now scan backwards for indentation
-    clean_lines = [l.rstrip() for l in lines]
-    if target_line_idx >= len(clean_lines):
+
+    if not text:
         return []
 
-    target_line = clean_lines[target_line_idx]
-    target_indent = len(target_line) - len(target_line.lstrip())
-    conditions = []
-    
-    current_indent = target_indent
-    captured_at_current_level = False
-    
-    for i in range(target_line_idx - 1, -1, -1):
-        line = clean_lines[i].strip()
-        if not line: continue
-        
-        raw_line = clean_lines[i]
-        indent = len(raw_line) - len(raw_line.lstrip())
-        
-        if indent < current_indent:
-            # We stepped out to a new level
-            current_indent = indent
-            captured_at_current_level = False
-            
-            if line.startswith(("if", "else", "while", "for", "do", "switch", "case", "default")):
+    lines = text.splitlines()
+    if not lines:
+        return []
+
+    # 1) Decide start line index.
+    target_line_idx = 0
+    if snippet:
+        snippet_norm = re.sub(r"\s+", " ", snippet.strip())
+        for i, line in enumerate(lines):
+            line_norm = re.sub(r"\s+", " ", line.strip())
+            if snippet_norm and snippet_norm in line_norm:
+                target_line_idx = i
+                break
+        else:
+            # fall back to char offset when snippet can't be located
+            snippet = None
+
+    if not snippet:
+        current_pos = 0
+        for i, line in enumerate(lines):
+            # +1 approximates the stripped newline from splitlines()
+            if current_pos + len(line) + 1 > target_char_idx:
+                target_line_idx = i
+                break
+            current_pos += len(line) + 1
+
+    # Only scan a reasonable window for performance.
+    start = max(0, target_line_idx - window)
+    scan_lines = lines[start:target_line_idx]
+
+    ctrl_prefixes = ("if", "else", "while", "for", "do", "switch", "case", "default")
+    conditions: List[str] = []
+
+    # 2) Track brace nesting depth while scanning backwards.
+    brace_depth = 0
+    captured_depths = set()
+
+    for raw in reversed(scan_lines):
+        line = raw.strip()
+        if not line:
+            continue
+
+        # Update depth first based on braces in this line.
+        # When scanning backwards: '}' means we are moving upwards out of a block,
+        # '{' means we pass the beginning of a block.
+        brace_depth += line.count('}')
+
+        # When at a given depth, capture the nearest control statement once.
+        if brace_depth not in captured_depths:
+            # Common patterns: "if (cond) {" or "if (cond)" (brace on next line)
+            if line.startswith(ctrl_prefixes):
                 conditions.insert(0, line)
-                captured_at_current_level = True
-            
-        elif indent == current_indent:
-            # Same level. Check if we missed the control statement for this block
-            # (e.g. because of brace-on-next-line style)
-            if not captured_at_current_level:
-                if line.startswith(("if", "else", "while", "for", "do", "switch", "case", "default")):
-                    conditions.insert(0, line)
-                    captured_at_current_level = True
-    
+                captured_depths.add(brace_depth)
+
+        brace_depth -= line.count('{')
+        if brace_depth < 0:
+            brace_depth = 0
+
     return conditions
 
 # 主要分析函数
@@ -685,7 +711,7 @@ def analyze_function(func_ea: int) -> Dict[str,Any]:
         sink_info = {"callee": sink["callee"], "snippet": sink["snippet"], "args": []}
         
         # Extract control flow
-        cf_ctx = extract_control_flow_context(text, sink["pos"])
+        cf_ctx = extract_control_flow_context(text, sink["pos"], snippet=sink.get("snippet"))
         if cf_ctx:
             path_str = " -> ".join(cf_ctx) + " -> " + sink["callee"]
             control_flow_paths.add(path_str)
@@ -1030,6 +1056,7 @@ def main():
             "sinks": function_analysis["sinks"],
             "callers": function_analysis["callers"],
             "chains": function_analysis["chains"],
+            "control_flow": function_analysis.get("control_flow", []),
             "nl_assessments": function_analysis["nl_assessments"],
             "data_flow": {
                 "forward_flow": data_flow_analysis["forward_flow"],
