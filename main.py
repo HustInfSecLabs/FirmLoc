@@ -13,10 +13,11 @@ from enum import Enum
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 
-from agent import VulnAgent, run_repair_agent, ParameterCollector
+from agent import VulnAgent, run_repair_agent, ParameterCollector, HardcodedStringAuditor
 from model import AgentModel
 from config import config_manager
 from log import logger
+from utils.utils import get_binary_architecture, is_binary_file
 
 app = FastAPI()
 
@@ -177,6 +178,11 @@ class WebSocketChatSession:
         async with self._send_lock:
             if self.websocket.client_state == WebSocketState.CONNECTED:
                 await self.websocket.send_json(payload)
+                msg_type = payload.get("type")
+                # 避免心跳/控制消息刷屏日志（ping/pong/close 每 20s 一次）
+                if msg_type in {"ping", "pong", "close"}:
+                    logger.debug("WebSocket send: %s", payload)
+                    return
                 logger.info("WebSocket send: %s", payload)
 
     async def _shutdown(self) -> None:
@@ -308,6 +314,91 @@ async def upload_file(
             "created_at": int(time.time()),
             "bytes": file_stat.st_size,
         },
+    }
+
+
+@app.post("/v1/hardcode_audit")
+async def hardcode_audit(
+    file: UploadFile = File(None, max_size=10 * 1024 * 1024),
+    chat_id: str = Form(default=None),
+    file_path: str = Form(default=None),
+):
+    """对单个二进制进行硬编码字符串审计。
+
+    两种用法：
+    1) 直接上传文件（file 字段，<=10MB）
+    2) 复用服务器已有文件（file_path 字段，绝对路径或位于 history/chat_id 下的相对路径）
+    """
+
+    if not file and not file_path:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"code": 400, "msg": "缺少文件或文件路径", "data": None},
+        )
+
+    audit_chat_id = chat_id or f"stringaudit_{int(time.time())}"
+    target_path: Optional[str] = None
+
+    # 优先使用 file_path 复用已有固件
+    if file_path:
+        candidate = Path(file_path)
+        if not candidate.is_absolute():
+            candidate = Path(path) / file_path  # 相对路径时基于保存目录
+        if not candidate.exists():
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"code": 400, "msg": "file_path 不存在", "data": None},
+            )
+        target_path = str(candidate.resolve())
+    else:
+        # 正常上传流程
+        filename = Path(file.filename).name
+        ext = Path(filename).suffix.lower()
+        if file.content_type not in ALLOWED_CONTENT_TYPES and ext not in FIRMWARE_EXTENSIONS:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"code": 400, "msg": "文件类型不在白名单中", "data": None},
+            )
+
+        file_dir = os.path.join(path, str(audit_chat_id))
+        os.makedirs(file_dir, exist_ok=True)
+        save_path = os.path.join(file_dir, filename)
+
+        try:
+            content = await file.read()
+            with open(save_path, "wb") as f:
+                f.write(content)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"code": 500, "msg": f"文件保存失败: {str(exc)}", "data": None},
+            )
+        target_path = save_path
+
+    if not target_path or not is_binary_file(target_path):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"code": 400, "msg": "文件不是可识别的二进制/可执行文件", "data": None},
+        )
+
+    try:
+        auditor = HardcodedStringAuditor()
+        result = await auditor.audit(
+            target_path,
+            chat_id=audit_chat_id,
+            ida_version=get_binary_architecture(target_path),
+        )
+    except Exception as exc:
+        logger.error("硬编码字符串审计失败: %s", exc)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"code": 500, "msg": f"字符串审计失败: {str(exc)}", "data": None},
+        )
+
+    return {
+        "code": 0,
+        "msg": "字符串审计完成",
+        "data": result,
     }
 
 

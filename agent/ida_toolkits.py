@@ -1,8 +1,10 @@
 import logging
 import os
 import zipfile
+import asyncio
 from typing import List
 import requests
+from requests_toolbelt import MultipartEncoder
 
 from camel.toolkits.base import BaseToolkit
 from camel.toolkits.function_tool import FunctionTool
@@ -163,6 +165,62 @@ class IdaToolkit(BaseToolkit):
         return pseudo_c_file_path
 
 
+    async def extract_strings(self, input_file_path: str, ida_version: str = "ida32",
+                        string_url: str = "http://localhost:5000/export_strings") -> dict:
+        """Export hardcoded strings from a binary via IDA service.
+
+        Args:
+            input_file_path: Path to the binary.
+            ida_version: "ida32" or "ida64".
+            string_url: IDA service endpoint for string extraction.
+
+        Returns:
+            dict: JSON payload returned by the service, or {} on failure.
+        """
+        if not os.path.exists(input_file_path):
+            logger.error(f"Input file does not exist: {input_file_path}")
+            return {}
+        if not is_binary_file(input_file_path):
+            logger.error(f"Input file is not a binary file: {input_file_path}")
+            return {}
+
+        file_name = os.path.basename(input_file_path)
+
+        def _send_request():
+            # Use MultipartEncoder for streaming upload to avoid OOM
+            with open(input_file_path, 'rb') as f:
+                m = MultipartEncoder(
+                    fields={
+                        'file': (file_name, f, 'application/octet-stream'),
+                        'ida_version': ida_version.lower()
+                    }
+                )
+                logger.info(f"Sending file to string extraction service: {string_url}")
+                return requests.post(
+                    string_url,
+                    data=m,
+                    headers={'Content-Type': m.content_type},
+                    timeout=3600  # 1 hour timeout
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, _send_request)
+        except Exception as e:
+            logger.error(f"String extraction request failed: {e}")
+            return {}
+
+        if response.status_code != 200:
+            logger.error(f"String extraction service failed: HTTP {response.status_code}")
+            return {}
+
+        try:
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to parse string extraction response: {e}")
+            return {}
+
+
     def get_tools(self) -> List[FunctionTool]:
         r"""Returns a list of FunctionTool objects representing the functions in the toolkit.
 
@@ -172,7 +230,8 @@ class IdaToolkit(BaseToolkit):
         return [
             FunctionTool(self.get_screenshots),
             FunctionTool(self.get_binexport),
-            FunctionTool(self.get_pseudo_c)
+            FunctionTool(self.get_pseudo_c),
+            FunctionTool(self.extract_strings)
         ]
 
 if __name__ == "__main__":

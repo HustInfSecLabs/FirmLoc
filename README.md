@@ -175,6 +175,27 @@ upload_firmware("/path/to/firmware_new.bin", chat_id)
 - 删除：`DELETE /v1/codeRepair/file?chat_id=...&filename=...`
 - WebSocket 修复：`WS /v1/codeRepair/repair`
 
+### 硬编码字符串审计（新）
+
+- 接口：`POST /v1/hardcode_audit`
+- 表单字段：
+	- `file`: 单个二进制/固件文件（10MB 以内）
+	- `chat_id` (可选)：结果保存目录标识，默认自动生成
+- 行为：
+	1. 后端调用远端 IDAService 提取可打印的硬编码字符串
+	2. 将去重后的字符串列表发送给大模型，识别账号密码、SQL 语句、命令执行、固件/中间件名称与版本、预设/后门用户、疑似加密片段等敏感信息
+- 返回：结构化 JSON，包含审计概要、风险等级、可疑字符串列表与保存的本地结果路径
+
+
+## 支持的分析模式
+
+| 模式 | 触发方式 | 流程特性 |
+| --- | --- | --- |
+| 固件比较（默认） | 上传两个固件/镜像文件（.bin/.img/.tar 等） | Binwalk 自动解包 → Binary Filter 从提取目录挑选可疑二进制 → IDA/BinDiff/LLM | 
+| 二进制/Windows 程序比较 | 上传两个可执行文件（ELF/Mach-O/PE，例如 `.so`、`.exe`、`.dll`） | 自动跳过 Binwalk 与文件筛选，直接将用户提供的二进制对送入 IDA → BinDiff → LLM |
+
+> 说明：当系统检测到上传的两个文件都带有 ELF/Mach-O/PE 头时，会自动切换到“二进制比较”模式，适用于 Windows 程序或已手动提取出的二进制对。若希望强制执行固件模式，只需上传原始固件镜像；若希望直接比较二进制，请确保同一个 `chat_id` 目录下仅包含那两个可执行文件，以避免歧义。
+
 
 ## 目录结构（节选）
 

@@ -26,11 +26,12 @@ IDAT64_PATH = r"C:\tools\IDA\idat.exe"
 # 配置分析脚本路径, 确保绝对路径
 BINEXPORT_SCRIPT = os.path.abspath("export_binexport.py")
 EXPORT_SCRIPT = os.path.abspath("export_hexrays.py")
+EXPORT_STRINGS_SCRIPT = os.path.abspath("export_strings.py")
 ANALYZE_SCRIPT = os.path.abspath("analyze.py")
 WAIT_SCRIPT = os.path.abspath("wait_for_analysis.py")
 
 # 最大文件大小限制
-MAX_FILE_SIZE = 1024 * 1024 * 500  # 500MB
+MAX_FILE_SIZE = 1024 * 1024 * 1024 * 5  # 5GB
 TIMEOUT = 3000  # 50分钟超时
 
 # 导出伪C代码的等待检测时间
@@ -67,6 +68,7 @@ app.logger.setLevel(logging.INFO)
 logger.info(f"Analyze script path: {BINEXPORT_SCRIPT}")
 logger.info(f"Export script path: {EXPORT_SCRIPT}")
 logger.info(f"Analyze script path: {ANALYZE_SCRIPT}")
+logger.info(f"Export strings script path: {EXPORT_STRINGS_SCRIPT}")
 
 # 创建base输出目录：ida_output\{日期}
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -351,6 +353,75 @@ def convert_size(size_bytes):
     return f"{size_bytes:.2f} TB"
 
 
+@app.route('/export_strings', methods=['POST'])
+def export_strings():
+    """上传单个二进制并导出硬编码字符串(JSON)。"""
+    try:
+        if request.content_length and request.content_length > MAX_FILE_SIZE:
+            abort(413, "File too large")
+
+        uploaded_file = request.files.get('file')
+        if not uploaded_file or uploaded_file.filename == '':
+            abort(400, "No valid file uploaded")
+
+        ida_version = request.form.get('ida_version', 'ida').lower()
+        IDAT_PATH = IDAT64_PATH if ida_version == 'ida64' else IDAT32_PATH
+
+        date_str = datetime.now().strftime('%Y%m%d')
+        analysis_dir = os.path.join(ida_output_dir, date_str)
+        os.makedirs(analysis_dir, exist_ok=True)
+
+        bin_path = os.path.join(analysis_dir, uploaded_file.filename)
+        uploaded_file.save(bin_path)
+        logger.info(f"File saved to: {bin_path}")
+
+        cmd = [
+            IDAT_PATH,
+            '-A',
+            '-T',
+            f'-S"{EXPORT_STRINGS_SCRIPT}"',
+            bin_path
+        ]
+
+        logger.info(f"Executing: {' '.join(cmd)}")
+        proc_env = os.environ.copy()
+        proc_env.update({
+            "PYTHONHOME": PYTHONHOME,
+            "PYTHONPATH": PYTHONPATH
+        })
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=analysis_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=TIMEOUT,
+                env=proc_env,
+            )
+        except subprocess.TimeoutExpired:
+            abort(408, "Analysis timeout")
+
+        if result.returncode != 0:
+            error_msg = result.stderr.decode(errors='ignore').strip()
+            logger.error(f"IDA export_strings failed: {error_msg}")
+            abort(500, f"IDA analysis failed: {error_msg}")
+
+        output_path = os.path.join(analysis_dir, f"{uploaded_file.filename}_strings.json")
+        if not os.path.exists(output_path):
+            logger.error(f"String export file not found: {output_path}")
+            abort(500, "String export file not generated")
+
+        with open(output_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        return jsonify(data)
+
+    except Exception as e:
+        logger.error(f"Error during string export: {str(e)}", exc_info=True)
+        abort(500, f"String export error: {str(e)}")
+
+
 @app.route('/export_pseudo_c', methods=['POST'])
 def export_pseudo_c():
     """根据文件名导出二进制文件的伪C代码"""
@@ -560,5 +631,6 @@ def get_function_call_info():
 
 if __name__ == '__main__':
     from waitress import serve
-    serve(app, host="0.0.0.0", port=port)
+    # 增加 max_request_body_size 以支持大文件上传 (例如 10GB)
+    serve(app, host="0.0.0.0", port=port, max_request_body_size=10 * 1024 * 1024 * 1024)
 

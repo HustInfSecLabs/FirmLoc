@@ -9,3 +9,4 @@ from .online_search import OnlineSearchAgent
 from .binary_filter import BinaryFilterAgent
 from .repair_agent import run_repair_agent
 from .parameter_agent import ParameterAgent, ParameterCollector
+from .hardcoded_string_audit import HardcodedStringAuditor
