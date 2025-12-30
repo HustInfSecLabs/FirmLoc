@@ -39,7 +39,7 @@ class VulnAgent:
         cve_id: Optional[str] = None,
         binary_filename: Optional[str] = None,
         user_model: ChatModel = AgentModel("DeepSeek"),
-        planner_model: ChatModel = AgentModel("Qwen"),
+        planner_model: ChatModel = AgentModel("DeepSeek"),
         config_dir: str = './history',
         analysis_mode: str = AnalysisMode.AUTO.value
     ):
@@ -100,28 +100,37 @@ class VulnAgent:
             return mode
 
         mode = AnalysisMode.FIRMWARE
-        # AUTO 模式下：只有当两个文件都明确是“可执行文件格式”(ELF/PE/Mach-O) 时，才走 binary_pair。
-        # 像 .w/.bin 这类固件容器经常是“二进制文件”，但仍应优先走 Binwalk 解包。
-        if len(self.files) == 2 and all(self._is_strong_executable_format(path) for path in self.files):
+        if len(self.files) == 2 and all(self._looks_like_executable(path) for path in self.files):
             mode = AnalysisMode.BINARY_PAIR
         self.resolved_mode = mode
         return mode
 
-    def _is_strong_executable_format(self, file_path: str) -> bool:
-        """仅识别强特征的可执行格式，避免把固件容器误判成可执行二进制。"""
+    def _looks_like_executable(self, file_path: str) -> bool:
+        """Heuristic: only treat as executable when we see a strong executable signature.
+
+        We intentionally bias towards "firmware" for ambiguous raw binaries (e.g. vendor containers like *.w)
+        to avoid accidentally skipping Binwalk.
+        """
+        # 0) Extension-based guard rails (common firmware containers)
+        try:
+            ext = Path(file_path).suffix.lower()
+        except Exception:
+            ext = ""
+        if ext in {".w", ".trx", ".chk", ".img", ".fw", ".bin"}:
+            # Still allow overriding if the file is *clearly* an executable via magic below.
+            pass
+
         try:
             with open(file_path, 'rb') as f:
-                header = f.read(4096)
+                header = f.read(1024)
         except OSError:
             return False
 
-        # ELF
+        # 1. Known Executables (strong signals)
         if header.startswith(b'\x7fELF'):
             return True
-        # Windows PE
         if header.startswith(b'MZ'):
             return True
-        # Mach-O
         mach_magics = {
             b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe',
             b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe'
@@ -129,36 +138,29 @@ class VulnAgent:
         if len(header) >= 4 and header[:4] in mach_magics:
             return True
 
-        # 其他情况（flat binary / firmware container 等）不视为“强可执行格式”
-        return False
+        # 2. Known Archives/Firmware formats (should go to Binwalk)
+        if header.startswith(b"\x1f\x8b"):
+            return False  # gzip
+        if header.startswith(b"\xFD7zXZ\x00"):
+            return False  # xz
+        if header.startswith(b"BZh"):
+            return False  # bzip2
+        if header.startswith(b"PK\x03\x04"):
+            return False  # zip
+        if len(header) >= 262 and header[257:262] == b"ustar":
+            return False  # tar
+        if b"hsqs" in header[:64] or b"sqsh" in header[:64]:
+            return False  # squashfs
+        if header[:6] in {b"070701", b"070702", b"070707"}:
+            return False  # cpio
 
-    def _looks_like_executable(self, file_path: str) -> bool:
-        try:
-            with open(file_path, 'rb') as f:
-                header = f.read(1024)
-        except OSError:
+        # 3. Guard rail: treat typical firmware container extensions as firmware by default.
+        if ext in {".w", ".trx", ".chk", ".img", ".fw", ".bin"}:
             return False
 
-        # 1. Known Executables
-        if header.startswith(b'\x7fELF'): return True
-        if header.startswith(b'MZ'): return True
-        mach_magics = {
-            b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe',
-            b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe'
-        }
-        if len(header) >= 4 and header[:4] in mach_magics: return True
-
-        # 2. Known Archives/Firmware formats (should go to Binwalk)
-        if header.startswith(b"\x1f\x8b"): return False  # gzip
-        if header.startswith(b"\xFD7zXZ\x00"): return False  # xz
-        if header.startswith(b"BZh"): return False  # bzip2
-        if header.startswith(b"PK\x03\x04"): return False  # zip
-        if len(header) >= 262 and header[257:262] == b"ustar": return False  # tar
-        if b"hsqs" in header[:64] or b"sqsh" in header[:64]: return False  # squashfs
-        if header[:6] in {b"070701", b"070702", b"070707"}: return False  # cpio
-
-        # 3. Fallback: if it's binary, treat as executable (flat binary etc)
-        return is_binary_file(file_path)
+        # 4. Fallback: unknown binary blobs.
+        # Previously we treated any binary as "executable"; that misclassifies firmware containers.
+        return False
 
     def _build_binary_pair_entries(self) -> List[dict]:
         binaries = sorted(self.files)
