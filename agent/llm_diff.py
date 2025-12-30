@@ -72,6 +72,18 @@ CVE_DESCRIPTION: {$cve_details$}
 
 """
 
+# 调用链代码切片的默认配置
+DEFAULT_DANGER_APIS = [
+    "strcpy", "strncpy", "memcpy", "strcat", "sprintf", "snprintf", "gets",
+    "system", "popen", "exec", "execve", "execl", "exece", "malloc", "free",
+    "read", "write", "recv", "send", "socket", "bind", "accept", "strlcpy",
+    "strncat"
+]
+
+# 触发切片窗口的默认行数
+DEFAULT_SLICE_BEFORE = 60
+DEFAULT_SLICE_AFTER = 60
+
 # 生成Scenario和Property的提示词
 GENERATE_SCENARIO_PROMPT = """You are a security expert. Please generate a scenario and property for the given vulnerability type.
 
@@ -426,6 +438,209 @@ def split_functions(file_path):
     return funcs
 
 
+def build_pseudo_index(pseudo_file: Optional[str]):
+    """为伪C文件建立索引，返回 {file, lines, funcs}。"""
+    if not pseudo_file or not os.path.exists(pseudo_file):
+        logger.warning(f"伪C文件不存在，无法建立索引: {pseudo_file}")
+        return None
+
+    lines = open(pseudo_file, 'r', encoding='utf-8').read().splitlines(keepends=True)
+    funcs = split_functions(pseudo_file)
+    return {"file": pseudo_file, "lines": lines, "funcs": funcs}
+
+
+def extract_call_chain(call_info: Dict[str, Any]) -> List[str]:
+    """从 analyze 结果中提取调用链，优先使用显式字段，其次回退 callers。"""
+    if not isinstance(call_info, dict):
+        return []
+
+    chain: List[str] = []
+
+    def _clean(items: List[str]) -> List[str]:
+        return [x for x in items if x and str(x).lower() not in {"<unknown>", "unknown"}]
+
+    # 1) 显式字段
+    for key in ("call_chain", "callers_chain", "call_chain_text"):
+        val = call_info.get(key)
+        if isinstance(val, list):
+            chain = _clean([str(x).strip() for x in val])
+            if chain:
+                return chain
+        if isinstance(val, str):
+            parts = [p.strip() for p in val.split("->")]
+            chain = _clean(parts)
+            if chain:
+                return chain
+
+    # 2) 函数本身
+    func_name = None
+    func_obj = call_info.get("function") or {}
+    if isinstance(func_obj, dict):
+        func_name = func_obj.get("name")
+    func_name = func_name or call_info.get("function_name")
+
+    # 3) callers 结构（按地址排序，作为近似顺序）
+    callers = call_info.get("callers", {}) or {}
+    if isinstance(callers, dict) and callers:
+        ordered = []
+        for ea, info in sorted(callers.items(), key=lambda x: str(x[0])):
+            name = None
+            if isinstance(info, dict):
+                name = info.get("name")
+            name = name or f"sub_{ea}"
+            ordered.append(name)
+        ordered = _clean(ordered)
+        if func_name:
+            ordered.append(func_name)
+        chain = ordered
+        if chain:
+            return chain
+
+    return _clean([func_name]) if func_name else []
+
+
+def collect_highlight_texts(call_info: Dict[str, Any]) -> List[str]:
+    """从 data_flow/调用链信息中提取可用于定位的关键片段。"""
+    if not isinstance(call_info, dict):
+        return []
+
+    highlights = set()
+
+    func_obj = call_info.get("function") or {}
+    if isinstance(func_obj, dict) and func_obj.get("name"):
+        highlights.add(str(func_obj.get("name")))
+
+    chains = call_info.get("chains", []) or []
+    for sink in chains:
+        snippet = sink.get("snippet")
+        callee = sink.get("callee")
+        if snippet:
+            highlights.add(str(snippet))
+        if callee:
+            highlights.add(str(callee))
+
+        for arg in sink.get("args", []) or []:
+            if arg.get("text"):
+                highlights.add(str(arg.get("text")))
+            if arg.get("call_text"):
+                highlights.add(str(arg.get("call_text")))
+            for ch in (arg.get("chains") or []):
+                rhs = (ch or {}).get("rhs_class") or {}
+                detail = rhs.get("detail") if isinstance(rhs, dict) else None
+                if detail:
+                    highlights.add(str(detail))
+
+    backward_flow = (call_info.get("data_flow") or {}).get("backward_flow", {}) or {}
+    for entries in backward_flow.values():
+        for ent in entries or []:
+            use_stmt = ent.get("use_stmt_text") or ent.get("use_stmt")
+            if use_stmt:
+                highlights.add(str(use_stmt))
+            for sl in ent.get("slices", []) or []:
+                def_stmt = (sl or {}).get("def_stmt") or {}
+                def_txt = def_stmt.get("text")
+                if def_txt:
+                    highlights.add(str(def_txt))
+
+    # 简单去噪：长度>1 且裁剪空白
+    cleaned = []
+    for t in highlights:
+        t = t.strip()
+        if len(t) > 1:
+            cleaned.append(t)
+    return cleaned
+
+
+def slice_function_code(
+    index: Dict[str, Any],
+    func_name: str,
+    danger_api_pat: Optional[re.Pattern] = None,
+    highlight_texts: Optional[List[str]] = None,
+    slice_before: int = DEFAULT_SLICE_BEFORE,
+    slice_after: int = DEFAULT_SLICE_AFTER,
+    full_threshold: int = 300,
+) -> Optional[Dict[str, Any]]:
+    """在索引中提取函数代码或切片。
+
+    优先级：
+      1) 数据流/调用链相关的高亮文本命中行
+      2) 危险 API 命中行
+      3) 头部窗口兜底
+    """
+    if not index or not func_name:
+        return None
+
+    funcs = index.get("funcs", {}) or {}
+    lines = index.get("lines", []) or []
+    if func_name not in funcs:
+        return None
+
+    start, end = funcs[func_name]
+    func_lines = lines[start:end]
+    total = end - start
+    if total <= 0:
+        return None
+
+    reason = "full_small_func"
+    truncated = False
+    slice_start, slice_end = 0, total
+
+    if total > full_threshold:
+        # 1) 数据流/调用链高亮文本匹配
+        hl_hits: List[int] = []
+        hl_texts = [t.strip().lower() for t in (highlight_texts or []) if t and len(t.strip()) > 1]
+        if hl_texts:
+            for i, l in enumerate(func_lines):
+                low = l.lower()
+                if any(t in low for t in hl_texts):
+                    hl_hits.append(i)
+            if hl_hits:
+                h = hl_hits[0]
+                slice_start = max(0, h - slice_before)
+                slice_end = min(total, h + slice_after + 1)
+                reason = "dataflow_hit"
+                truncated = True
+
+        # 2) 危险 API
+        if reason == "full_small_func":
+            if danger_api_pat:
+                hits = [i for i, l in enumerate(func_lines) if danger_api_pat.search(l)]
+            else:
+                hits = []
+            if hits:
+                h = hits[0]
+                slice_start = max(0, h - slice_before)
+                slice_end = min(total, h + slice_after + 1)
+                m = danger_api_pat.search(func_lines[h]) if danger_api_pat else None
+                reason = f"danger_api_hit:{m.group(0) if m else 'api'}"
+                truncated = True
+
+        # 3) 头部兜底
+        if reason == "full_small_func":
+            slice_start = 0
+            slice_end = min(total, slice_before * 2)
+            reason = "first_lines"
+            truncated = True
+
+    selected = func_lines[slice_start:slice_end]
+    if not selected:
+        return None
+
+    start_line = slice_start + start + 1
+    end_line = slice_start + start + len(selected)
+
+    return {
+        "func": func_name,
+        "file": index.get("file"),
+        "code": "".join(selected),
+        "start_line": start_line,
+        "end_line": end_line,
+        "reason": reason,
+        "truncated": truncated,
+        "total_lines": total,
+    }
+
+
 def write_extracted(pseudo_file, base_names, out_dir):
     """
     仅拆分 base_names 中的函数，并以 base_name.c 保存。
@@ -444,12 +659,38 @@ def write_extracted(pseudo_file, base_names, out_dir):
         logger.info(f"extracted {base} → {out}")
 
 class Refiner:
-    def __init__(self, LOG_FILE, pre_binary_name=None, post_binary_name=None):
+    def __init__(
+        self,
+        LOG_FILE,
+        pre_binary_name=None,
+        post_binary_name=None,
+            include_call_chain_code: bool = True,
+        pseudo_indexes: Optional[Dict[str, Any]] = None,
+        slice_before: int = DEFAULT_SLICE_BEFORE,
+        slice_after: int = DEFAULT_SLICE_AFTER,
+        danger_apis: Optional[List[str]] = None,
+        full_func_line_threshold: int = 120,
+    ):
         self.log = LOG_FILE
+        self.context_log = f"{LOG_FILE}.ctx"  # 将上下文单独存储，避免污染 vuln_analysis_results.json
         self.agent = "Detection Agent"
         self._task_cache = {}  # 初始化任务缓存字典
         self.pre_binary_name = pre_binary_name  # 保存补丁前二进制文件名
         self.post_binary_name = post_binary_name  # 保存补丁后二进制文件名
+
+        # 调用链代码提取配置
+        self.include_call_chain_code = include_call_chain_code
+        self.pseudo_indexes = pseudo_indexes or {}
+        self.slice_before = slice_before
+        self.slice_after = slice_after
+        self.full_func_line_threshold = full_func_line_threshold
+        self.danger_apis = danger_apis or DEFAULT_DANGER_APIS
+        self.danger_api_pattern = (
+            re.compile("|".join(re.escape(api) for api in self.danger_apis), re.IGNORECASE)
+            if self.danger_apis
+            else None
+        )
+        self.max_call_chain_chars = 100000  # 软限制，避免提示词过大
         
         # 二进制文件锁，防止对同一文件的并发 IDA 分析
         self._binary_locks = {}
@@ -616,6 +857,56 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             except Exception as e:
                 logger.error(f"API调用异常: {e}")
                 return {}
+
+    def _collect_call_chain_slices(self, call_info: Dict[str, Any], version_label: str):
+        """基于调用链提取关键函数代码切片。"""
+        if not self.include_call_chain_code:
+            return [], []
+
+        index = self.pseudo_indexes.get(version_label)
+        if not index:
+            return [], []
+
+        chain = extract_call_chain(call_info)
+        highlight_texts = collect_highlight_texts(call_info)
+        slices = []
+        for func in chain:
+            sl = slice_function_code(
+                index,
+                func,
+                danger_api_pat=self.danger_api_pattern,
+                highlight_texts=highlight_texts,
+                slice_before=self.slice_before,
+                slice_after=self.slice_after,
+                full_threshold=self.full_func_line_threshold,
+            )
+            if sl:
+                sl["version"] = version_label
+                slices.append(sl)
+        return chain, slices
+
+    def _format_call_chain_slices(self, slices: List[Dict[str, Any]], title: str) -> str:
+        if not slices:
+            return ""
+        lines = [title]
+        total_chars = 0
+        for idx, sl in enumerate(slices, 1):
+            header = (
+                f"[{idx}] {sl.get('func')} | {os.path.basename(sl.get('file',''))}:{sl.get('start_line')}-{sl.get('end_line')} "
+                f"reason={sl.get('reason')}"
+            )
+            if sl.get("truncated"):
+                header += " [slice]"
+            lines.append(header)
+            code = (sl.get("code") or "").strip("\n")
+            if code:
+                lines.append(code)
+                total_chars += len(code)
+            lines.append("")
+            if total_chars > self.max_call_chain_chars:
+                lines.append("[提示] 调用链代码已截断，超出长度限制")
+                break
+        return "\n".join(lines).strip()
     
     # method removed; logic now resides in agent.data_flow_utils
     
@@ -787,6 +1078,21 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             pre_func_context = format_vuln_context(pre_func_call_info)
             post_func_context = format_vuln_context(post_func_call_info)
 
+            # 追加调用链代码切片
+            try:
+                pre_chain, pre_slices = self._collect_call_chain_slices(pre_func_call_info, "pre")
+                post_chain, post_slices = self._collect_call_chain_slices(post_func_call_info, "post")
+
+                pre_chain_text = self._format_call_chain_slices(pre_slices, "4️⃣ 调用链关键代码（补丁前）")
+                post_chain_text = self._format_call_chain_slices(post_slices, "4️⃣ 调用链关键代码（补丁后）")
+
+                if pre_chain_text:
+                    pre_func_context = (pre_func_context + "\n\n" + pre_chain_text).strip()
+                if post_chain_text:
+                    post_func_context = (post_func_context + "\n\n" + post_chain_text).strip()
+            except Exception as _err:
+                logger.error(f"追加调用链代码切片失败: {_err}")
+
             # 控制台输出上下文，便于快速排查
             if pre_func_context:
                 logger.debug("[RAG] 补丁前函数上下文:\n" + pre_func_context)
@@ -797,16 +1103,16 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             else:
                 logger.debug("[RAG] 补丁后函数上下文: <empty>")
 
-            # 将函数上下文信息记录到日志文件
+            # 将函数上下文信息写入单独的 context_log，不污染 vuln_analysis_results.json
             try:
-                with open(self.log, 'a', encoding='utf-8') as w:
+                with open(self.context_log, 'a', encoding='utf-8') as w:
                     w.write(f"=== Function Context: {os.path.basename(fa)} vs {os.path.basename(fb)} ===\n")
                     w.write("[Pre]\n")
                     w.write((pre_func_context or "<empty>") + "\n")
                     w.write("[Post]\n")
                     w.write((post_func_context or "<empty>") + "\n\n")
             except Exception as _e:
-                logger.error(f"写入函数上下文到日志失败: {_e}")
+                logger.error(f"写入函数上下文到 context_log 失败: {_e}")
             
         except Exception as e:
             logger.error(f"获取函数调用链信息失败: {e}")
@@ -837,34 +1143,35 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             return f"RAG推理失败: {str(e)}"
 
         try:
+            # 结果仍写入 vuln_analysis_results.json，但不包含上下文
             with open(self.log, 'a', encoding='utf-8') as w:
                 w.write(f"=== {os.path.basename(fa)} vs {os.path.basename(fb)} (RAG二次判断) ===\n")
-                # 在结果前记录一次上下文，便于日志阅读
-                w.write("[Pre]\n")
-                w.write((pre_func_context or "<empty>") + "\n")
-                w.write("[Post]\n")
-                w.write((post_func_context or "<empty>") + "\n")
                 w.write(result + "\n\n")
             logger.info(f"写入RAG分析结果到日志 {self.log}")
-        except Exception as e:
-            logger.error(f"写RAG日志失败: {e}")
 
-        # 在返回的输出中追加上下文，便于前端/调用方查看（不干扰模型输出的 JSON 本体，先给 JSON 再给上下文）
-        if result:
-            appended = (
-                result
-                + "\n\n[RAG 函数上下文]\n[Pre]\n" + (pre_func_context or "<empty>")
-                + "\n[Post]\n" + (post_func_context or "<empty>")
-            )
-            return appended
-        return "RAG分析结果为空"
+            # 上下文单独写入 context_log
+            with open(self.context_log, 'a', encoding='utf-8') as wctx:
+                wctx.write(f"=== {os.path.basename(fa)} vs {os.path.basename(fb)} (RAG上下文) ===\n")
+                wctx.write("[Pre]\n")
+                wctx.write((pre_func_context or "<empty>") + "\n")
+                wctx.write("[Post]\n")
+                wctx.write((post_func_context or "<empty>") + "\n\n")
+        except Exception as e:
+            logger.error(f"写RAG日志或上下文失败: {e}")
+
+        return result if result else "RAG分析结果为空"
 
 # 主函数
 async def main(chat_id: str,
          history_root: str | Path,
          binary_filename: str,
          post_binary_filename: str = None,  # 新增参数：实际的补丁后文件名
-         pre_c: str = None, post_c: str = None, cve_details: str = None, cwe: str = None, send_message=None):
+         pre_c: str = None, post_c: str = None, cve_details: str = None, cwe: str = None, send_message=None,
+         include_call_chain_code: bool = True,
+         slice_before: int = DEFAULT_SLICE_BEFORE,
+         slice_after: int = DEFAULT_SLICE_AFTER,
+         danger_api_list: Optional[List[str]] = None,
+         full_func_line_threshold: int = 300):
     # ---------- 动态定位 ----------
     paths = locate_paths(chat_id, history_root, binary_filename)
     WORK_DIR     = Path(paths["WORK_DIR"])     
@@ -884,6 +1191,15 @@ async def main(chat_id: str,
     logger.info(f"补丁前伪C路径: {pre_c}")
     logger.info(f"补丁后伪C路径: {post_c}")
 
+    # 预构建伪C索引，供调用链切片使用
+    pre_index = build_pseudo_index(pre_c) if pre_c else None
+    post_index = build_pseudo_index(post_c) if post_c else None
+    pseudo_indexes = {}
+    if pre_index:
+        pseudo_indexes["pre"] = pre_index
+    if post_index:
+        pseudo_indexes["post"] = post_index
+
     # 2. 从 BinDiff 结果中解析函数对应关系
     func_mapping = parse_result_funcs(RESULTS_FILE)
     logger.info(f"补丁变化函数对数量: {len(func_mapping)}")
@@ -901,7 +1217,17 @@ async def main(chat_id: str,
 
     # 4. 开始调用大模型进行差异分析
     # 传递实际的二进制文件名到 Refiner
-    r = Refiner(LOG_FILE, pre_binary_name=binary_filename, post_binary_name=post_binary_filename)
+    r = Refiner(
+        LOG_FILE,
+        pre_binary_name=binary_filename,
+        post_binary_name=post_binary_filename,
+        include_call_chain_code=include_call_chain_code,
+        pseudo_indexes=pseudo_indexes,
+        slice_before=slice_before,
+        slice_after=slice_after,
+        danger_apis=danger_api_list,
+        full_func_line_threshold=full_func_line_threshold,
+    )
 
     # 定义并行处理函数对的任务列表
     tasks = []
@@ -982,11 +1308,31 @@ async def main(chat_id: str,
 
 # 包装函数，保持向后兼容性
 async def llm_diff(chat_id: str, history_root: str, binary_filename: str, 
+                 post_binary_filename: str = None,
                  pre_c: str = None, post_c: str = None, cve_details: str = None, 
-                 cwe: str = None, send_message=None):
+                 cwe: str = None, send_message=None,
+                 include_call_chain_code: bool = True,
+                 slice_before: int = DEFAULT_SLICE_BEFORE,
+                 slice_after: int = DEFAULT_SLICE_AFTER,
+                 danger_api_list: Optional[List[str]] = None,
+                 full_func_line_threshold: int = 300):
     """包装函数，保持与原代码的兼容性"""
-    return await main(chat_id, history_root, binary_filename, pre_c, post_c, 
-                     cve_details, cwe, send_message)
+    return await main(
+        chat_id,
+        history_root,
+        binary_filename,
+    post_binary_filename=post_binary_filename,
+        pre_c=pre_c,
+        post_c=post_c,
+        cve_details=cve_details,
+        cwe=cwe,
+        send_message=send_message,
+        include_call_chain_code=include_call_chain_code,
+        slice_before=slice_before,
+        slice_after=slice_after,
+        danger_api_list=danger_api_list,
+        full_func_line_threshold=full_func_line_threshold,
+    )
 
 if __name__ == "__main__":
     # 运行示例
