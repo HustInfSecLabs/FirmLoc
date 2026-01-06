@@ -80,6 +80,13 @@ class HardcodedStringAuditor:
                 prompt = self._build_prompt(binary_path, batch, total_strings, is_batch=True)
                 llm_raw = self.model.chat(prompt=prompt)
                 parsed = self._safe_json(llm_raw)
+                retry_done = False
+                if parsed is None:
+                    # 追加一次纠错重试，提示仅返回 JSON
+                    retry_prompt = prompt + "\n\nPrevious reply was not valid JSON. Output STRICT JSON only, no markdown, keys: summary, risk_level, suspicious_entries[]."
+                    llm_raw_retry = self.model.chat(prompt=retry_prompt)
+                    parsed = self._safe_json(llm_raw_retry)
+                    retry_done = True
                 
                 if parsed and isinstance(parsed, dict):
                     entries = parsed.get("suspicious_entries", [])
@@ -91,6 +98,9 @@ class HardcodedStringAuditor:
                     preview_len = 500
                     raw_preview = llm_raw[:preview_len] + "..." if len(llm_raw) > preview_len else llm_raw
                     logger.warning(f"[StringAudit] Failed to parse batch result. Raw response preview:\n{raw_preview}")
+                    if retry_done:
+                        raw_preview_retry = llm_raw_retry[:preview_len] + "..." if len(llm_raw_retry) > preview_len else llm_raw_retry
+                        logger.warning(f"[StringAudit] Retry response preview:\n{raw_preview_retry}")
                     
                     # 尝试将错误的响应保存到文件，以便后续分析
                     try:
@@ -103,6 +113,10 @@ class HardcodedStringAuditor:
                             f.write(f"Prompt Length: {len(prompt)}\n")
                             f.write("-" * 50 + "\n")
                             f.write(llm_raw)
+                            if retry_done:
+                                f.write("\n" + "-" * 50 + "\n")
+                                f.write("[Retry]\n")
+                                f.write(llm_raw_retry)
                         logger.warning(f"[StringAudit] Saved failed batch response to: {debug_file}")
                     except Exception as e:
                         logger.error(f"[StringAudit] Failed to save debug info: {e}")
@@ -247,9 +261,10 @@ class HardcodedStringAuditor:
             "(4) firmware/middleware product names & versions, (5) preset/backdoor users, (6) suspicious encrypted or high-entropy blobs.\n"
             "Be concise and only include strings that are suspicious or security-relevant.\n"
             "IMPORTANT: Do not modify the string values. Return them exactly as they appear in the input list.\n"
-            "Return strict JSON with keys: summary (string), risk_level (low/medium/high), "
+            "Return STRICT JSON ONLY (no Markdown/code fences) with keys: summary (string), risk_level (low/medium/high), "
             "suspicious_entries (array of {value, category, reason, address, section, confidence[0-1]}).\n"
-            "If no issues, return an empty suspicious_entries array and risk_level='low'.\n"
+            "If no issues or not enough evidence, set suspicious_entries=[] and risk_level='low'.\n"
+            "Remove or escape any control / non-printable characters before output.\n"
             f"\nContext:\n{header}\n\nStrings:\n" + "\n".join(lines)
         )
 
@@ -257,27 +272,86 @@ class HardcodedStringAuditor:
         if not text:
             return None
         text = text.strip()
-        # 尝试去除 markdown 代码块标记
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if len(lines) >= 2:
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                text = "\n".join(lines).strip()
         
+        # 更健壮的 Markdown 代码块去除
+        # 处理 ```json ... ``` 或 ``` ... ``` 格式
+        import re
+        # 1) 去除 Markdown 代码块（```json ... ``` 或 ``` ... ```）
+        code_block_pattern = re.compile(r'^```(?:json)?\s*\n?(.*?)\n?```\s*$', re.DOTALL | re.IGNORECASE)
+        match = code_block_pattern.match(text)
+        if match:
+            text = match.group(1).strip()
+        elif text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        # 2) 提前剥离最外层 { ... }，避免多余前后缀影响
+        brace_start = text.find("{")
+        brace_end = text.rfind("}")
+        if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+            text = text[brace_start:brace_end + 1].strip()
+        
+        # 修复非法的 JSON 转义序列 + 非打印控制字符
+        # JSON 只允许: \" \\ \/ \b \f \n \r \t \uXXXX
+        # LLM 可能返回类似 \E \Y \Z 等非法转义，需要将单个 \ 转为 \\，并转义 0x00-0x1F 控制符
+        def fix_invalid_escapes(s: str) -> str:
+            # 先转义控制字符（除标准 \n\r\t 等外的其他 0x00-0x1F）
+            def escape_ctrl(m):
+                ch = m.group(0)
+                return f"\\u{ord(ch):04x}"
+
+            s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", escape_ctrl, s)
+
+            # 再处理非法反斜杠转义
+            result = []
+            i = 0
+            while i < len(s):
+                if s[i] == '\\' and i + 1 < len(s):
+                    next_char = s[i + 1]
+                    if next_char in '"\\bfnrtu/':
+                        # 合法转义，保持原样
+                        result.append(s[i])
+                        result.append(next_char)
+                        i += 2
+                    else:
+                        # 非法转义，添加额外的反斜杠
+                        result.append('\\\\')
+                        result.append(next_char)
+                        i += 2
+                else:
+                    result.append(s[i])
+                    i += 1
+            return ''.join(result)
+        
+        # 3) 先尝试直接解析
         try:
             return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 4) 尝试修复非法转义和控制字符后再解析
+        try:
+            fixed_text = fix_invalid_escapes(text)
+            return json.loads(fixed_text)
         except Exception:
-            # 简单的尝试修复：有时候 LLM 会在 JSON 后加解释文字
-            try:
-                end_idx = text.rfind("}")
-                if end_idx != -1:
-                    return json.loads(text[:end_idx+1])
-            except Exception:
-                pass
-            return None
+            pass
+
+        # 5) 兜底：再取一次最外层 { ... }，并再次修复
+        try:
+            start_idx = text.find("{")
+            end_idx = text.rfind("}")
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_text = text[start_idx:end_idx+1]
+                json_text = fix_invalid_escapes(json_text)
+                return json.loads(json_text)
+        except Exception:
+            pass
+
+        return None
 
     def _persist_results(
         self,
