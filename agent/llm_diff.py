@@ -1248,36 +1248,40 @@ async def main(chat_id: str,
     concurrency_limit = 5  # 根据系统资源和API限制调整
     semaphore = asyncio.Semaphore(concurrency_limit)
     
-    # 包装任务以使用信号量
-    async def bounded_task(task, index):
+    # 包装任务以使用信号量，并在完成后立即发送消息
+    async def bounded_task_with_send(task, index, pre_path, post_path):
         async with semaphore:
             try:
                 result = await task
-                # 确保返回正确格式的元组
+                # 任务完成后立即发送消息给前端
+                if send_message:
+                    await send_message(
+                        f"大模型分析 {os.path.basename(pre_path)} vs {os.path.basename(post_path)}结果：\n{result}",
+                        "message",
+                        agent=r.agent
+                    )
                 return index, result
             except Exception as e:
                 logger.error(f"任务执行失败: {e}")
-                # 即使出现异常，也确保返回正确格式的元组
-                return index, f"分析失败: {str(e)}"
+                error_msg = f"分析失败: {str(e)}"
+                # 即使出现异常也发送错误消息
+                if send_message:
+                    await send_message(
+                        f"大模型分析 {os.path.basename(pre_path)} vs {os.path.basename(post_path)}失败：\n{error_msg}",
+                        "message",
+                        agent=r.agent
+                    )
+                return index, error_msg
     
-    # 创建受限制的任务列表
-    bounded_tasks = [bounded_task(task, i) for i, task in enumerate(tasks)]
+    # 创建受限制的任务列表，每个任务完成后会立即发送消息
+    bounded_tasks = [
+        bounded_task_with_send(task, i, func_paths[i][0], func_paths[i][1]) 
+        for i, task in enumerate(tasks)
+    ]
     
-    # 并行执行所有任务
-    results = await asyncio.gather(*bounded_tasks)
-    
-    # 按照原始顺序处理结果
-    ordered_results = sorted(results, key=lambda x: x[0])
-    
-    # 发送结果到客户端
-    for i, (_, result) in enumerate(ordered_results):
-        pre_func_path, post_func_path = func_paths[i]
-        if send_message:
-            await send_message(
-                f"大模型分析 {os.path.basename(pre_func_path)} vs {os.path.basename(post_func_path)}结果：\n{result}",
-                "message",
-                agent = r.agent
-            )
+    # 使用 asyncio.gather 执行任务，但消息已在每个任务完成时发送
+    # 结果按完成顺序发送给前端，用户可以实时看到进度
+    await asyncio.gather(*bounded_tasks)
     # 5. 最后生成总结
     try:
         with open(LOG_FILE, 'r', encoding='utf-8') as f:
