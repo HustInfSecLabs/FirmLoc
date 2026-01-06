@@ -11,9 +11,9 @@ import stat
 PROMPT = """You are a security analyst who specializes in analyzing binary files that may have vulnerabilities based on the names of affected services/programs and their vulnerability types mentioned in CVE descriptions and other information.
 You need to find relevant binary files that may have vulnerabilities in the executable binary list [directory] (extracted from the firmware directory) and CVE information [CVE details] of the {binary_filename} device provided below.
 
-Strictly output in the following format:
+Strictly output **raw JSON only** in the following format (do NOT wrap with Markdown code fences):
 {{
-"status": "success/error",
+"status": "success" | "error",  // use "error" when unsure
 "message": "Analysis description",
 "suspicious_binaries": [
 {{
@@ -29,9 +29,11 @@ Strictly output in the following format:
 ]
 }}
 
-Among them, suspicious_binaries can output up to 3, and the output results are sorted by relevance, with the most suspicious ones in the front. If the specific suspicious binary file cannot be determined, combine your knowledge base, vulnerability description and file directory to give the most likely binary file with the vulnerability.
+Rules:
+- suspicious_binaries can output up to 3, sorted by relevance (most suspicious first).
+- If a suspicious binary cannot be determined, set status to "error" and return an empty suspicious_binaries array with a clear message.
+- Do not include any extra text, Markdown, or explanations outside the JSON.
 
-If the directory structure passed in cannot be analyzed or no suspicious binary file related to the provided CVE is found in the directory, error and analysis results are returned.
 Example error message output:
 {{
 "status": "error",
@@ -183,6 +185,122 @@ class BinaryFilterAgent(Agent):
 
         executable_files.sort()
         return "\n".join(executable_files)
+
+    def _extract_json_block(self, response: str) -> str:
+        """从模型响应中提取 JSON 字符串，支持 markdown 代码块和裸 JSON。"""
+        if not response:
+            return ""
+
+        json_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", response, re.IGNORECASE)
+        if json_match:
+            return json_match.group(1).strip()
+
+        brace_match = re.search(r"({[\s\S]+})", response)
+        if brace_match:
+            return brace_match.group(1).strip()
+
+        return ""
+
+    def _normalize_process_result(self, process_result: dict) -> tuple:
+        """
+        校验并规范化模型返回，确保字段齐全且类型正确。
+        返回 (normalized_dict, warning_str|None)
+        """
+        if not isinstance(process_result, dict):
+            return None, "响应不是 JSON 对象"
+
+        status = process_result.get("status", "error")
+        if status not in {"success", "error"}:
+            status = "error"
+
+        message = str(process_result.get("message", "")).strip()
+        suspicious_list = process_result.get("suspicious_binaries", [])
+        if not isinstance(suspicious_list, list):
+            suspicious_list = []
+
+        normalized_binaries = []
+        for item in suspicious_list[:3]:
+            if not isinstance(item, dict):
+                continue
+            binary_name = str(item.get("binary_name", "")).strip()
+            binary_path = str(item.get("binary_path", "")).strip()
+            reason = str(item.get("reason", "")).strip() or "模型未提供原因"
+
+            if not binary_name and binary_path:
+                binary_name = Path(binary_path).name
+
+            # 至少需要 binary_path 或 binary_name 之一
+            if not binary_name and not binary_path:
+                continue
+
+            normalized_binaries.append({
+                "binary_name": binary_name,
+                "binary_path": binary_path,
+                "reason": reason
+            })
+
+        # 如果标记 success 但没有可疑列表，降级为 error
+        warning = None
+        if status == "success" and not normalized_binaries:
+            warning = "模型返回 success 但未提供可疑二进制，已降级为 error"
+            status = "error"
+            if not message:
+                message = warning
+
+        normalized = {
+            "status": status,
+            "message": message or "模型未给出说明",
+            "suspicious_binaries": normalized_binaries
+        }
+
+        return normalized, warning
+
+    def _build_retry_prompt(self, base_prompt: str, last_error: str) -> str:
+        """构造重试提示，要求模型仅返回合规 JSON。"""
+        retry_hint = (
+            "\n\n上一次回复未满足 JSON 结构要求，错误原因: "
+            f"{last_error}。请严格输出纯 JSON，字段包括 status/message/suspicious_binaries，"
+            "不使用 Markdown 代码块，若无法确定则返回 status=\"error\" 且 suspicious_binaries 为空数组。"
+        )
+        return base_prompt + retry_hint
+
+    def _chat_and_parse_with_retry(self, prompt: str, max_attempts: int = 2) -> tuple:
+        """调用大模型并解析，失败时自动追加一次纠错重试。"""
+        errors = []
+        last_raw = ""
+
+        for attempt in range(max_attempts):
+            raw_response = self.chat_model.chat(prompt)
+            last_raw = raw_response
+
+            json_str = self._extract_json_block(raw_response)
+            if not json_str:
+                errors.append("未找到 JSON 块")
+                prompt = self._build_retry_prompt(prompt, errors[-1])
+                continue
+
+            try:
+                process_result = json.loads(json_str)
+            except Exception as e:
+                errors.append(f"JSON 解析失败: {str(e)}")
+                prompt = self._build_retry_prompt(prompt, errors[-1])
+                continue
+
+            normalized, warning = self._normalize_process_result(process_result)
+            if normalized:
+                if warning:
+                    normalized["message"] = f"{normalized.get('message', '')} | {warning}".strip(" |")
+                return normalized, raw_response
+
+            errors.append(warning or "模型返回内容无法规范化")
+            prompt = self._build_retry_prompt(prompt, errors[-1])
+
+        fallback_message = "; ".join(errors) if errors else "模型响应无法解析"
+        return {
+            "status": "error",
+            "message": f"模型响应无法解析: {fallback_message}",
+            "suspicious_binaries": []
+        }, last_raw
         
     def process(self, binary_filename: str, extracted_files_path: str, cve_details: str) -> dict:
         try:
@@ -207,34 +325,9 @@ class BinaryFilterAgent(Agent):
             enc = tiktoken.encoding_for_model("gpt-4o")
             token_ids = enc.encode(prompt)
             print(f"Prompt token 数: {len(token_ids)}")
+            process_result, raw_response = self._chat_and_parse_with_retry(prompt, max_attempts=2)
+            print(f"大模型原始返回结果：{raw_response}")
 
-            response = self.chat_model.chat(prompt)
-            print(f"大模型原始返回结果：{response}")
-
-            # 提取markdown格式的JSON块
-            json_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", response, re.IGNORECASE)
-            if json_match:
-                json_result = json_match.group(1).strip()
-            else:
-                # 直接提取仅有大括号包围的JSON块
-                json_match = re.search(r"({[\s\S]+})", response)
-                if json_match:
-                    json_result = json_match.group(1).strip()
-                else:
-                    raise ValueError("模型响应格式错误，无法解析为JSON或未找到有效的JSON数据")
-            
-            # print(f"提取出的json结果：{json_result}")
-
-            process_result = json.loads(json_result)
-            required_fields = ["status", "message", "suspicious_binaries"]
-            if not all(field in process_result for field in required_fields):
-                raise ValueError("响应的字段不完整")
-                
-            for binary in process_result["suspicious_binaries"]:
-                required_binary_fields = ["binary_name", "binary_path", "reason"]
-                if not all(field in binary for field in required_binary_fields):
-                    raise ValueError("二进制文件信息字段不完整")
-                    
             return process_result
                 
         except Exception as e:
