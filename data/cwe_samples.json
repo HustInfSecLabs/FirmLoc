@@ -33,6 +33,30 @@
       "is_positive": true
     },
     {
+      "id": "CVE-xxxx",
+      "cwe": "CWE-22",
+      "before": "char *user_file = get_user_input(\"file\");\nchar full_path[256];\nsnprintf(full_path, sizeof(full_path), \"/var/www/data/%s\", user_file);\nFILE *f = fopen(full_path, \"r\");",
+      "after": "char *user_file = get_user_input(\"file\");\nchar base_path[] = \"/var/www/data/\";\nchar full_path[256];\nsnprintf(full_path, sizeof(full_path), \"%s%s\", base_path, user_file);\nchar resolved_path[256];\nif (realpath(full_path, resolved_path) && strncmp(resolved_path, base_path, strlen(base_path)) == 0) {\n  FILE *f = fopen(resolved_path, \"r\");\n} else {\n  log_error(\"Path traversal attempt detected\");\n}",
+      "rationale": "使用 `realpath` 函数将用户提供的路径解析为规范的绝对路径，然后检查该规范路径是否以预期的安全基目录 `/var/www/data/` 开头，从而确保文件操作不会超出限定的目录范围。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-xxxx",
+      "cwe": "CWE-22",
+      "before": "char *user_config = get_user_input(\"config\");\nchar full_path[256];\nsnprintf(full_path, sizeof(full_path), \"/etc/app/configs/%s.conf\", user_config);\nload_config(full_path);",
+      "after": "char *user_config = get_user_input(\"config\");\nconst char *allowed_configs[] = {\"default\", \"user\", \"system\"};\nint is_allowed = 0;\nfor (int i = 0; i < 3; i++) {\n  if (strcmp(user_config, allowed_configs[i]) == 0) {\n    is_allowed = 1;\n    break;\n  }\n}\nif (is_allowed) {\n  char full_path[256];\n  snprintf(full_path, sizeof(full_path), \"/etc/app/configs/%s.conf\", user_config);\n  load_config(full_path);\n} else {\n  log_error(\"Invalid config file requested\");\n}",
+      "rationale": "采用白名单机制，仅允许用户请求预定义的安全配置文件名（`default`、`user`、`system`），完全阻止用户输入作为路径的一部分，从而彻底消除路径遍历的风险。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-xxxx",
+      "cwe": "CWE-22",
+      "before": "char *user_path = get_user_input(\"path\");\nFILE *f = fopen(user_path, \"w\");",
+      "after": "char *user_path = get_user_input(\"path\");\n// 确保路径中不包含任何目录分隔符，强制用户输入为纯文件名\nif (strchr(user_path, '/') || strchr(user_path, '\\\\')) {\n  log_error(\"Path separators not allowed\");\n  return;\n}\n// 强制文件创建在安全目录\nchar full_path[256];\nsnprintf(full_path, sizeof(full_path), \"/tmp/uploads/%s\", user_path);\nFILE *f = fopen(full_path, \"w\");",
+      "rationale": "通过检查并拒绝包含目录分隔符（`/` 或 `\\`）的输入，强制用户输入为纯文件名，并将文件操作限定在一个安全的、硬编码的目录 `/tmp/uploads/` 中。",
+      "is_positive": true
+    },
+    {
       "id": "",
       "cwe": "CWE-22",
       "before": "v2 = webGetParam(a1, (int)\"file_path\", (int)\"\");\nsprintf(cmd, \"open_file %s\", v2);\nsystem(cmd);",
@@ -71,7 +95,394 @@
       "after": "v7 = readConfigValue(\"log_file\");\nv8 = sanitizePath(v7);\nfopen(v8, \"a\");",
       "rationale": "看似调用了sanitizePath函数，但该函数可能仅做了简单的格式清理而未真正过滤危险路径，路径遍历漏洞依然存在。",
       "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-22",
+      "before": "char *user_path = get_user_input(\"path\");\nchar full_path[256];\nsnprintf(full_path, sizeof(full_path), \"/var/www/data/%s\", user_path);\nFILE *f = fopen(full_path, \"r\");",
+      "after": "char *user_path = get_user_input(\"path\");\nchar full_path[256];\n// 仅过滤常见的 ../ 序列\nchar *filtered_path = str_replace(user_path, \"../\", \"\");\nsnprintf(full_path, sizeof(full_path), \"/var/www/data/%s\", filtered_path);\nFILE *f = fopen(full_path, \"r\");",
+      "rationale": "仅过滤了 `../` 序列，但未考虑其他形式的路径遍历，例如 URL 编码的 `%2e%2e%2f`、双斜杠 `..//` 或混合编码等，导致过滤不完整，路径遍历漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-22",
+      "before": "char *user_path = get_user_input(\"path\");\nchar full_path[256];\nsnprintf(full_path, sizeof(full_path), \"/var/www/data/%s\", user_path);\nFILE *f = fopen(full_path, \"r\");",
+      "after": "char *user_path = get_user_input(\"path\");\nchar full_path[256];\n// 仅检查路径中是否包含冒号字符\nif (strchr(user_path, ':')) {\n  log_error(\"Invalid character in path\");\n  return;\n}\nsnprintf(full_path, sizeof(full_path), \"/var/www/data/%s\", user_path);\nFILE *f = fopen(full_path, \"r\");",
+      "rationale": "添加的检查逻辑（过滤冒号 `:`）与路径遍历攻击所使用的关键字符（如 `.`、`/`、`\\`）无关，对防御路径遍历攻击无效，漏洞依然存在。",
+      "is_positive": false
     }
+  ],
+  "CWE-78": [
+    {
+      "id": "CVE-2022-37704",
+      "cwe": "CWE-78",
+      "before": "envpa = (char **)safe_env_full(0LL);\nexecve(path, argva, envpa);",
+      "after": "envpa = (char **)safe_env_full(0LL);\nv27 = 0;\nfor (j = 0; envpa[j]; ++j)\n  ++v27;\nfor (k = 0; k < v27; ++k)\n{\n  if (!strncmp(envpa[k], \"RSH=\", 4uLL))\n  {\n    g_free(envpa[k]);\n    for (m = k; m < v27; ++m)\n      envpa[m] = envpa[m + 1];\n    envpa[v27 - 1] = 0LL;\n    break;\n  }\n}\nexecve(path, argva, envpa);",
+      "rationale": "在 execve 调用前，检查并删除环境变量 RSH 的值，防止其被用于执行恶意命令。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-1389-TP-Link",
+      "cwe": "CWE-78",
+      "before": "v10 = get_http_param(\"country\");\nsprintf(cmd_buf, \"set_locale %s\", v10);\npopen(cmd_buf, \"r\");",
+      "after": "v10 = get_http_param(\"country\");\nif (validate_locale(v10)) {\n  escaped = shell_escape(v10);\n  sprintf(cmd_buf, \"set_locale %s\", escaped);\n  popen(cmd_buf, \"r\");\n} else {\n  return_error();\n}",
+      "rationale": "在 popen 调用前，对 country 参数进行验证和 shell 转义，防止注入恶意命令。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2017-6361-QNAP QTS",
+      "cwe": "CWE-78",
+      "before": "msg = base64_decode(get_param(\"reboot_notice_msg\"));\nsprintf(cmd, \"/sbin/vjbod_util -i '%s' 1>>/dev/null 2>&1\", msg);\nsystem(cmd);",
+      "after": "msg = base64_decode(get_param(\"reboot_notice_msg\"));\nv15 = 0;\nwhile (msg[v15]) {\n  if (strchr(';\\&|$', msg[v15])) {\n    return_error(\"Invalid input\");\n  }\n  ++v15;\n}\nsprintf(cmd, \"/sbin/vjbod_util -i '%s' 1>>/dev/null 2>&1\", msg);\nsystem(cmd);",
+      "rationale": "在 system 调用前，检查并过滤 reboot_notice_msg 中的 shell 元字符，防止命令注入。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2015-2051-D-Link DIR",
+      "cwe": "CWE-78",
+      "before": "action = get_soap_action_header();\nsprintf(cmd, \"handle_hnap %s\", action);\nsystem(cmd);",
+      "after": "action = get_soap_action_header();\nv20 = 0;\nfor (i = 0; action[i]; ++i) {\n  if (!isalnum(action[i]) && action[i] != '_') {\n    g_free(action);\n    return_error();\n  }\n}\nsprintf(cmd, \"handle_hnap %s\", action);\nsystem(cmd);",
+      "rationale": "在 system 调用前，对 SOAPAction 头进行白名单过滤，只允许字母数字和下划线，防止注入恶意命令。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2024-40891-DSL CPE Zyxel VMG4325-B10A",
+      "cwe": "CWE-78",
+      "before": "void cli_processCmd(char *input) {\n    if (find_cmd_handler(input) == NULL) {\n        prctl_runCommandInShellWithTimeout(input);\n    }\n}",
+      "after": "void cli_processCmd(char *input) {\n    const char *allowed_cmds[] = {\"haproxy\", \"nginx\", \"restart\"};\n    int is_allowed = 0;\n    for (int i = 0; i < 3; i++) {\n        if (strstr(input, allowed_cmds[i]) != NULL) {\n            is_allowed = 1;\n            break;\n        }\n    }\n    if (is_allowed && find_cmd_handler(input) != NULL) {\n        prctl_runCommandInShellWithTimeout(input);\n    } else {\n        cmsCli_print(\"Command not allowed\");  // 拒绝非法命令\n    }\n}",
+      "rationale": "引入命令白名单机制，仅允许执行预定义的安全命令（如haproxy/nginx），阻断任意命令注入。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2020-8515-DrayTek Vigor Routers ",
+      "cwe": "CWE-78",
+      "before": "char *keyPath = cgiGetValue(\"keyPath\");\nsnprintf(cmd, 256, \"openssl rsautl -inkey /tmp/rsa/private_key_%s -decrypt\", keyPath);\nsystem(cmd);",
+      "after": "char *keyPath = cgiGetValue(\"keyPath\");\nif (strlen(keyPath) > 30) { exit(1); }  // 限制输入长度≤30\nfor (int i = 0; i < strlen(keyPath); i++) {\n    if (!isxdigit(keyPath[i])) { exit(1); }\n}\nsnprintf(cmd, 256, \"openssl rsautl -inkey /tmp/rsa/private_key_%s -decrypt\", keyPath);\nsystem(cmd);",
+      "rationale": "通过长度校验和字符类型过滤（仅允许十六进制字符），防止恶意命令注入。",
+      "is_positive": true
+    },
+    {
+      "id": "",
+      "cwe": "CWE-78",
+      "before": "v2 = websGetVar(a1, (int)\"AdminID\", (int)\"\");\nsprintf(cmd, \"useradd %s\", v2);\nsystem(cmd);",
+      "after": "v2 = websGetVar(a1, (int)\"AdminID\", (int)\"byte_4A2D7C\");\nsprintf(cmd, \"useradd %s\", v2);\nsystem(cmd);",
+      "rationale": "仅将空字符串常量替换为变量，但未对用户输入进行任何验证或过滤，命令注入漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-78",
+      "before": "v3 = get_hostname();\nsprintf(cmd, \"ping -c 4 %s\", v3);\nsystem(cmd);",
+      "after": "v3 = get_hostname();\nif (strchr(v3, 32)) {  // 仅检查空格\n  return_error();\n}\nsprintf(cmd, \"ping -c 4 %s\", v3);\nsystem(cmd);",
+      "rationale": "仅过滤了空格字符，但未过滤其他shell特殊字符如;、&、|等，命令注入漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-78",
+      "before": "v4 = get_parameter(\"ip\");\nsprintf(buf, \"nslookup %s\", v4);\npopen(buf, \"r\");",
+      "after": "v4 = get_parameter(\"ip\");\nv5 = strdup(v4);\nsprintf(buf, \"nslookup %s\", v5);\npopen(buf, \"r\");\nfree(v5);",
+      "rationale": "仅添加了内存复制操作，但未对输入进行任何安全验证或过滤，命令注入漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-78",
+      "before": "v6 = get_env_var(\"USER_INPUT\");\nsystem(v6);",
+      "after": "v6 = get_env_var(\"USER_INPUT\");\nif (strlen(v6) < 100) {  // 仅限制长度\n  system(v6);\n}",
+      "rationale": "仅限制了输入长度，但未对输入内容进行任何安全验证或过滤，命令注入漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-78",
+      "before": "v7 = read_command();\nsprintf(cmd, \"/bin/sh -c '%s'\", v7);\nsystem(cmd);",
+      "after": "v7 = read_command();\nv8 = replace_quotes(v7);\nsprintf(cmd, \"/bin/sh -c '%s'\", v8);\nsystem(cmd);",
+      "rationale": "看似替换了引号字符，但未针对所有shell特殊字符进行全面过滤，命令注入漏洞依然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "CVE-2023-48802",
+      "cwe": "CWE-78",
+      "before": "v9 = sub_40BD6C(a1, \"url\");",
+      "after": "v8 = sub_40C28C(a1, \"url\");\nif ( (unsigned int)is_cmd_string_valid(v8) )",
+      "rationale": "旧版本url直接输入，未对url中的特殊字符做过滤，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的url，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2021-45733",
+      "cwe": "CWE-78",
+      "before": "Var = (const char *)websGetVar(a1, \"host_time\", &byte_437F70);\ndoSystem(\"date -s '%s'\", Var);\nnvram_set_int(\"ntp_enable\", 0);\nnvram_commit();",
+      "after": " Var = (const char *)websGetVar(a1, \"host_time\", \"\");\nif ( !Validity_check(Var) && (unsigned int)strlen(Var) < 0x1E )\n{doSystem(\"date -s '%s'\", Var);\nnvram_set_int(\"ntp_enable\", 0);\nnvram_commit();}",
+      "rationale": "旧版本直接用未验证的host_time参数拼接字符串，再经过doSystem执行，新版本使用Validity_check函数验证参数是否合法，并且还有长度限制（需要小于0x1E，即30），满足内容和长度条件后才再拼接与执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48803",
+      "cwe": "CWE-78",
+      "before": "v10 = sub_40BD6C(a1, \"user\");",
+      "after": "v9 = sub_40C28C(a1, \"user\");\nif ( (unsigned int)is_string_valid(v9) )",
+      "rationale": "旧版本user直接输入，未对user中的特殊字符做过滤，导致命令注入，新版本使用is_string_valid函数验证输入的user，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2019-19824",
+      "cwe": "CWE-78",
+      "before": "v6 = (const char *)sub_40FBDC(a1, \"sysCmd\", \"\");\nv4 = *(char *)sub_40FBDC(a1, \"sysCmdselect\", \"\") - 48;\napmib_set(20080, &v4);\nif ( *v6 ){snprintf(v5, 100, \"%s 2>&1 > %s  &\", v6, \"/tmp/syscmd.log\");\nunlink(\"/tmp/syscmd.log\");\nsystem(v5);}",
+      "after": "  v2 = fopen64(\"/tmp/syscmd.log\", \"r\");",
+      "rationale": "旧版本直接用未验证的host_time参数拼接字符串，再经过doSystem执行，新版本直接删除了此功能，从根本上杜绝了命令注入",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48804",
+      "cwe": "CWE-78",
+      "before": "v11 = sub_40BD6C(a1, \"pass\");",
+      "after": "v10 = sub_40C28C(a1, \"pass\");\nif ( (unsigned int)is_string_valid(v10) )",
+      "rationale": "旧版本pass直接输入，未对pass中的特殊字符做过滤，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的pass，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2021-27710",
+      "cwe": "CWE-78",
+      "before": "Var = (const char *)websGetVar(a1, \"ip\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", &byte_437F70);\nv4 = atoi(v3);\nsprintf(v6, \"ping %s -w %d &>/var/log/pingCheck\", Var, v4);\ndoSystem(v6);",
+      "after": " Var = (const char *)websGetVar(a1, \"ip\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", \"\");\nv4 = atoi(v3);\nif ( !Validity_check(Var) ){snprintf(v6, 128, \"ping %s -w %d &>/var/log/pingCheck\", Var, v4);\ndoSystem(v6);}",
+      "rationale": "旧版本直接用未验证的ip参数拼接字符串，再经过doSystem执行，新版本使用Validity_check函数验证参数是否合法，再选择能否拼接，但没有对参数的长度进行判断，虽然不会再造成命令注入，但有栈溢出的风险",
+      "is_positive": false
+    },
+    {
+      "id": "CVE-2023-48805",
+      "cwe": "CWE-78",
+      "before":" v12 = sub_40BD6C(a1, \"informEnable\");",
+      "after": "v11 = sub_40C28C(a1, \"informEnable\");\nif ( (unsigned int)is_only_number(v11) )",
+      "rationale": "旧版本informEnable直接输入，未对informEnable中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的informEnable来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48806",
+      "cwe": "CWE-78",
+      "before": "v13 = sub_40BD6C(a1, \"interval\");",
+      "after": "v12 = sub_40C28C(a1, \"interval\");\nif ( (unsigned int)is_only_number(v12) )",
+      "rationale": "旧版本interval直接输入，未对interval中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的interval来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48811",
+      "cwe": "CWE-78",
+      "before": "v22 = sub_40BD6C(a1, \"stun_user\");",
+      "after": "v22 = (_BYTE *)sub_40C28C(a1, \"stun_user\");\nif ( (!*v22 || (unsigned int)is_string_valid(v22))&& (!*nptr_3 || (unsigned int)is_string_valid(nptr_3))&& (!*v18 || (unsigned int)is_cmd_string_valid(v18))&& (unsigned int)is_only_number(v17)&& (unsigned int)is_only_number(v19)&& (unsigned int)is_only_number(v20)&& (unsigned int)is_only_number(v21) )",
+      "rationale": "旧版本stun_user直接输入，未对stun_user中的特殊字符做过滤，导致命令注入，新版本使用is_string_valid函数验证输入的stun_user来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48807",
+      "cwe": "CWE-78",
+      "before": "v14 = sub_40BD6C(a1, \"requestUser\");",
+      "after": "v13 = (_BYTE *)sub_40C28C(a1, \"requestUser\");\nif ( (!*v13 || (unsigned int)is_string_valid(v13))&& (!*v14 || (unsigned int)is_string_valid(v14))&& (unsigned int)is_only_number(v15)&& (!*v16 || (unsigned int)is_string_valid(v16)) )",
+      "rationale": "旧版本requestUser直接输入，未对requestUser中的特殊字符做过滤，导致命令注入，新版本使用is_string_valid函数验证输入的requestUser来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48808",
+      "cwe": "CWE-78",
+      "before": "v15 = sub_40BD6C(a1, \"requestPass\");",
+      "after": "v14 = (_BYTE *)sub_40C28C(a1, \"requestPass\");\nif ( (!*v13 || (unsigned int)is_string_valid(v13))&& (!*v14 || (unsigned int)is_string_valid(v14))&& (unsigned int)is_only_number(v15)&& (!*v16 || (unsigned int)is_string_valid(v16)) )",
+      "rationale": "旧版本requestPass直接输入，未对requestPass中的特殊字符做过滤，导致命令注入，新版本使用is_string_valid函数验证输入的requestPass来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2020-3332",
+      "cwe": "CWE-78",
+      "before": "snprintf(s, 0xFEu, \"wl ssid %s\", a2);\nstream_1 = fopen(\"/dev/console\", \"w\");\nstream_2 = stream_1;\nif ( stream_1 ){fprintf(stream_1, \"%s(): cmd=[%s]\n\", \"SetWLSSIDCmd\", s);\nfclose(stream_2);}\nsystem(s);",
+      "after": "   s = fopen(\"/dev/console\", \"w\");stream = s;\nif ( s ){fwrite(\"MFG: SetWLSSIDCmd mfg test function\n\", 1u, 0x24u, s);\nfclose(stream);}\nv6[0] = \"wl\";\nv6[1] = \"ssid\"; \nv6[2] = a2;\nv6[3] = 0;\neval(v6, \">/dev/console\", 0, 0);  ",
+      "rationale": "去掉了旧版本直接用的system函数，新增了eval函数来执行命令，不再拼接字符串命令",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48801",
+      "cwe": "CWE-78",
+      "before": "v17 = sub_40BD6C(a1, \"stunEnable\");",
+      "after": "v17 = sub_40C28C(a1, \"stunEnable\");\nif ( (!*v22 || (unsigned int)is_string_valid(v22))&& (!*nptr_3 || (unsigned int)is_string_valid(nptr_3))&& (!*v18 || (unsigned int)is_cmd_string_valid(v18))&& (unsigned int)is_only_number(v17)&& (unsigned int)is_only_number(v19)&& (unsigned int)is_only_number(v20)&& (unsigned int)is_only_number(v21) )",
+      "rationale": "旧版本stunEnable直接输入，未对stunEnable中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的stunEnable来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48800",
+      "cwe": "CWE-78",
+      "before": "v19 = sub_40BD6C(a1, \"stunPort\");",
+      "after": "v19 = sub_40C28C(a1, \"stunPort\");\nif ( (!*v22 || (unsigned int)is_string_valid(v22))&& (!*nptr_3 || (unsigned int)is_string_valid(nptr_3))&& (!*v18 || (unsigned int)is_cmd_string_valid(v18))&& (unsigned int)is_only_number(v17)&& (unsigned int)is_only_number(v19)&& (unsigned int)is_only_number(v20)&& (unsigned int)is_only_number(v21) )",
+      "rationale": "旧版本stunPort直接输入，未对stunPort中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的stunPort来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48798",
+      "cwe": "CWE-78",
+      "before": "v21 = sub_40BD6C(a1, \"stunMinAlive\");",
+      "after": "v21 = sub_40BD6C(a1, \"stunMinAlive\");\nif ( (!*v22 || (unsigned int)is_string_valid(v22))&& (!*nptr_3 || (unsigned int)is_string_valid(nptr_3))&& (!*v18 || (unsigned int)is_cmd_string_valid(v18))&& (unsigned int)is_only_number(v17)&& (unsigned int)is_only_number(v19)&& (unsigned int)is_only_number(v20)&& (unsigned int)is_only_number(v21) )",
+      "rationale": "旧版本stunMinAlive直接输入，未对stunMinAlive中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的stunMinAlive来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48799",
+      "cwe": "CWE-78",
+      "before": "v20 = sub_40BD6C(a1, \"stunMaxAlive\");",
+      "after": "v20 = sub_40C28C(a1, \"stunMaxAlive\");\nif ( (!*v22 || (unsigned int)is_string_valid(v22))&& (!*nptr_3 || (unsigned int)is_string_valid(nptr_3))&& (!*v18 || (unsigned int)is_cmd_string_valid(v18))&& (unsigned int)is_only_number(v17)&& (unsigned int)is_only_number(v19)&& (unsigned int)is_only_number(v20)&& (unsigned int)is_only_number(v21) )",
+      "rationale": "旧版本stunMaxAlive直接输入，未对stunMaxAlive中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的stunMaxAlive来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-48809",
+      "cwe": "CWE-78",
+      "before": "v16 = sub_40BD6C(a1, \"port\");",
+      "after": "v15 = sub_40C28C(a1, \"port\");\nif ( (!*v13 || (unsigned int)is_string_valid(v13))&& (!*v14 || (unsigned int)is_string_valid(v14))&& (unsigned int)is_only_number(v15)&& (!*v16 || (unsigned int)is_string_valid(v16)) )",
+      "rationale": "旧版本port接输入，未对port中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的port来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2020-24297",
+      "cwe": "CWE-78",
+      "before": "Env=httpGetEnv(reqId, \"devicePwd\");\nif ( Env ){do\nn32 = *Env++;\nwhile ( n32 == 32 );\nv9 = Env - 1;\nexecFormatCmd(\"rm -f %s\", \"/tmp/plcAdd.sts\");\nexecFormatCmd(\"plc addNew -p %s\", v9);}",
+      "after": "v2 = (char *)httpGetEnv(a1, \"devicePwd\");\nif ( v2 ){do\nn32 = *v2++;\nwhile ( n32 == 32 );\nv13 = v2 - 1;\nexecFormatCmd(\"rm -f %s\", \"/tmp/plcAdd.sts\");\nv7 = (const char *)hpTransSpecialWords(v13);\nexecFormatCmd(\"plc addNew -p %s\", v7);}",
+      "rationale": "旧版本直接用devicePwd参数拼接字符串，再经过execFormatCmd执行字符串，修复版本使用了hpTransSpecialWords对devicePwd参数中的特殊字符字段进行转换与过滤",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-488010",
+      "cwe": "CWE-78",
+      "before": "v18 = sub_40BD6C(a1, \"stunServerAddr\");",
+      "after": "v18 = (_BYTE *)sub_40C28C(a1, \"stunServerAddr\");\nif ( (!*v22 || (unsigned int)is_string_valid(v22))&& (!*nptr_3 || (unsigned int)is_string_valid(nptr_3))&& (!*v18 || (unsigned int)is_cmd_string_valid(v18))&& (unsigned int)is_only_number(v17)&& (unsigned int)is_only_number(v19)&& (unsigned int)is_only_number(v20)&& (unsigned int)is_only_number(v21) ) ",
+      "rationale": "旧版本stunServerAddr直接输入，未对stunServerAddr中的特殊字符做过滤，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的stunServerAddr来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+
+    {
+      "id": "CVE-2021-27708",
+      "cwe": "CWE-78",
+      "before": "Var = (const char *)websGetVar(a1, \"command\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", &byte_437F70);\nv4 = atoi(v3);\nsprintf(v6, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v4, Var);\ndoSystem(v6);",
+      "after": " Var = (const char *)websGetVar(a1, \"command\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", \"\");\nv4 = atoi(v3);\nif ( !Validity_check(Var) ){snprintf(v6, 128, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v4, Var);\ndoSystem(v6);}",
+      "rationale": "旧版本直接用未验证的command参数拼接字符串，再经过doSystem执行，新版本使用Validity_check函数验证参数是否合法，再选择能否拼接，但没有对参数的长度进行判断，虽然不会再造成命令注入，但有栈溢出的风险",
+      "is_positive": false
+    },
+    {
+      "id": "CVE-2023-48812",
+      "cwe": "CWE-78",
+      "before": "nptr_3 = sub_40BD6C(a1, \"stun_pass\");",
+      "after": "nptr_3 = (const char *)sub_40C28C(a1, \"stun_pass\");\nif ( (!*v22 || (unsigned int)is_string_valid(v22))&& (!*nptr_3 || (unsigned int)is_string_valid(nptr_3))&& (!*v18 || (unsigned int)is_cmd_string_valid(v18))&& (unsigned int)is_only_number(v17)&& (unsigned int)is_only_number(v19)&& (unsigned int)is_only_number(v20)&& (unsigned int)is_only_number(v21) )",
+      "rationale": "旧版本stun_pass接输入，未对stun_pass中的特殊字符做过滤，导致命令注入，新版本使用is_string_valid函数验证输入的stun_pass来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2024-57013",
+      "cwe": "CWE-78",
+      "before": "Var = websGetVar(a1, \"mode\", \"0\");\n  Uci_Set_Str(11, \"rebootsch\", \"switch\", Var);",
+      "after": "  Var = websGetVar(a1, \"mode\", \"0\");\n  if ( is_only_number(Var)    && is_only_number(v2)    && is_cmd_string_valid(v5)    && is_cmd_string_valid(v6)    && is_cmd_string_valid(v7) ) { sysinfo(v9);\n    v8 = atoi(v2);\n    Uci_Set_Str(11, \"rebootsch\", \"switch\", Var);",
+      "rationale": "旧版本mode直接赋值给switch，未对mode中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的mode，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } , 
+    {
+      "id": "CVE-2023-37171",
+      "cwe": "CWE-78",
+      "before": "v4 = sub_40A4FC(a1, \"admuser\");\nv5 = sub_40A4FC(a1, \"admpass\");",
+      "after": "v4 = sub_40A55C(a1, \"admuser\");\nv5 = sub_40A55C(a1, \"admpass\");if ( is_cmd_string_valid(v4) ){if ( is_cmd_string_valid(v5) ){",
+      "rationale": "旧版本admuser直接输入，未对admuser中的特殊字符做过滤，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的admuser，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } , 
+    {
+      "id": "CVE-2024-57011",
+      "cwe": "CWE-78",
+      "before": "  v8 = websGetVar(a1, \"minute\", \"\");",
+      "after": "   v7 = websGetVar(a1, \"minute\", \"\");\n  if ( is_only_number(Var)    && is_only_number(v2)    && is_cmd_string_valid(v5)    && is_cmd_string_valid(v6)    && is_cmd_string_valid(v7) ) { sysinfo(v9);\n    v8 = atoi(v2);\n    Uci_Set_Str(11, \"rebootsch\", \"switch\", Var);",
+      "rationale": "旧版本minute直接输入，未对minute中的特殊字符做过滤，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的minute，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } ,
+    {
+      "id": "CVE-2023-37172",
+      "cwe": "CWE-78",
+      "before": "v5 = (const char *)sub_40A4FC(a1, \"ip\");\nv6 = atoi(v4);\nif ( (unsigned int)(snprintf(v8, 256, \"ping %s -w %d &>/var/log/pingCheck\", v5, v6) + 1) >= 0x101 )_break(0, 0);\nCsteSystem(v8, 0);",
+      "after": "v5 = (const char *)sub_40A55C(a1, \"ip\");\nv6 = atoi(v4);\nif ( is_cmd_string_valid(v5) == 1 ){if ( (unsigned int)(snprintf(v8, 256, \"ping %s -w %d &>/var/log/pingCheck\", v5, v6) + 1) >= 0x101 )_break(0, 0);\nCsteSystem(v8, 0);}",
+      "rationale": "旧版本仅仅对ip进行了长度检查，而未对ip中的内容进行检测，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的ip是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    } , 
+    {
+      "id": "CVE-2024-57012",
+      "cwe": "CWE-78",
+      "before": "   v6 = websGetVar(a1, \"week\", \"\");",
+      "after": "    v5 = websGetVar(a1, \"week\", \"\");\n  if ( is_only_number(Var)    && is_only_number(v2)    && is_cmd_string_valid(v5)    && is_cmd_string_valid(v6)    && is_cmd_string_valid(v7) ) { sysinfo(v9);\n    v8 = atoi(v2);\n    Uci_Set_Str(11, \"rebootsch\", \"switch\", Var);",
+      "rationale": "旧版本week直接输入，未对week中的特殊字符做过滤，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的week，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } ,
+    {
+      "id": "CVE-2024-57015",
+      "cwe": "CWE-78",
+      "before": "   v2 = websGetVar(a1, \"recHour\", \"0\");\n  sysinfo(v10);\nv9 = v2;\n  v3 = atoi(v2);",
+      "after": "    v2 = websGetVar(a1, \"recHour\", \"0\");\n  if ( is_only_number(Var)    && is_only_number(v2)    && is_cmd_string_valid(v5)    && is_cmd_string_valid(v6)    && is_cmd_string_valid(v7) ) { sysinfo(v9);\n    v8 = atoi(v2);\n    Uci_Set_Str(11, \"rebootsch\", \"switch\", Var);",
+      "rationale": "旧版本recHour直接输入，未对recHour中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的recHour，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } ,
+    {
+      "id": "CVE-2023-37173",
+      "cwe": "CWE-78",
+      "before": "v5 = (const char *)sub_40A4FC(a1, \"command\");\n  v4 = sub_40A4FC(a1, \"num\");\nv6 = atoi(v4);\nif ( (unsigned int)(snprintf(v8, 256, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v6, v5) + 1) >= 0x101 )\n_break(0, 0);\nCsteSystem(v8, 0);",
+      "after": "v5 = (const char *)sub_40A55C(a1, \"command\");\nv4 = sub_40A55C(a1, \"num\");\nv6 = atoi(v4);\nif ( is_cmd_string_valid(v5) == 1 ){if ( (unsigned int)(snprintf(v8, 256, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v6, v5) + 1) >= 0x101 )\n_break(0, 0);CsteSystem(v8, 0);}",
+      "rationale": "旧版本未对command进行检测，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的command是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    } ,
+    {
+      "id": "CVE-2024-57023",
+      "cwe": "CWE-78",
+      "before": "v11 = (const char *)websGetVar(a1, \"week\", \"0\");",
+      "after": "v7 = (const char *)websGetVar(a1, \"week\", \"0\");\nif ( is_cmd_string_valid(v12)&& is_only_number(v7)&& is_only_number(v6)&& is_only_number(v5)&& is_only_number(v4)&& is_only_number(v3) ){",
+      "rationale": "旧版本week直接输入，未对week中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的week，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } , 
+    {
+      "id": "CVE-2024-57014",
+      "cwe": "CWE-78",
+      "before": "    v7 = websGetVar(a1, \"hour\", \"\");",
+      "after": "      v6 = websGetVar(a1, \"hour\", \"\");\n  if ( is_only_number(Var)    && is_only_number(v2)    && is_cmd_string_valid(v5)    && is_cmd_string_valid(v6)    && is_cmd_string_valid(v7) ) { sysinfo(v9);\n    v8 = atoi(v2);\n    Uci_Set_Str(11, \"rebootsch\", \"switch\", Var);",
+      "rationale": "旧版本Hour直接输入，未对Hour中的特殊字符做过滤，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的Hour，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } ,
+    {
+      "id": "CVE-2024-57025",
+      "cwe": "CWE-78",
+      "before": "v13 = (const char *)websGetVar(a1, \"desc\", \"\");",
+      "after": "v12 = (const char *)websGetVar(a1, \"desc\", \"\");\nif ( is_cmd_string_valid(v12)&& is_only_number(v7)&& is_only_number(v6)&& is_only_number(v5)&& is_only_number(v4)&& is_only_number(v3) ){",
+      "rationale": "旧版本desc直接输入，未对desc中的特殊字符做过滤，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的desc，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } , 
+    {
+      "id": "CVE-2024-57024",
+      "cwe": "CWE-78",
+      "before": "v2 = (const char *)websGetVar(a1, \"eMinute\", \"0\");",
+      "after": "v3 = (const char *)websGetVar(a1, \"eMinute\", \"0\");\nif ( is_cmd_string_valid(v12)&& is_only_number(v7)&& is_only_number(v6)&& is_only_number(v5)&& is_only_number(v4)&& is_only_number(v3) ){",
+      "rationale": "旧版本eMinute直接输入，未对eMinute中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的eMinute，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } , 
+    {
+      "id": "CVE-2024-57022",
+      "cwe": "CWE-78",
+      "before": "v10 = (const char *)websGetVar(a1, \"sHour\", \"0\");",
+      "after": "v6 = (const char *)websGetVar(a1, \"sHour\", \"0\");\nif ( is_cmd_string_valid(v12)&& is_only_number(v7)&& is_only_number(v6)&& is_only_number(v5)&& is_only_number(v4)&& is_only_number(v3) ){",
+      "rationale": "旧版本sHour直接输入，未对sHour中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的sHour，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } , 
+    {
+      "id": "CVE-2024-57021",
+      "cwe": "CWE-78",
+      "before": "v8 = (const char *)websGetVar(a1, \"eHour\", \"0\");",
+      "after": "v4 = (const char *)websGetVar(a1, \"eHour\", \"0\");\nif ( is_cmd_string_valid(v12)&& is_only_number(v7)&& is_only_number(v6)&& is_only_number(v5)&& is_only_number(v4)&& is_only_number(v3) ){",
+      "rationale": "旧版本eHour直接输入，未对eHour中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的eHour，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } , 
+    {
+      "id": "CVE-2024-57020",
+      "cwe": "CWE-78",
+      "before": "v9 = (const char *)websGetVar(a1, \"sMinute\", \"0\");",
+      "after": "v5 = (const char *)websGetVar(a1, \"sMinute\", \"0\");\nif ( is_cmd_string_valid(v12)&& is_only_number(v7)&& is_only_number(v6)&& is_only_number(v5)&& is_only_number(v4)&& is_only_number(v3) ){",
+      "rationale": "旧版本sMinute直接输入，未对sMinute中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的sMinute，满足条件后才能继续执行来保证是否合法",
+      "is_positive": true
+    } 
   ],
   "CWE-77": [
     {
@@ -99,6 +510,14 @@
       "is_positive": true
     },
     {
+      "id": "CVE-xxxx",
+      "cwe": "CWE-77",
+      "before": "char *user_input = get_user_input(\"command\");\nchar cmd[256];\nsprintf(cmd, \"echo %s >> /tmp/log.txt\", user_input);\nsystem(cmd);",
+      "after": "char *user_input = get_user_input(\"command\");\n// 使用 execv 系列函数，将用户输入作为参数，而不是命令的一部分\nchar *argv[] = { \"/bin/echo\", user_input, NULL };\n// 注意：此处省略了重定向操作，因为 execv 不支持 shell 特性\nexecv(\"/bin/echo\", argv);",
+      "rationale": "避免使用 system 或 popen 等函数，改用 execv 系列函数，将用户输入作为单独的参数传递给命令，从而避免 shell 对用户输入进行解析，有效防止命令注入。",
+      "is_positive": true
+    },
+    {
       "id": "CVE-2015-2051",
       "cwe": "CWE-77",
       "before": "action = get_soap_action_header();\nsprintf(cmd, \"handle_hnap %s\", action);\nsystem(cmd);",
@@ -120,6 +539,14 @@
       "before": "char *keyPath = cgiGetValue(\"keyPath\");\nsnprintf(cmd, 256, \"openssl rsautl -inkey /tmp/rsa/private_key_%s -decrypt\", keyPath);\nsystem(cmd);",
       "after": "char *keyPath = cgiGetValue(\"keyPath\");\nif (strlen(keyPath) > 30) { exit(1); }  // 限制输入长度≤30\nfor (int i = 0; i < strlen(keyPath); i++) {\n    if (!isxdigit(keyPath[i])) { exit(1); }\n}\nsnprintf(cmd, 256, \"openssl rsautl -inkey /tmp/rsa/private_key_%s -decrypt\", keyPath);\nsystem(cmd);",
       "rationale": "通过长度校验和字符类型过滤（仅允许十六进制字符），防止恶意命令注入。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-xxxx",
+      "cwe": "CWE-77",
+      "before": "char *iface = get_query_var(\"iface\");\nsprintf(cmd, \"ifconfig %s down\", iface);\nsystem(cmd);",
+      "after": "char *iface = get_query_var(\"iface\");\nfor (int i = 0; iface[i]; i++) {\n    if (!isalnum(iface[i]) && iface[i] != '_' && iface[i] != '-') {\n        return_error(\"invalid iface\");\n    }\n}\nsnprintf(cmd, sizeof(cmd), \"ifconfig %s down\", iface);\nsystem(cmd);",
+      "rationale": "对 iface 参数进行严格白名单过滤，仅允许字母数字、下划线和短横线，彻底阻断通过特殊字符注入额外命令的可能性。",
       "is_positive": true
     },
     {
@@ -161,6 +588,656 @@
       "after": "v7 = read_command();\nv8 = replace_quotes(v7);\nsprintf(cmd, \"/bin/sh -c '%s'\", v8);\nsystem(cmd);",
       "rationale": "看似替换了引号字符，但未针对所有shell特殊字符进行全面过滤，命令注入漏洞依然存在。",
       "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-77",
+      "before": "char *v = http_get(\"mac\");\nsprintf(cmd, \"arp -s %s\", v);\nsystem(cmd);",
+      "after": "char *v = http_get(\"mac\");\nescaped = str_replace(v, \"\\\"\", \"'\");  // 仅替换双引号\nsprintf(cmd, \"arp -s %s\", escaped);\nsystem(cmd);",
+      "rationale": "仅替换了双引号，但未处理 ; & | $( ) 等 shell 特殊字符，攻击者仍可通过注入其他符号执行任意命令。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-77",
+      "before": "char *filename = get_user_input(\"file\");\nchar cmd[256];\nsprintf(cmd, \"cat %s\", filename);\nsystem(cmd);",
+      "after": "char *filename = get_user_input(\"file\");\nchar cmd[256];\n// 仅替换分号，尝试阻止命令链\nchar *safe_filename = str_replace(filename, \";\", \"\");\nsprintf(cmd, \"cat %s\", safe_filename);\nsystem(cmd);",
+      "rationale": "仅替换了分号字符，但未对其他shell元字符（如 |、&、`、$( ) 等）进行过滤，攻击者仍可利用其他方式进行命令注入。",
+      "is_positive": false
+    },
+    {
+      "id": "CVE-2023-46421",
+      "cwe": "CWE-77",
+      "before": "s1_1 = s1;\nv6 = strcmp(s1, s2);\nif ( v6 ){v6 = 1;\nUci_Set_Str(11, \"ntp\", \"timezone\", s1_1);}",
+      "after": "s1_2 = s1_1;\nv6 = strcmp(s1_1, s2);\nif ( v6 ){if ( !(unsigned int)is_cmd_string_valid(s1_2) )\ngoto LABEL_18;\nv6 = 1;\nUci_Set_Str(11, \"ntp\", \"timezone\", s1_2);}",
+      "rationale": "旧版本timezone直接输入，未对timezone中的特殊字符做过滤，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的timezone，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-46415",
+      "cwe": "CWE-77",
+      "before": "v13 = (const char *)sub_40BDD4(p_parental, \"mac\");\nv14 = (const char *)sub_40BDD4(p_parental, \"desc\");\ns_1 = (const char *)sub_40BDD4(p_parental, \"week\");\nv16 = (const char *)sub_40BDD4(p_parental, \"sTime\");\nv17 = (const char *)sub_40BDD4(p_parental, \"eTime\");\nv18 = (const char *)sub_40BDD4(p_parental, \"state\");",
+      "after": "v13 = (const char *)sub_40BDD4(p_parental, \"mac\");\nv14 = (const char *)sub_40BDD4(p_parental, \"desc\");\ns_1 = (const char *)sub_40BDD4(p_parental, \"week\");\nv16 = (const char *)sub_40BDD4(p_parental, \"sTime\");\nv17 = (const char *)sub_40BDD4(p_parental, \"eTime\");\nv18 = (const char *)sub_40BDD4(p_parental, \"state\");\nif ( (unsigned int)is_mac_valid(v13)&& (unsigned __int8)is_comment_valid(v14)&& (unsigned int)is_only_number(s_1)&& (unsigned int)is_string_valid(v16)&& (unsigned int)is_string_valid(v17)&& (unsigned int)is_only_number(v18) ){",
+      "rationale": "旧版本没有对desc、mac等参数的做验证，导致命令注入，新版本使用is_mac_valid、is_comment_valid等函数对每个字符做个性化验证，只有满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-46423",
+      "cwe": "CWE-77",
+      "before": "get_nth_val_safe(0, v5, 42, v10, 32);\nget_nth_val_safe(1, v5, 42, v11, 32);\nget_nth_val_safe(2, v5, 42, v12, 32);\nif ( (unsigned int)(snprintf(s, 0x80u, \"%s -h %s -h %s\", (const char *)v10, (const char *)v11, (const char *)v12) + 1) > 0x80 )\n__break(0x3E8u);",
+      "after": "get_nth_val_safe(v7, v5, 42, v11, 32);\nget_nth_val_safe(1, v5, 42, v12, 32);\nget_nth_val_safe(2, v5, 42, v13, 32);\nif ( (unsigned int)is_cmd_string_valid(v11)&& (unsigned int)is_cmd_string_valid(v11)&& (unsigned int)is_cmd_string_valid(v11) ){snprintf(s, 0x80u, \"%s -h %s -h %s\", (const char *)v11, (const char *)v12, (const char *)v13);",
+      "rationale": "旧版本直接输入，，新版本使用is_cmd_string_valid函数验证输入，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-46413",
+      "cwe": "CWE-77",
+      "before": "memset(s, 0, sizeof(s));\nv4 = (const char *)sub_40BDD4(a1, \"command\");\nnptr = (const char *)sub_40BDD4(a1, \"num\");\nv6 = atoi(nptr);\nif ( (unsigned int)(snprintf(s, 0x100u, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v6, v4) + 1) > 0x100 )\n__break(0x3E8u);\nCsteSystem(s, 0);",
+      "after": "memset(s, 0, sizeof(s));\nv4 = (const char *)sub_40C28C(a1, \"command\");\nnptr = (const char *)sub_40C28C(a1, \"num\");\nif ( !(unsigned int)is_cmd_string_valid(v4) || !(unsigned int)is_only_number(nptr) ){sub_40C2C0(a2, 0, \"Error\", 0, \"0\", \"Parameter Error\");\nreturn 1;}v7 = atoi(nptr);\nif ( (unsigned int)(v7 - 1) > 0x3B )return 1;\nsnprintf(s, 0x100u, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v7, v4);\nCsteSystem(s, 0);",
+      "rationale": "旧版本command参数直接输入，未对command中的特殊字符做过滤，导致可以直接拼接到s中，经由CsteSystem执行造成命令注入，新版本使用is_cmd_string_valid函数以及is_only_number双重验证输入参数的内容与长度，满足条件后才能拼接并执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-46420",
+      "cwe": "CWE-77",
+      "before": "v9 = atoi(nptr);\nUci_Set_Str(11, \"rebootsch\", \"switch\", nptr_1);\nUci_Set_Str(11, \"rebootsch\", \"week\", v5);\nUci_Set_Str(11, \"rebootsch\", \"hour\", v6);\nUci_Set_Str(11, \"rebootsch\", \"minute\", v7);\nUci_Set_Str(11, \"rebootsch\", \"recHour\", nptr);\nUci_Set_Str(11, \"rebootsch\", \"reboot_flag\", \"0\");\nUci_Commit(11);\nif ( info.uptime > (unsigned __int64)(3600 * v9) && atoi(nptr_1) == 2 )\nCsteSystem(\"reboot &\", 0);",
+      "after": "if ( (unsigned int)is_only_number(nptr_1) ){if ( (unsigned int)is_only_number(v5) ){if ( (unsigned int)is_only_number(v6) ){if ( (unsigned int)is_only_number(v7) ){if ( (unsigned int)is_only_number(nptr) ){sysinfo(&info);\nv9 = atoi(nptr);\nUci_Set_Str(11, \"rebootsch\", \"switch\", nptr_1);\nUci_Set_Str(11, \"rebootsch\", \"week\", v5);\nUci_Set_Str(11, \"rebootsch\", \"hour\", v6);\nUci_Set_Str(11, \"rebootsch\", \"minute\", v7);\nUci_Set_Str(11, \"rebootsch\", \"recHour\", nptr);\nUci_Set_Str(11, \"rebootsch\", \"reboot_flag\", \"0\");\nUci_Commit(11);\nif ( info.uptime > (unsigned __int64)(3600 * v9) && atoi(nptr_1) == 2 )\nCsteSystem(\"reboot &\", 0);}}}}}",
+      "rationale": "旧版本week、hour等参数直接输入，未做过滤，导致命令注入，新版本使用对这些参数的长度进行判定，由于几乎没有长度为1的命令，所以攻击者想要拼接的命令无法注入",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-46411",
+      "cwe": "CWE-77",
+      "before": "memset(s, 0, sizeof(s));\nv4 = (const char *)sub_40BDD4(a1, \"file_name\");\nflash_total_size = snprintf(s, 0x80u, \"rm -f %s\", v4) + 1;\nCsteSystem(s, 0);",
+      "after": "memset(v12, 0, sizeof(v12));\nname = (const char *)sub_40C28C(a1, \"file_name\");\nsnprintf(s, 0x100u, \"rm -f %s >/dev/null 2>&1\", \"/tmp/upgcfg.tar.gz\");\nCsteSystem(s, 0);",
+      "rationale": "旧版本未对file_name做过滤，导致命令注入，新版本删除了拼接功能，使得name无法拼接在命令后面",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-46416",
+      "cwe": "CWE-77",
+      "before": "v6 = (const char *)sub_40BDD4(a1, \"desc\");\nv7 = (const char *)sub_40BDD4(a1, \"week\");\nv8 = (const char *)sub_40BDD4(a1, \"sHour\");\nv9 = (const char *)sub_40BDD4(a1, \"sMinute\");\nv10 = (const char *)sub_40BDD4(a1, \"eHour\");\nv11 = (const char *)sub_40BDD4(a1, \"eMinute\");\nif ( (unsigned int)(snprintf(s, 0x80u, \"%s,%s,%s,%s,%s,%s\", v7, v8, v9, v10, v11, v6) + 1) <= 0x80 )",
+      "after": "v7 = (const char *)sub_40C28C(a1, \"desc\");\nv8 = (const char *)sub_40C28C(a1, \"week\");\nv9 = (const char *)sub_40C28C(a1, \"sHour\");\nv10 = (const char *)sub_40C28C(a1, \"sMinute\");\nv11 = (const char *)sub_40C28C(a1, \"eHour\");\nv12 = (const char *)sub_40C28C(a1, \"eMinute\");\nif ( !(unsigned int)is_only_number(v8)|| !(unsigned int)is_only_number(v9)|| !(unsigned int)is_only_number(v10)|| !(unsigned int)is_only_number(v11)|| !(unsigned int)is_only_number(v12)|| !(unsigned __int8)is_comment_valid(v7) )",
+      "rationale": "旧版本dest、week等参数直接输入，未做过滤，导致命令注入，新版本使用对这些参数的长度进行判定，由于几乎没有长度为1的命令，所以攻击者想要拼接的命令无法注入",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-52040",
+      "cwe": "CWE-77",
+      "before": "v7 = sub_40BD6C(a1, \"qos_up_bw\");\nnptr = \"smartqos\";\np_s_1 = sub_40BD6C(a1, \"qos_down_bw\");",
+      "after": "v7 = sub_40C28C(p_iplimit, \"qos_up_bw\");\np_s_1 = sub_40C28C(p_iplimit, \"qos_down_bw\");\nif ( !(unsigned int)is_only_number(v7) || !(unsigned int)is_only_number(p_s_1) )",
+      "rationale": "旧版本interval直接输入，未对interval中的特殊字符做过滤，导致命令注入，新版本使用is_only_number函数验证输入的interval来保证是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2021-44247",
+      "cwe": "CWE-77",
+      "before": "v11 = (_BYTE *)websGetVar(a1, \"ipFrom\", &byte_42E7C4);\napmib_set(18564, v11);",
+      "after": "v11 = (_BYTE *)websGetVar(a1, \"ipFrom\", &byte_430DF8);\nv12 = Validity_check(v11);\nv13 = a1;\nif ( !v12 ){if ( (unsigned int)strlen(v11) < 4 )apmib_set(18564, v11);\nv13 = a1;}",
+      "rationale": "旧版本ipFrom直接输入，新版本额外在对ipFrom进行检查，使用Validity_check检查内容以及使用strlen检查长度，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-46417",
+      "cwe": "CWE-77",
+      "before": "memset(s, 0, sizeof(s));\nv4 = (const char *)sub_40BDD4(a1, \"ip\");\nnptr = (const char *)sub_40BDD4(a1, \"num\");\nv6 = atoi(nptr);\nif ( (unsigned int)(snprintf(s, 0x100u, \"ping %s -w %d &>/var/log/pingCheck\", v4, v6) + 1) > 0x100 )\n__break(0x3E8u);\nCsteSystem(s, 0);",
+      "after": "memset(s, 0, sizeof(s));\nv4 = sub_40C28C(a1, \"ip\");\nnptr = (const char *)sub_40C28C(a1, \"num\");\nif ( (unsigned int)is_cmd_string_valid(v4) && (unsigned int)is_only_number(nptr) ){n5_1 = atoi(nptr);\nif ( n5_1 >= 0x3D )\nn5 = 5;\nelse\nn5 = n5_1;\nsnprintf(s, 0x100u, \"ping %s -w %d &>/var/log/pingCheck\", v4, n5);\nCsteSystem(s, 0);",
+      "rationale": "旧版本ip参数直接输入，未对command中的特殊字符做过滤，导致可以直接拼接到s中，经由CsteSystem执行造成命令注入，新版本使用is_cmd_string_valid函数以及is_only_number双重验证输入参数的内容与长度，满足条件后才能拼接并执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-46410",
+      "cwe": "CWE-77",
+      "before": "memset(s, 0, sizeof(s));\nv4 = (const char *)sub_40BDD4(a1, \"host_time\");\nif ( (unsigned int)sub_416EA0(v4) != 1 ){CsteSystem(\"/etc/init.d/sysntpd stop\", 0);\nsnprintf(s, 0x100u, \"date -s '%s'\", v4);\nCsteSystem(s, 0);\nCsteSystem(\"echo 1 > /tmp/NTPValid\", 0);\nUci_Set_Str(11, \"ntp\", \"time_flag\", \"1\");\nUci_Set_Str(11, \"ntp\", \"enabled\", \"0\");\nUci_Commit(11);}",
+      "after": "memset(s, 0, sizeof(s));\nv4 = (const char *)sub_40C28C(a1, \"host_time\");\nif ( (unsigned int)is_cmd_string_valid(v4) ){\nCsteSystem(\"/etc/init.d/sysntpd stop\", 0);\nsnprintf(s, 0x100u, \"date -s '%s'\", v4);\nCsteSystem(s, 0);\nCsteSystem(\"echo 1 > /tmp/NTPValid\", 0);\nUci_Set_Str(11, \"ntp\", \"time_flag\", \"1\");\nUci_Set_Str(11, \"ntp\", \"enabled\", \"0\");\nUci_Commit(11);}",
+      "rationale": "旧版本直接输入，，新版本使用is_cmd_string_valid函数验证输入，满足条件后才能继续执行",
+      "is_positive": true
+    },
+
+    {
+      "id": "CVE-2022-36487",
+      "cwe": "CWE-77",
+      "before": "Var = (const char *)websGetVar(a1, \"command\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", &byte_42E318);\nv4 = atoi(v3);\nsprintf(v6, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v4, Var);\ndoSystem(v6);",
+      "after": "Var = (const char *)websGetVar(a1, \"command\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", \"\");\nv4 = atoi(v3);\nif ( !Validity_check(Var) ){snprintf(v6, 128, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v4, Var);\ndoSystem(v6);}",
+      "rationale": "旧版本未对command进行检测，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的command是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-36481",
+      "cwe": "CWE-77",
+      "before": "Var = (const char *)websGetVar(a1, \"ip\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", &byte_42E318);\nv4 = atoi(v3);\nsprintf(v6, \"ping %s -w %d &>/var/log/pingCheck\", Var, v4);\ndoSystem(v6);",
+      "after": "Var = (const char *)websGetVar(a1, \"ip\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", \"\");\nv4 = atoi(v3);\nif ( !Validity_check(Var) ){snprintf(v6, 128, \"ping %s -w %d &>/var/log/pingCheck\", Var, v4);\ndoSystem(v6);}",
+      "rationale": "旧版本未对ip进行检测，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的ip是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-36486",
+      "cwe": "CWE-77",
+      "before": " Var = (const char *)websGetVar(a1, \"FileName\", &byte_42E318);",
+      "after": "  Var = (const char *)websGetVar(a1, \"FileName\", \"\");\n  if ( !Validity_check(Var) )",
+      "rationale": "旧版本未对FileName进行检测，导致命令注入，新版本使用Validity_check函数验证输入的FileName是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-36479",
+      "cwe": "CWE-77",
+      "before": " Var = (const char *)websGetVar(a1, \"host_time\", &byte_42E318);\ndoSystem(\"date -s '%s'\", Var);",
+      "after": "  Var = (const char *)websGetVar(a1, \"host_time\", \"\");\n  if ( !Validity_check(Var) && (unsigned int)strlen(Var) < 0x1E ){ doSystem(\"date -s '%s'\", Var);",
+      "rationale": "旧版本未对host_time进行检测，导致命令注入，新版本使用Validity_check函数验证输入的host_time是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-36485",
+      "cwe": "CWE-77",
+      "before": " v50 = (const char *)websGetVar(a1, \"hostName\", &byte_42E318);\nif ( *v50 ){",
+      "after": "  v50 = (const char *)websGetVar(a1, \"hostName\", \"\");\nif ( *v50 && !Validity_check(v50) ){v50 = (const char *)websGetVar(a1, \"hostName\", \"\");\nif ( *v50 && !Validity_check(v50) ){",
+      "rationale": "旧版本未对hostName进行检测，导致命令注入，新版本使用Validity_check函数验证输入的hostName是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    }
+  ],
+    "CWE-119": [
+  {
+      "id": "CVE-2020-3331",
+      "cwe": "CWE-119",
+      "before": "cgi_8 = (const char *)get_cgi(\"submit_button\");\nsscanf(cgi_8, \"%[^;];%*[^=]=%[^\n]\", s, s_);\nstream_2 = fopen(\"/dev/console\", \"w\");\nstream_3 = stream_2;",
+      "after": "cgi_10 = (const char *)get_cgi(\"submit_button\");\np_strncpy = &strncpy;\nstrncpy(dest, 0, 0x14u);\ndest[19] = 0;\nif ( strstr(cgi_10, \";session_id=\") )\nreturn 0;\n((void (__fastcall *)(char *, int, int))p_strncpy)(s, 12, 32);\ns[31] = 0;\nstream_2 = fopen(\"/dev/console\", \"w\");\nstream_3 = stream_2;\n",
+      "rationale": "使用strncpy明确限制拷贝长度（20字节），并手动添加终止符，舍弃了可能造成栈溢出的sscanf函数",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2020-3323",
+      "cwe": "CWE-119",
+      "before": "cgi_8 = (const char *)get_cgi(\"submit_button\");\nsscanf(cgi_8, \"%[^;];%*[^=]=%[^\n]\", s, s_);\nstream_2 = fopen(\"/dev/console\", \"w\");\nstream_3 = stream_2;",
+      "after": "cgi_10 = (const char *)get_cgi(\"submit_button\");\np_strncpy = &strncpy;\nstrncpy(dest, 0, 0x14u);\ndest[19] = 0;\nif ( strstr(cgi_10, \";session_id=\") )\nreturn 0;\n((void (__fastcall *)(char *, int, int))p_strncpy)(s, 12, 32);\ns[31] = 0;\nstream_2 = fopen(\"/dev/console\", \"w\");\nstream_3 = stream_2;\n",
+      "rationale": "使用strncpy明确限制拷贝长度（20字节），并手动添加终止符，舍弃了可能造成栈溢出的sscanf函数",
+      "is_positive": true
+    },
+     {
+      "id": "CVE-2025-5503",
+      "cwe": "CWE-119",
+      "before": "if ( v5[0] ){sprintf(v4, \"Mcli %d  %s &\", 6, v5);\nputs(v4);\nsystem(v4);}",
+      "after": "if ( v6[0] && is_cmd_string_valid(v6, \"r single_post_limit: %d\\n\", v3) == 1 ){snprintf(v5, 100, \"Mcli %d  %s &\", 6, v6);\nputs(v5);\nsystem(v5);}",
+      "rationale": "旧版本deviceMacAddr(也就是这里的v5）直接输入，未对其做检查,导致其可以输入很长的字符串，新版本使用is_cmd_string_valid函数验证输入的deviceMacAddr，满足条件后才能继续执行，防止过长",
+      "is_positive": true
+    }
+],
+  "CWE-120": [
+    {
+      "id": "CVE-2016-XXXX-Router-HTTPD",
+      "cwe": "CWE-120",
+      "before": "void handle_login(char *user, char *pwd) {\n    char buf[128];\n    sprintf(buf, \"user=%s&pw=%s\", user, pwd);  // user/pwd 来自 HTTP 请求体\n    authenticate(buf);\n}",
+      "after": "void handle_login(char *user, char *pwd) {\n    char buf[128];\n    if (strlen(user) > 60 || strlen(pwd) > 60) {\n        log_error(\"Input too long\");\n        return;\n    }\n    snprintf(buf, sizeof(buf), \"user=%s&pw=%s\", user, pwd);  // 限制写入长度\n    buf[sizeof(buf)-1] = '\\0';  // 防止未终止字符串\n    authenticate(buf);\n}",
+      "rationale": "修复通过两层长度限制：①对 user/pwd 输入长度执行上限验证；②使用 snprintf 限制格式化输出长度，避免 sprintf 导致的固定缓冲区溢出。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2019-XXXX-NAS-RPC",
+      "cwe": "CWE-120",
+      "before": "int rpc_copy_name(struct request *req) {\n    char namebuf[64];\n    int sz = req->len;  // 来自网络包\n    memcpy(namebuf, req->payload, sz);  // 未检查 sz 是否超过 namebuf\n    namebuf[sz] = '\\0';\n    return process_name(namebuf);\n}",
+      "after": "int rpc_copy_name(struct request *req) {\n    char namebuf[64];\n    int sz = req->len;\n    if (sz <= 0 || sz >= sizeof(namebuf)) {\n        log_error(\"Invalid RPC name length\");\n        return -1;\n    }\n    memcpy(namebuf, req->payload, sz);\n    namebuf[sz] = '\\0';\n    return process_name(namebuf);\n}",
+      "rationale": "补丁新增对来自网络包长度字段 req->len 的严格验证，确保 memcpy 不会造成越界写入。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2021-XXXX-IPCam-Config",
+      "cwe": "CWE-120",
+      "before": "void build_config(struct config *cfg, char *user_value) {\n    char tmp[256];\n    strcat(tmp, user_value);  // tmp 未初始化，且无长度检查\n    save_to_flash(tmp);\n}",
+      "after": "void build_config(struct config *cfg, char *user_value) {\n    char tmp[256] = {0};\n    if (!user_value || strlen(user_value) > 200) {\n        return;\n    }\n    strncat(tmp, user_value, sizeof(tmp) - strlen(tmp) - 1);\n    save_to_flash(tmp);\n}",
+      "rationale": "修复包括两项关键措施：① 为 strcat 使用安全版本 strncat；② 为全局配置字符串 tmp 分配初始值并限制最大长度，避免未初始化数据导致的不可控溢出。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2020-XXXX-DSL-Modem",
+      "cwe": "CWE-120",
+      "before": "void parse_packet(uint8_t *pkt) {\n    uint16_t len = *(uint16_t*)(pkt + 2);  // 来自 DSL 数据帧\n    char buf[128];\n    memcpy(buf, pkt + 4, len);  // 未检查 len 是否超过 128\n    process(buf);\n}",
+      "after": "void parse_packet(uint8_t *pkt) {\n    uint16_t len = *(uint16_t*)(pkt + 2);\n    if (len == 0 || len > 120) {\n        return;\n    }\n    char buf[128];\n    memcpy(buf, pkt + 4, len);\n    buf[len] = '\\0';\n    process(buf);\n}",
+      "rationale": "修复通过对白盒协议字段进行白名单验证（len ≤ 120），确保 memcpy 不会造成堆栈溢出。",
+      "is_positive": true
+    },
+    {
+      "id": "",
+      "cwe": "CWE-120",
+      "before": "void foo(char *src) {\n    char buf[64];\n    strcpy(buf, src);\n}",
+      "after": "void foo(char *src) {\n    char buf[64];\n    if (src) {\n        strcpy(buf, src);  // 仍无长度检查\n    }\n}",
+      "rationale": "补丁仅增加空指针检查，但未对输入长度进行限制；strcpy 仍可导致溢出。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-120",
+      "before": "void build(char *s) {\n    char out[128];\n    sprintf(out, \"[%s]\", s);\n}",
+      "after": "void build(char *s) {\n    char out[128];\n    printf(\"building config...\\n\");\n    sprintf(out, \"[%s]\", s);  // 未对溢出做任何修复\n}",
+      "rationale": "补丁仅添加日志语句，不影响缓冲区溢出风险。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-120",
+      "before": "void copyinfo(char *a) {\n    char x[48];\n    memcpy(x, a, strlen(a));\n}",
+      "after": "void copyinfo(char *a) {\n    char x[48];\n    int n = strlen(a);\n    if (n < 1024) {  // 条件毫无意义\n        memcpy(x, a, n);  // 仍可能写爆 x\n    }\n}",
+      "rationale": "补丁添加了长度检查，但条件限制与 x 缓冲区大小无关，使得漏洞依然可被利用。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-120",
+      "before": "char tmp[32];\nstrcat(tmp, userinput);",
+      "after": "char tmp[32];\nif (userinput[0] != '\\0') {\n    strcat(tmp, userinput);  // 完全无效\n}",
+      "rationale": "补丁仅检查是否为空字符串，但 strcat 在未初始化 tmp 时依然可能造成溢出。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-120",
+      "before": "void bar(char *s) {\n    char o[64];\n    sprintf(o, \"%s\", s);\n}",
+      "after": "void bar(char *s) {\n    char outbuf[64];  // 改了变量名\n    sprintf(outbuf, \"%s\", s);\n}",
+      "rationale": "补丁仅修改了变量名，对溢出危险没有任何修改，属于伪修复。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-120",
+      "before": "char buf[128];\nmemcpy(buf, data, len);",
+      "after": "char buf[128];\nmemcpy(buf, data, len);\n// TODO: improve security",
+      "rationale": "补丁仅添加注释，实际代码无任何修复措施。",
+      "is_positive": false
+    },
+        {
+      "id": "CVE-2020-28005",
+      "cwe": "CWE-120",
+      "before": "v5 = httpGetEnv(a1, \"sign\");\nv6 = httpGetEnv(a1, \"data\");\nmemset(v27, 0, 33);\nmemset(v28, 0, 33);\nmemset(v29, 0, 33);      if ( v6 )\nv10 = strlen(v6);\nif ( v27[0] && v28[0] ){dword_579464 = v11 - v10;\nstrncpy(&byte_579420, v27, 32);\nstrncpy(&byte_579441, v28, 32);}",
+      "after": "Env = httpGetEnv(a1, \"sign\");\nmemset(v10, 0, 33);",
+      "rationale": "旧版本中传入的data参数存在缓冲区溢出的问题，新版本中直接改变逻辑，不再传入data参数",
+      "is_positive": true
+    }
+  ],
+  
+  "CWE-121": [
+    {
+      "id": "CVE-2023-4744",
+      "cwe": "CWE-121",
+      "before": "Var = websGetVar(a1, \"mac\", &unk_4F1A80);\nv4 = websGetVar(a1, \"devName\", &unk_4F1A80);",
+      "after": "  if ( websSafeGetVar(a1, 207, (int)\"mac\", (int)&unk_500360, (char *)dest) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 207, \"mac\");\nreturn websTransfer_errCode(a1, 1);}\nelse if ( websSafeGetVar(a1, 208, (int)\"devName\", (int)&unk_500360, s_) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 208, \"devName\");\nreturn websTransfer_errCode(a1, 1);}",
+      "rationale": "使用更安全的传参函数websSafeGetVar传入mac以及devName参数，在该函数内有长度限制以及内容检查，并且有溢出错误时直接报错",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2018-XXXX-Router-HTTP-Header",
+      "cwe": "CWE-121",
+      "before": "void handle_user_agent(const char *ua) {\n    char buf[128];\n    // ua 来自 HTTP User-Agent 头\n    sprintf(buf, \"UA=%s\", ua);  // 无长度检查\n    log_to_file(buf);\n}",
+      "after": "void handle_user_agent(const char *ua) {\n    char buf[128];\n    size_t len;\n    if (!ua) return;\n    len = strlen(ua);\n    if (len > 110) {  // 预留 \"UA=\" 和结尾 0\n        log_error(\"user-agent too long\");\n        return;\n    }\n    snprintf(buf, sizeof(buf), \"UA=%s\", ua);\n    buf[sizeof(buf)-1] = '\\0';\n    log_to_file(buf);\n}",
+      "rationale": "修复前在栈上分配固定 128 字节缓冲区并使用 sprintf 直接拼接 User-Agent，超长头部会导致栈缓冲区溢出。修复通过显式限制 ua 长度并改为 snprintf，确保不会写出 buf 边界，属于典型栈缓冲区溢出修复。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2020-XXXX-IPCam-FileName",
+      "cwe": "CWE-121",
+      "before": "int save_snapshot(const char *name) {\n    char path[64];\n    char cmd[128];\n    // name 来自 HTTP 参数\n    sprintf(path, \"/tmp/%s.jpg\", name);     // 1: 可能溢出 path\n    sprintf(cmd, \"snapshot_tool %s\", path);  // 2: 级联溢出 cmd\n    return system(cmd);\n}",
+      "after": "int save_snapshot(const char *name) {\n    char path[64];\n    char cmd[128];\n    size_t nlen;\n    if (!name) return -1;\n    nlen = strlen(name);\n    if (nlen == 0 || nlen > 50) {  // 限制在合理长度内\n        log_error(\"invalid snapshot name\");\n        return -1;\n    }\n    if (snprintf(path, sizeof(path), \"/tmp/%s.jpg\", name) >= (int)sizeof(path)) {\n        log_error(\"path too long\");\n        return -1;\n    }\n    if (snprintf(cmd, sizeof(cmd), \"snapshot_tool %s\", path) >= (int)sizeof(cmd)) {\n        log_error(\"cmd too long\");\n        return -1;\n    }\n    return system(cmd);\n}",
+      "rationale": "原始实现将用户可控文件名直接拼接成路径和命令字符串，使用 sprintf 写入固定大小的栈缓冲区，极易造成栈溢出。补丁通过对 name 施加长度上限，并对 snprintf 返回值进行检查，防止任何超过缓冲区大小的写入，从而消除栈缓冲区溢出。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2021-XXXX-NAS-RPC-Struct",
+      "cwe": "CWE-121",
+      "before": "struct user_info {\n    char name[32];\n    char group[32];\n};\n\nint rpc_set_user(struct rpc_ctx *ctx) {\n    struct user_info info;  // 栈上对象\n    const char *name = ctx->name;   // 来自网络\n    const char *group = ctx->group; // 来自网络\n    strcpy(info.name, name);        // 无长度检查\n    strcpy(info.group, group);\n    return apply_user(&info);\n}",
+      "after": "int rpc_set_user(struct rpc_ctx *ctx) {\n    struct user_info info;\n    const char *name = ctx->name;\n    const char *group = ctx->group;\n    if (!name || !group) return -1;\n    if (strlen(name) >= sizeof(info.name) || strlen(group) >= sizeof(info.group)) {\n        log_error(\"rpc_set_user: name/group too long\");\n        return -1;\n    }\n    strncpy(info.name, name, sizeof(info.name) - 1);\n    info.name[sizeof(info.name) - 1] = '\\0';\n    strncpy(info.group, group, sizeof(info.group) - 1);\n    info.group[sizeof(info.group) - 1] = '\\0';\n    return apply_user(&info);\n}",
+      "rationale": "原代码将网络来源的 name、group 直接拷贝到栈上的固定数组字段，典型 stack-based buffer overflow。修复通过在拷贝前检查长度并使用 strncpy 限制写入长度，确保不会覆盖栈上邻近数据。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2019-XXXX-DSL-CLI",
+      "cwe": "CWE-121",
+      "before": "void cli_echo(char *input) {\n    char buf[64];\n    int i;\n    // 简单大小写转换回显\n    for (i = 0; i <= strlen(input); i++) {  // <= 导致 off-by-one\n        char c = input[i];\n        if (c >= 'a' && c <= 'z') c -= 32;\n        buf[i] = c; // 当 i == 64 时，写出 buf 边界\n    }\n    puts(buf);\n}",
+      "after": "void cli_echo(char *input) {\n    char buf[64];\n    size_t len, i;\n    if (!input) return;\n    len = strlen(input);\n    if (len >= sizeof(buf)) {\n        len = sizeof(buf) - 1;  // 最多只处理 63 字节\n    }\n    for (i = 0; i < len; i++) {\n        char c = input[i];\n        if (c >= 'a' && c <= 'z') c -= 32;\n        buf[i] = c;\n    }\n    buf[len] = '\\0';\n    puts(buf);\n}",
+      "rationale": "漏洞来自于 for 循环条件使用 <= strlen(input)，导致对 buf 进行 off-by-one 写越界（典型 CWE-121 子类）。修复通过将 len 限制在缓冲区大小以内，并使用严格 < len 的循环条件，最后手动补写终止符。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-XXXX-VPN-Config",
+      "cwe": "CWE-121",
+      "before": "int build_config_line(const char *key, const char *value) {\n    char line[256];\n    // key/value 来自远程管理接口\n    sprintf(line, \"option %s %s\\n\", key, value); // 多个参数组合，易溢出\n    return write_config(line);\n}",
+      "after": "int build_config_line(const char *key, const char *value) {\n    char line[256];\n    int n;\n    if (!key || !value) return -1;\n    if (strlen(key) > 64 || strlen(value) > 160) { // 基于协议约束给出上限\n        log_error(\"config param too long\");\n        return -1;\n    }\n    n = snprintf(line, sizeof(line), \"option %s %s\\n\", key, value);\n    if (n < 0 || n >= (int)sizeof(line)) {\n        log_error(\"config line truncated\");\n        return -1;\n    }\n    return write_config(line);\n}",
+      "rationale": "补丁对传入 key/value 做了协议约束长度校验，并使用 snprintf 进行边界控制，防止写入超过栈上 line 数组大小，属于有效的栈缓冲区溢出修复。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2016-XXXX-HTTP-CGI-6",
+      "cwe": "CWE-121",
+      "before": "void run_cmd(const char *arg) {\n    char cmd[128];\n    sprintf(cmd, \"do %s\", arg);\n    execute(cmd);\n}",
+      "after": "void run_cmd(const char *arg) {\n    char cmd[128];\n    if (!arg) return;\n    if (strlen(arg) > 110) return;\n    if (snprintf(cmd, sizeof(cmd), \"do %s\", arg) >= (int)sizeof(cmd)) return;\n    execute(cmd);\n}",
+      "rationale": "补丁同时提供输入上限与 snprintf 返回值检查，属于完整的栈溢出修复流程。",
+      "is_positive": true
+    },
+
+    {
+      "id": "CVE-2021-XXXX-VoIP-SIP-7",
+      "cwe": "CWE-121",
+      "before": "void set_tag(const char *t) {\n    char tag[32];\n    strcat(tag, t);  // 无初值 + strcat = 经典溢出组合\n}",
+      "after": "void set_tag(const char *t) {\n    char tag[32];\n    tag[0] = '\\0';\n    if (!t) return;\n    if (strlen(t) >= sizeof(tag)) return;\n    strncat(tag, t, sizeof(tag)-1);\n}",
+      "rationale": "strcat 使用前没有初始化 tag，且未验证长度。补丁通过初始化并限制附加长度，属于正确修复。",
+      "is_positive": true
+    },
+    {
+      "id": "",
+      "cwe": "CWE-121",
+      "before": "void handle_name(const char *name) {\n    char buf[32];\n    strcpy(buf, name);  // 典型栈溢出点\n    log_info(\"name=%s\", buf);\n}",
+      "after": "void handle_name(const char *name) {\n    char buf[32];\n    if (!name) {\n        log_error(\"name is null\");\n        return;\n    }\n    strcpy(buf, name);  // 仍未做长度检查\n    log_info(\"name=%s\", buf);\n}",
+      "rationale": "补丁仅增加了空指针检查，对核心问题——栈上固定数组 buf 没有长度校验——完全未处理，栈溢出风险依旧存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-121",
+      "before": "void log_msg(char *msg) {\n    char buf[128];\n    sprintf(buf, \"[LOG]%s\", msg);\n    puts(buf);\n}",
+      "after": "void log_msg(char *msg) {\n    char buf[128];\n    printf(\"log len=%zu\\n\", strlen(msg));\n    sprintf(buf, \"[LOG]%s\", msg);  // 没有任何边界保护\n    puts(buf);\n}",
+      "rationale": "补丁只是打印了输入长度但没有使用该信息进行边界检查，sprintf 仍然可以将任意长字符串写入栈上 buf，未实际修复 CWE-121。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-121",
+      "before": "void greet(char *name) {\n    char buf[64];\n    sprintf(buf, \"Hello %s\", name);\n    puts(buf);\n}",
+      "after": "void greet(char *name) {\n    char buf[64];\n    if (strlen(name) < 1024) {  // 条件与 buf 大小完全不匹配\n        sprintf(buf, \"Hello %s\", name);\n    }\n    puts(buf);\n}",
+      "rationale": "补丁引入了一个看似“安全检查”的分支，但阈值 1024 与实际栈缓冲区大小 64 完全不符，攻击者仍可构造长度为 100 的 name 触发溢出，属于典型错误上限检查。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-121",
+      "before": "void copy_desc(const char *src) {\n    char desc[80];\n    memcpy(desc, src, strlen(src));\n}",
+      "after": "void copy_desc(const char *src) {\n    char desc[80];\n    size_t len = strlen(src);\n    if (len == 0) {\n        return;  // 仅处理空字符串\n    }\n    memcpy(desc, src, len);  // 对 len 是否超过 80 不做任何检查\n}",
+      "rationale": "补丁只对 len==0 的情况早退，但导致栈溢出的根本原因是 len 可以大于 desc 的大小，这一点并未修复。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-121",
+      "before": "void f(char *input) {\n    char buf[32];\n    strcpy(buf, input);\n}",
+      "after": "char g_buf[32];  // 改成全局\n\nvoid f(char *input) {\n    strcpy(g_buf, input);  // 虽然不再是栈溢出，但仍是缓冲区溢出\n}",
+      "rationale": "补丁通过将缓冲区从栈迁移到全局区来“规避”栈溢出检测，但依然没有进行任何长度检查，只是将栈缓冲区溢出变成全局缓冲区溢出（CWE-119/122），本质风险仍然存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-121",
+      "before": "void debug_hex(const char *data) {\n    char buf[128];\n    sprintf(buf, \"%s\", data);\n    hexdump(buf, strlen(buf));\n}",
+      "after": "void debug_hex(const char *data) {\n    char buf[128];\n    // TODO: add security checks here\n    sprintf(buf, \"%s\", data);  // 保持原有不安全行为\n    hexdump(buf, strlen(buf));\n}",
+      "rationale": "补丁仅添加了 TODO 注释而未改变任何实际逻辑，sprintf 仍然可以将超长字符串写爆栈上的 buf，属于完全未修复。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-121",
+      "before": "void auth(const char *u) {\n    char name[32];\n    sprintf(name, \"%s\", u);\n}",
+      "after": "void auth(const char *u) {\n    char name[32];\n    if (strlen(u) > 4096) return;\n    sprintf(name, \"%s\", u);\n}",
+      "rationale": "阈值极不合理（4096 > 32），无法防止溢出。",
+      "is_positive": false
+    }
+  ],
+  "CWE-787": [
+ {
+      "id": "CVE-2019-1663",
+      "cwe": "CWE-787",
+      "before": "if ( VERIFY_MAC_17(cgi_3) && VERIFY_IPv4(cgi_7) ){ \nv20[1] = &byte_485AC4;\nv20[0] = \"/sbin/cron_gn\";\nv20[2] = cgi_3;\nv20[3] = cgi_7;\nv20[4] = 0;\neval(v20, \">/dev/console\", 0, 0);\ndo_ej(cgi_8, a1);}",
+      "after": "if ( !v19 || (v20 = 1, strcmp(v19, s_)) ){LABEL_31:\nv21 = (const char *)nvram_get(\"http_client_mac\");if(v21 && strcmp(v21, cgi_3) || (v24 = (const char *)nvram_get(\"http_client_ip\")) != 0 && strcmp(v24, cgi_7)) {\nfprintf(stream_4, \"Drop session, ip and mac invmatch...\");\ngoto LABEL_35;}\nv20 = 0;}\nv27[0] = \"/sbin/cron_gn\";\nv27[1] = &byte_485FE4;\nv27[2] = cgi_3;\nv27[3] = cgi_7;\nv27[4] = 0;\neval(v27, \">/dev/console\", 0, 0);",
+      "rationale": "旧版本中仅仅对mac参数以及ipv4参数做了格式验证，但并没有验证其内容，新版本增加了mac与ip匹配的功能，如果内容上有误，则无法执行敏感函数eval，直接跳转到LABLE_35.本质上就是对参数内容的过滤",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-33672",
+      "cwe": "CWE-787",
+      "before": "src = (char *)websGetVar(a1, \"shareSpeed\", \"0\");\nstrcpy((char *)src_, src);",
+      "after": " else if ( websSafeGetVar(a1, 186, (int)\"shareSpeed\", (int)\"0\", (char *)&src_) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 186, \"shareSpeed\");\nreturn websTransfer_errCode(a1, 1);}",
+      "rationale": "使用更安全的传参函数websSafeGetVar传入shareSpeed参数，在该函数内有长度限制以及内容检查,且增设了报错机制，舍弃使用strcpy函数防止栈溢出",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2021-45392",
+      "cwe": "CWE-787",
+      "before": "v6 = sub_4151AC(a1, \"prefixDelegate\", \"0\");\nsub_42296C(v20, 26, v6);\nstrcpy(v21, v6);",
+      "after": " LABEL_49:\nif ( v20 )\nsub_42D900(a2, \"prefixDelegate\", v20 + 4);\nreturn 0;}",
+      "rationale": "旧版本v21是栈上的固定大小缓冲区,v6来自用户输入的 prefixDelegate参数,如果用户提供过长的 prefixDelegate值，会导致栈溢出,新版本通过移除不安全的 strcpy操作修复了这个问题。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-36482",
+      "cwe": "CWE-121",
+      "before": "Var = (const char *)websGetVar(a1, \"lang\", \"cn\");\n...\nsprintf(v7, \"HelpUrl_%s\", Var);\nv5 = (const char *)websGetVar(JsonConf, v7, &byte_42E318);\nif ( *v5 ) {\n  memset(v7, 0, sizeof(v7));\n  sprintf(v7, \"http://%s\", v5);\n  nvram_set(\"help_url_custom\", v7);\n}",
+      "after": "Var = (const char *)websGetVar(a1, \"lang\", \"cn\");\n...\nif ( (unsigned int)strlen(Var) < 0x19 ) {\n  snprintf(v8, 128, \"HelpUrl_%s\", Var);\n  v6 = (const char *)websGetVar(JsonConf, v8, \"\");\n  if ( *v6 ) {\n    memset(v8, 0, sizeof(v8));\n    snprintf(v8, 128, \"http://%s\", v6);\n    nvram_set(\"help_url_custom\", v8);\n  }\n}",
+      "rationale": "旧版本中，用户可控的 lang 参数在未进行长度校验的情况下，通过 sprintf 拼接写入固定大小的栈缓冲区 v7（128 字节），攻击者可通过构造超长 lang 值触发栈溢出（CWE-121）。补丁版本首先对 lang 的长度进行严格限制（strlen < 0x19），并将不安全的 sprintf 替换为带边界检查的 snprintf，从而有效防止栈缓冲区越界写入，消除了该漏洞。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-42167",
+      "cwe": "CWE-787",
+      "before": "firewall_value = websGetVar(wp, \"firewallEn\", \"1111\");\nif ( strlen(firewall_value) >= 4 )",
+      "after": " if ( websSafeGetVar(a1, 39, (int)\"firewallEn\", (int)\"1111\", (char *)&dest) == 1 )",
+      "rationale": "使用更安全的传参函数websSafeGetVar，在该函数内有长度限制以及内容检查",
+      "is_positive": true
+    },	
+    {
+      "id": "CVE-2019-14363",
+      "cwe": "CWE-787",
+      "before": "char dest[1507];\np_dest = dest;\nstrcpy(dest, haystack);",
+      "after": "char s[1507];\nn32 = 32;\np_s = s;\nmemset(s, 0, 0x5DCu);\nstrncpy(s, haystack, 0x5DBu);",
+      "rationale": "先使用memset让缓冲区清空，再使用strncpy替代不安全的strcpy,限制拷贝长度为0x5DB（1499）字节，小于缓冲区大小1507字节,确保字符串不会溢出",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-33675",
+      "cwe": "CWE-787",
+      "before": "nptr = (char *)websGetVar(a1, \"time\", &unk_4ED248);\nstrcpy((char *)(a2 + 34), nptr);",
+      "after": " else if ( websSafeGetVar(a1, 145, (int)\"time\", (int)\"19:00-21:00\", (char *)src_) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 145, \"time\");\nreturn 1;}\nstrcpy((char *)(a2 + 34), (const char *)src_);",
+      "rationale": "使用更安全的传参函数websSafeGetVar传入time参数，在该函数内有长度限制以及内容检查,且增设了报错机制，舍弃使用strcpy函数防止栈溢出",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-37292",
+      "cwe": "CWE-787",
+      "before": "if ( v7 ){*v7 = 0;\nstrcpy(v18, *a2);\n*a2 = v8 + 1;}",
+      "after": " if ( v7 ){*v7 = 0;\nv8 = v7 + 1;\nsnprintf(v18, 128, \"%s\", *a2);\n*a2 = v8;}",
+      "rationale": "使用更安全的snprintf函数,舍弃了strcpy，限定了参数范围在128字节以内，防止栈溢出",
+      "is_positive": true
+    },
+{
+      "id": "CVE-2021-45391",
+      "cwe": "CWE-787",
+      "before": "v3 = sub_4151AC(a1, \"conType\", \"DHCP\");\nsub_42296C(v20, 25, v3);\nstrcpy(v22, v3);",
+      "after": " v3 = sub_415C94(a1, \"conType\", \"DHCP\");\nsub_42DCDC(v18, 25, v3);\nstrncpy(v19, v3, 15);",
+      "rationale": "使用更安全的strncpy函数，限定传入的长度，防止使用strcpy导致v22栈溢出",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-27012",
+      "cwe": "CWE-787",
+      "before": "src = (char *)websGetVar(a1, \"schedStartTime\", &unk_4EB614);\nsrc_1 = (char *)websGetVar(a1, \"schedEndTime\", &unk_4EB614);",
+      "after": "else if ( websSafeGetVar(a1, 109, (int)\"schedStartTime\", (int)&unk_4F8F24, (char *)&src_) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 109, \"schedStartTime\");\nv3 = 1;}\nelse if ( websSafeGetVar(a1, 110, (int)\"schedEndTime\", (int)&unk_4F8F24, (char *)&src__1) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 110, \"schedEndTime\");\nv3 = 1;}",
+      "rationale": "使用更安全的传参函数websSafeGetVar，在该函数内有长度限制以及内容检查，并且不符合标准时直接报错,防止后续执行strcpy时栈溢出",
+      "is_positive": true
+    },	
+    {
+      "id": "CVE-2022-42171",
+      "cwe": "CWE-787",
+      "before": "deviceId = websGetVar(wp, \"deviceId\", defaultGetValue__1);",
+      "after": " if ( websSafeGetVar(a1, 146, \"deviceId\", (int)&unk_507908, dest) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 146, \"deviceId\");\nreturn websTransfer_errCode(a1, 1);},",
+      "rationale": "使用更安全的传参函数websSafeGetVar，在该函数内有长度限制以及内容检查，并且有溢出错误时直接报错",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-33670",
+      "cwe": "CWE-787",
+      "before": "s = (char *)websGetVar(a1, \"time\", &unk_4F09E0);\nsscanf(s, \"%[^-]-%[^-]-%[^ ] %[^:]:%[^:]:%s\", nptr_, nptr__1, nptr__2, nptr__3, nptr__4, nptr__5);\ntp_.tm_year = atoi((const char *)nptr_) - 1900;\ntp_.tm_mon = atoi((const char *)nptr__1) - 1;\ntp_.tm_mday = atoi((const char *)nptr__2);\ntp_.tm_hour = atoi((const char *)nptr__3);\ntp_.tm_min = atoi((const char *)nptr__4);\ntp_.tm_sec = atoi((const char *)nptr__5);",
+      "after": " Var = websGetVar(a1, \"TimeIndex\", \"1\");\nnptr_6 = (char *)websGetVar(a1, \"TZ\", &unk_4FE710);\nv10 = (char *)websGetVar(a1, \"check\", &unk_4FE710);\nnptr_7 = (char *)websGetVar(a1, \"SETPRIO\", &unk_4FE710);\nnptr_1 = (const char *)websGetVar(a1, \"year\", &unk_4FE710);\ntp_.tm_year = atoi(nptr_1) - 1900;\nnptr_2 = (const char *)websGetVar(a1, \"month\", &unk_4FE710);\ntp_.tm_mon = atoi(nptr_2) - 1;\nnptr_3 = (const char *)websGetVar(a1, \"day\", &unk_4FE710);\ntp_.tm_mday = atoi(nptr_3);\nnptr_4 = (const char *)websGetVar(a1, \"hour\", &unk_4FE710);\ntp_.tm_hour = atoi(nptr_4);\nnptr_5 = (const char *)websGetVar(a1, \"minute\", &unk_4FE710);\ntp_.tm_min = atoi(nptr_5);\nnptr = (char *)websGetVar(a1, \"second\", &unk_4FE710);\ntp_.tm_sec = atoi(nptr);",
+      "rationale": "虽然摈弃使用sscanf函数，而是将time拆成年月日时分秒参数传入，但是websGetVar函数没有对参数长度做判断，依旧有栈溢出的风险",
+      "is_positive": false
+    },
+    {
+      "id": "CVE-2021-44246",
+      "cwe": "CWE-787",
+      "before": "v12 = (_BYTE *)websGetVar(a1, \"ipTo\", &byte_42E7C4);\napmib_set(18565, v12);",
+      "after": "v14 = (_BYTE *)websGetVar(v13, \"ipTo\", &byte_430DF8);\nv15 = Validity_check(v14);\nv16 = a1;if ( !v15 ){if ( (unsigned int)strlen(v14) < 4 )\napmib_set(18565, v14);\nv16 = a1;}",
+      "rationale": "旧版本ipTo直接输入，新版本额外在对ipTo进行检查，使用Validity_check检查内容以及使用strlen检查长度，满足条件后才能继续执行",
+      "is_positive": true
+    },
+     {
+      "id": "CVE-2022-42165",
+      "cwe": "CWE-787",
+      "before": "dev_id = websGetVar(wp, \"mac\", defaultGetValue__1);\ndev_name = websGetVar(wp, \"devName\", defaultGetValue__1);",
+      "after": "     if ( websSafeGetVar(a1, 210, (int)\"mac\", (int)&unk_50D960, (char *)dest) == 1 )  {printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 210, \"mac\");\nreturn websTransfer_errCode(a1, 1);}\nelse if ( websSafeGetVar(a1, 211, (int)\"devName\", (int)&unk_50D960, s_) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 211, \"devName\");\nreturn websTransfer_errCode(a1, 1);}",
+      "rationale": "使用更安全的传参函数websSafeGetVar，在该函数内有长度限制以及内容检查，并且有错误时直接报错",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-38937",
+      "cwe": "CWE-787",
+      "before": "Var = websGetVar(a1, \"list\", &unk_4EDBFC);\nsave_virtualser_data(\"adv.virtualser\", Var, 126);",
+      "after": " if ( websSafeGetVar(a1, 204, (int)\"list\", (int)&unk_4FB6B8, dest) == 1 )\n{printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 204, \"list\");\nreturn websTransfer_errCode(a1, 1);}\nelse{memcpy(s__1, dest, 0x201u);\nif ( Virtual_Data_Check(s__1) ){return websTransfer_errCode(a1, 1);}\nelse{save_virtualser_data(\"adv.virtualser\", dest, 126);\nif ( CommitCfm() ){sprintf(s_, \"advance_type=%d\", 2);\nsend_msg_to_netctrl(5, s_);}\nelse{v2 = 1;}\nreturn websTransfer_errCode(a1, v2);\n}}",
+      "rationale": "使用更安全的传参函数websSafeGetVar，在该函数内有长度限制以及内容检查，并且有溢出错误时直接报错,且对内容长度多轮判定后才会存储于缓冲区",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-42164",
+      "cwe": "CWE-787",
+      "before": "deviceId = websGetVar(wp, \"deviceId\", defaultGetValue__1);",
+      "after": " if ( websSafeGetVar(a1, 146, \"deviceId\", (int)&unk_507908, dest) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 146, \"deviceId\");\nreturn websTransfer_errCode(a1, 1);},",
+      "rationale": "使用更安全的传参函数websSafeGetVar，在该函数内有长度限制以及内容检查，并且有溢出错误时直接报错",
+      "is_positive": false
+    },
+      {
+      "id": "CVE-2023-33673",
+      "cwe": "CWE-787",
+      "before": "s = (char *)websGetVar(a1, \"firewallEn\", \"1111\");\n ( strlen(s) >= 4 ){strcpy((char *)s__2, s);",
+      "after": " if ( websSafeGetVar(a1, 36, \"firewallEn\", \"1111\", &src_) == 1 ){printf(\"Error: Get WEB value failed, idx[%d],var[%s]\\n\", 36, \"firewallEn\");\nreturn websTransfer_errCode(a1, 1);}\nelse{if ( strlen((const char *)&src_) >= 4 ){strcpy((char *)dest_, (const char *)&src_);",
+      "rationale": "使用更安全的传参函数websSafeGetVar，在该函数内有长度限制以及内容检查",
+      "is_positive": true
+    },
+        {
+      "id": "CVE-2022-36484",
+      "cwe": "CWE-787",
+      "before": "Var = (const char *)websGetVar(a1, \"ip\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", &byte_42E318);\nv4 = atoi(v3);\nsprintf(v6, \"ping %s -w %d &>/var/log/pingCheck\", Var, v4);\ndoSystem(v6);",
+      "after": "Var = (const char *)websGetVar(a1, \"ip\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", \"\");\nv4 = atoi(v3);\nif ( !Validity_check(Var) ){snprintf(v6, 128, \"ping %s -w %d &>/var/log/pingCheck\", Var, v4);\ndoSystem(v6);}",
+      "rationale": "旧版本未对ip进行检测，导致ip参数可能过长导致栈溢出，新版本使用is_cmd_string_valid函数验证输入的ip是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-36480",
+      "cwe": "CWE-787",
+      "before": "Var = (const char *)websGetVar(a1, \"command\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", &byte_42E318);\nv4 = atoi(v3);\nsprintf(v6, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v4, Var);\ndoSystem(v6);",
+      "after": "Var = (const char *)websGetVar(a1, \"command\", \"www.baidu.com\");\nv3 = websGetVar(a1, \"num\", \"\");\nv4 = atoi(v3);\nif ( !Validity_check(Var) ){snprintf(v6, 128, \"traceroute -m %d %s&>/var/log/traceRouteLog\", v4, Var);\ndoSystem(v6);}",
+      "rationale": "旧版本未对command进行检测，导致command可能过长导致栈溢出，新版本使用is_cmd_string_valid函数验证输入的command是否合法，满足条件后才能继续执行",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2022-XXXX-IPCam-VideoStream",
+      "cwe": "CWE-787",
+      "before": "void copy_frame(struct frame *f) {\n    int len = f->len;  // 来自摄像头视频帧头，攻击者可控\n    uint8_t dst[2048];\n    memcpy(dst, f->payload, len);  // len 未校验，可越界覆盖整个栈\n    process_frame(dst);\n}",
+      "after": "void copy_frame(struct frame *f) {\n    int len = f->len;\n    if (len <= 0 || len > 2048) {\n        log_error(\"invalid frame length\");\n        return;\n    }\n    uint8_t dst[2048];\n    memcpy(dst, f->payload, len);\n    process_frame(dst);\n}",
+      "rationale": "修复通过严格验证来自视频帧头的长度字段 f->len，确保 memcpy 不会写出数组 dst 的合法范围，避免越界写入攻陷栈。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-XXXX-Router-PPPoE",
+      "cwe": "CWE-787",
+      "before": "void parse_tag(struct pkt *p) {\n    uint16_t taglen = ntohs(*(uint16_t*)(p->data + 4));  // 可被构造为超大值\n    char tmp[256];\n    memcpy(tmp, p->data + 6, taglen);  // 越界写 tmp\n    tmp[taglen] = '\\0';\n    handle_pppoe_tag(tmp);\n}",
+      "after": "void parse_tag(struct pkt *p) {\n    uint16_t taglen = ntohs(*(uint16_t*)(p->data + 4));\n    if (taglen == 0 || taglen > 255) {\n        return;  // PPPoE tag 合法最大值 255\n    }\n    char tmp[256];\n    memcpy(tmp, p->data + 6, taglen);\n    tmp[taglen] = '\\0';\n    handle_pppoe_tag(tmp);\n}",
+      "rationale": "补丁增加协议字段白名单验证（PPPoE tag 最大长度 255），确保 memcpy 不会越界。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2024-XXXX-NAS-SMB",
+      "cwe": "CWE-787",
+      "before": "int fill_info(struct info *dst, struct info *src) {\n    for (int i = 0; i < src->count; i++) {\n        dst->items[i] = src->items[i];  // 未验证 dst->count\n    }\n    return 0;\n}",
+      "after": "int fill_info(struct info *dst, struct info *src) {\n    if (src->count > dst->count) {\n        return -1;\n    }\n    for (int i = 0; i < src->count; i++) {\n        dst->items[i] = src->items[i];\n    }\n    return 0;\n}",
+      "rationale": "修复添加了两个结构体的 count 字段匹配校验，避免循环写入 dst->items 越界（真实 SMB 固件中常见）。",
+      "is_positive": true
+    },
+    {
+      "id": "CVE-2023-XXXX-WiFi-AssocReq",
+      "cwe": "CWE-787",
+      "before": "void parse_ies(uint8_t *pkt) {\n    uint8_t count = pkt[0];  // 攻击者可控\n    uint8_t ies[16];\n    for (int i = 0; i < count; i++) {\n        ies[i] = pkt[i + 1];  // 无界限检查 → 越界写\n    }\n}",
+      "after": "void parse_ies(uint8_t *pkt) {\n    uint8_t count = pkt[0];\n    if (count > 16) {\n        return;  // 限制最大 IE 数量\n    }\n    uint8_t ies[16];\n    for (int i = 0; i < count; i++) {\n        ies[i] = pkt[i + 1];\n    }\n}",
+      "rationale": "修复通过限制解析的 IE 数，避免循环写入 ies 数组时越界（WiFi 固件中非常常见的越界漏洞模式）。",
+      "is_positive": true
+    },
+    {
+      "id": "",
+      "cwe": "CWE-787",
+      "before": "void foo(char *src, int len) {\n    char buf[64];\n    memcpy(buf, src, len);\n}",
+      "after": "void foo(char *src, int len) {\n    char buf[64];\n    if (src == NULL) return;  // 与越界无关\n    memcpy(buf, src, len);  // len 仍未检查\n}",
+      "rationale": "补丁仅检查空指针，但越界写发生在 len 未校验，与 src 是否为 NULL 无关。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-787",
+      "before": "uint8_t arr[32];\nfor (i = 0; i < count; i++) arr[i] = input[i];",
+      "after": "uint8_t arr[32];\nlog_debug(\"copying array\");\nfor (i = 0; i < count; i++) arr[i] = input[i];",
+      "rationale": "补丁仅添加日志，没有限制 count 的范围，越界写依旧存在。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-787",
+      "before": "void copydata(char *dst, char *src, int len) {\n    memcpy(dst, src, len);\n}",
+      "after": "void copydata(char *dst, char *src, int len) {\n    if (len < 4096) {  // 仍远大于 dst 的实际大小\n        memcpy(dst, src, len);\n    }\n}",
+      "rationale": "补丁虽加了条件，但边界没有与 dst 的真实大小关联，属于错误边界检查 → 依然可越界写。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-787",
+      "before": "int parse(struct msg *m) {\n    uint8_t buf[64];\n    memcpy(buf, m->payload, m->len);\n}",
+      "after": "int parse(struct msg *m) {\n    uint8_t buf[64];\n    if (m->len != 0) {\n        memcpy(buf, m->payload, m->len);  // 漏洞依旧\n    }\n}",
+      "rationale": "补丁检查 m->len != 0，但越界核心原因是 m->len > 64，不是 0 → 补丁完全无效。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-787",
+      "before": "char buf[128];\nfor (int i = 0; i < n; i++) buf[i] = input[i];",
+      "after": "char buffer[128];\nfor (int i = 0; i < n; i++) buffer[i] = input[i];",
+      "rationale": "仅修改变量名 buf → buffer，没有任何边界检查，属于典型伪修复。",
+      "is_positive": false
+    },
+    {
+      "id": "",
+      "cwe": "CWE-787",
+      "before": "char data[256];\nmemcpy(data, pkt + 4, pktlen);",
+      "after": "char data[256];\nmemcpy(data, pkt + 4, pktlen);\n// TODO: check size later",
+      "rationale": "补丁只加了注释，实际代码未修复漏洞。",
+      "is_positive": false
+    }
+  ],
+  "CWE-352": [
+    {
+      "id": "CVE-2022-27374",
+      "cwe": "CWE-352",
+      "before": "tapi_set_route(v3[0]);\nblob_buf_free(v3);\nsub_415368(a1, \"HTTP/1.0 200 OK\\r\\n\\r\\n\");\nsub_415368(a1, \"{\"errCode\":%d}\", 0);\nsub_415B54(a1, 200);\nreturn _stack_chk_guard;",
+      "after": "tapi_set_route(v3[0]);\nblob_buf_free(v3);\nsub_41E91C(a1, 0);\nreturn _stack_chk_guard;",
+      "rationale": "两个版本都直接调用了 tapi_set_route(v3[0])​ 来执行路由器的重启操作,核心安全问题依然存在,敏感操作接口缺乏请求来源验证",
+      "is_positive": false
+    }
+  ],
+"CWE-287": [
+    {
+      "id": "CVE-2021-35324",
+      "cwe": "CWE-287",
+      "before": "Var = websGetVar(v23, \"topicurl\", &byte_42E7C4);\nv25 = strchr(Var, 47);\nif ( v25 )Var = v25 + 1;",
+      "after": "Var=websGetVar(v22,\"topicurl\",&byte_430598);\nv26=(_BYTE*)websGetVar(v12,\"token\",&byte_430598);\nv27=strchr(Var,47);\nif(v27)\nVar=v27+1;\nv28=1;\nif(strcmp(Var,\"loginAuth\"))\n{\nv28=1;\nif(strcmp(Var,\"getInitCfg\"))\n{\nv28=1;\nif(strcmp(Var,\"getLoginCfg\"))\n{\nv28=1;\nif(strcmp(Var,\"getSysStatusCfg\"))\n{\nv28=1;\nif(strcmp(Var,\"getCrpcConfig\"))\n{\nv28=1;\nif(strcmp(Var,\"getCrpcCfg\"))\n{\nv28=1;\nif(strcmp(Var,\"setCrpcCfg\"))\n{\nv28=1;\nif(strcmp(Var,\"setLanguageCfg\"))\n{\nv28=1;\nif(strcmp(Var,\"UploadCustomModule\"))\n{\nv28=1;\nif(strcmp(Var,\"QuickCustom\"))\n{\nv29=0;\nif(f_exist(\"/tmp/cookie_key\"))\n{\nf_read(\"/tmp/cookie_key\",v49,0,128);\nmemset(KL@UHeZ0_,0,sizeof(KL@UHeZ0_));\nf_read(\"/tmp/token_uptime\",KL@UHeZ0_,0,128);\nv29=strtol(KL@UHeZ0_,0,10);\n}\nv30=time(0);\nif(strlen(v49)!=32)\ngotoLABEL_86;\nn301=v30-v29;\nif(v29&&n301>=301)\n{\nsystem(\"rm-f/tmp/cookie_key\");\nsub_425280(-4,\"Login timeout\");\ngotoLABEL_115;\n}\nif(!*v26||strcmp(v26,v49))\n{\nLABEL_86:\nsub_425280(-1,\"token invalid\");\ngotoLABEL_115;\n}\nmemset(KL@UHeZ0_,0,sizeof(KL@UHeZ0_));\nf_read(\"/tmp/remote_ipaddr\",KL@UHeZ0_,0,128);\nenv_4=getenv(\"REMOTE_ADDR\");\nv28=0;\nif(strcmp(KL@UHeZ0_,env_4))\n{\nsub_425280(-1,\"host invalid\");\ngotoLABEL_115;\n}\n}\n}\n}\n}\n}\n}\n}\n}\n}\n}",
+      "rationale": "增加了token验证，token错误的无法进入",
+      "is_positive": true
+    }
+  ],
+  "CWE-74": [
+    {
+      "id": "CVE-2025-5502",
+      "cwe": "CWE-74",
+      "before": "if ( v5[0] ){sprintf(v4, \"Mcli %d  %s &\", 6, v5);\nputs(v4);\nsystem(v4);}",
+      "after": "if ( v6[0] && is_cmd_string_valid(v6, \"r single_post_limit: %d\\n\", v3) == 1 ){snprintf(v5, 100, \"Mcli %d  %s &\", 6, v6);\nputs(v5);\nsystem(v5);}",
+      "rationale": "旧版本deviceMacAddr(也就是这里的v5）直接输入，未对其做检查，导致命令注入，新版本使用is_cmd_string_valid函数验证输入的deviceMacAddr，满足条件后才能继续执行",
+      "is_positive": true
     }
   ]
 }
+
