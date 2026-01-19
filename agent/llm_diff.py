@@ -21,7 +21,7 @@ from agent.data_flow_utils import format_key_param_data_flow, format_vuln_contex
 # 读取漏洞类型对应的Scenario和Property的JSON文件路径
 VULNERABILITY_SCENARIOS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'vulnerability_scenarios.json')
 
-# 基础PROMPT模板
+# 基础PROMPT模板（漏洞复现模式）
 BASE_PROMPT = """You are a security analyst. Your task is to judge whether the provided IDA-decompiled pseudo-C code represents a {$vulnerability_type$} vulnerability and whether the patch removes it.
 
 {$vulnerability_type$} Scenario & Property
@@ -72,6 +72,75 @@ CVE_DESCRIPTION: {$cve_details$}
 
 """
 
+# 漏洞挖掘模式的PROMPT模板
+DISCOVERY_PROMPT = """You are a security analyst specializing in vulnerability discovery. Your task is to analyze the provided IDA-decompiled pseudo-C code changes and identify potential {$vulnerability_type$} vulnerabilities.
+
+**Vulnerability Type Information:**
+- CWE ID: {$cwe_id$}
+- Description: {$vulnerability_type$}
+
+{$vulnerability_type$} Scenario & Property
+
+Scenario (identifying potential vulnerability):
+{$scenario$}
+
+Property (security-relevant code patterns):
+{$property$}
+
+## INPUT FORMAT
+[C-like pseudocode Version A (older/potentially vulnerable)]
+{filea}
+[filea end]
+
+[C-like pseudocode Version B (newer/potentially patched)]
+{fileb}
+[fileb end]
+
+## Analysis Guidelines for Vulnerability Discovery:
+1. Focus on code changes that affect security-relevant operations
+2. Look for patterns typical of {$vulnerability_type$} vulnerabilities
+3. Identify if the changes introduce, fix, or are unrelated to security issues
+4. Consider the context and data flow of the modified code
+
+## Output FORMAT (strict JSON)
+
+Answer only in JSON:
+
+{{
+  "vulnerability_found": "Yes/No",
+  "scenario_match": "Yes/No",
+  "property_match": "Yes/No",
+  "vulnerability_type": "{$cwe_id$}",
+  "severity": "High/Medium/Low/None",
+  "vulnerable_code_location": "Description of where the vulnerability exists",
+  "vulnerability_details": {{
+    "root_cause": "Explain the root cause of the vulnerability",
+    "attack_vector": "How could this be exploited",
+    "impact": "What is the potential impact"
+  }},
+  "fix_analysis": {{
+    "is_fixed": "Yes/No/Partial",
+    "fix_description": "How the newer version addresses the issue"
+  }},
+  "reason": ["Detailed reasoning for the analysis"]
+}}
+
+以下为真实应用场景:
+
+[filea]
+{$filea$}
+[filea end]
+
+[fileb]
+{$fileb$}
+[fileb end]
+
+[result]
+{$result$}
+[result end]
+
+"""
+
 # 调用链代码切片的默认配置
 DEFAULT_DANGER_APIS = [
     "strcpy", "strncpy", "memcpy", "strcat", "sprintf", "snprintf", "gets",
@@ -93,10 +162,10 @@ A scenario should describe the conditions under which the vulnerability exists, 
 A property should describe the conditions under which a patch effectively fixes the vulnerability, also in a format that can be answered with "Yes" or "No".
 
 Please provide your response in JSON format with the following structure:
-{
+{{
   "scenario": "[Your scenario description]",
   "property": "[Your property description]"
-}
+}}
 """
 
 SUMMARY_PROMPT = """
@@ -707,7 +776,16 @@ class Refiner:
         #    raise RuntimeError("请先通过环境变量 OPENAI_API_KEY 设置你的 API Key")
         #self.client = OpenAI(api_key=api_key) 
 
-    def make_prompt(self, fa_content, fb_content, cve_details=None, cwe=None):
+    def make_prompt(self, fa_content, fb_content, cve_details=None, cwe=None, work_mode: str = "reproduction"):
+        """生成分析提示词
+        
+        Args:
+            fa_content: 补丁前代码内容
+            fb_content: 补丁后代码内容
+            cve_details: CVE详情（漏洞复现模式）或CWE描述（漏洞挖掘模式）
+            cwe: CWE类型
+            work_mode: 工作模式 - "reproduction"（漏洞复现）或 "discovery"（漏洞挖掘）
+        """
         # 如果提供了cwe参数，获取对应的Scenario和Property
         scenario = ""
         property = ""
@@ -723,18 +801,40 @@ class Refiner:
                 scenario = scenario_data.get("scenario", "")
                 property = scenario_data.get("property", "")
         
-        # 使用基础模板生成最终prompt
-        prompt = BASE_PROMPT.replace("{$vulnerability_type$}", vulnerability_type)
-        prompt = prompt.replace("{$scenario$}", scenario)
-        prompt = prompt.replace("{$property$}", property)
-        prompt = prompt.replace("{$filea$}", fa_content)
-        prompt = prompt.replace("{$fileb$}", fb_content)
-        prompt = prompt.replace("{$cve_details$}", cve_details if cve_details else "")
+        # 根据工作模式选择不同的提示词模板
+        if work_mode == "discovery":
+            # 漏洞挖掘模式：使用 DISCOVERY_PROMPT
+            prompt = DISCOVERY_PROMPT.replace("{$vulnerability_type$}", vulnerability_type)
+            prompt = prompt.replace("{$cwe_id$}", vulnerability_type)
+            prompt = prompt.replace("{$scenario$}", scenario)
+            prompt = prompt.replace("{$property$}", property)
+            prompt = prompt.replace("{$filea$}", fa_content)
+            prompt = prompt.replace("{$fileb$}", fb_content)
+            # 在挖掘模式下，cve_details 实际上是 CWE 的描述信息
+            prompt = prompt.replace("{$result$}", "")  # 结果部分留空，由LLM填充
+        else:
+            # 漏洞复现模式：使用 BASE_PROMPT
+            prompt = BASE_PROMPT.replace("{$vulnerability_type$}", vulnerability_type)
+            prompt = prompt.replace("{$scenario$}", scenario)
+            prompt = prompt.replace("{$property$}", property)
+            prompt = prompt.replace("{$filea$}", fa_content)
+            prompt = prompt.replace("{$fileb$}", fb_content)
+            prompt = prompt.replace("{$cve_details$}", cve_details if cve_details else "")
         
         return prompt
         
-    def make_rag_prompt(self, fa_content, fb_content, cve_details=None, cwe=None, pre_func_context=None, post_func_context=None):
-        """生成带有RAG样例的提示词，包含函数调用链信息"""
+    def make_rag_prompt(self, fa_content, fb_content, cve_details=None, cwe=None, pre_func_context=None, post_func_context=None, work_mode: str = "reproduction"):
+        """生成带有RAG样例的提示词，包含函数调用链信息
+        
+        Args:
+            fa_content: 补丁前代码内容
+            fb_content: 补丁后代码内容
+            cve_details: CVE详情（漏洞复现模式）或CWE描述（漏洞挖掘模式）
+            cwe: CWE类型
+            pre_func_context: 补丁前函数上下文
+            post_func_context: 补丁后函数上下文
+            work_mode: 工作模式 - "reproduction"（漏洞复现）或 "discovery"（漏洞挖掘）
+        """
         # 设置默认值
         pre_func_context = pre_func_context or ""
         post_func_context = post_func_context or ""
@@ -911,9 +1011,17 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
     # method removed; logic now resides in agent.data_flow_utils
     
         
-    async def async_query2bot(self, fa, fb, cve_details=None, cwe=None) -> str:
-        """异步版本的query2bot函数"""
-        logger.info(f"开始分析 {os.path.basename(fa)} vs {os.path.basename(fb)}")
+    async def async_query2bot(self, fa, fb, cve_details=None, cwe=None, work_mode: str = "reproduction") -> str:
+        """异步版本的query2bot函数
+        
+        Args:
+            fa: 补丁前的伪C文件路径
+            fb: 补丁后的伪C文件路径
+            cve_details: CVE详情（漏洞复现模式）或CWE描述（漏洞挖掘模式）
+            cwe: CWE类型
+            work_mode: 工作模式 - "reproduction"（漏洞复现）或 "discovery"（漏洞挖掘）
+        """
+        logger.info(f"开始分析 {os.path.basename(fa)} vs {os.path.basename(fb)}, 工作模式: {work_mode}")
         
         # 检查缓存中是否已有结果
         cache_key = (os.path.basename(fa), os.path.basename(fb))
@@ -933,7 +1041,8 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             f"File: {os.path.basename(fa)}\n{a_content}",
             f"File: {os.path.basename(fb)}\n{b_content}",
             cve_details=cve_details,
-            cwe=cwe
+            cwe=cwe,
+            work_mode=work_mode
         )
 
         try:
@@ -999,11 +1108,12 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         
         if need_rag:
             logger.info(f"对 {os.path.basename(fa)} vs {os.path.basename(fb)} 进行二次判断")
-            # 进行RAG二次判断，传递二进制文件名
+            # 进行RAG二次判断，传递二进制文件名和工作模式
             rag_result = await self.async_rag_query2bot(
                 fa, fb, cve_details, cwe,
                 pre_binary_name=self.pre_binary_name,
-                post_binary_name=self.post_binary_name
+                post_binary_name=self.post_binary_name,
+                work_mode=work_mode
             )
             final_result = f"初次分析结果:\n{result}\n\nRAG二次分析结果:\n{rag_result}"
         else:
@@ -1013,7 +1123,7 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         self._task_cache[cache_key] = final_result
         return final_result
     
-    async def async_rag_query2bot(self, fa, fb, cve_details=None, cwe=None, pre_binary_name=None, post_binary_name=None) -> str:
+    async def async_rag_query2bot(self, fa, fb, cve_details=None, cwe=None, pre_binary_name=None, post_binary_name=None, work_mode: str = "reproduction") -> str:
         """异步版本的rag_query2bot函数，获取函数调用链信息并添加到提示词中
         
         Args:
@@ -1023,6 +1133,7 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             cwe: CWE信息
             pre_binary_name: 补丁前二进制文件名（如果提供则直接使用，不再推断）
             post_binary_name: 补丁后二进制文件名（如果提供则直接使用，不再推断）
+            work_mode: 工作模式 - "reproduction"（漏洞复现）或 "discovery"（漏洞挖掘）
         """
         # 读两个.c文件的内容
         try:
@@ -1129,7 +1240,8 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
             cve_details=cve_details,
             cwe=cwe,
             pre_func_context=pre_func_context,
-            post_func_context=post_func_context
+            post_func_context=post_func_context,
+            work_mode=work_mode
         )
 
         try:
@@ -1171,7 +1283,28 @@ async def main(chat_id: str,
          slice_before: int = DEFAULT_SLICE_BEFORE,
          slice_after: int = DEFAULT_SLICE_AFTER,
          danger_api_list: Optional[List[str]] = None,
-         full_func_line_threshold: int = 300):
+         full_func_line_threshold: int = 300,
+         work_mode: str = "reproduction"):
+    """
+    主函数：对比两个固件版本的二进制差异并分析漏洞
+    
+    Args:
+        chat_id: 会话ID
+        history_root: 历史记录根目录
+        binary_filename: 二进制文件名
+        post_binary_filename: 补丁后二进制文件名
+        pre_c: 补丁前伪C文件路径
+        post_c: 补丁后伪C文件路径
+        cve_details: CVE详情（漏洞复现模式）或CWE描述（漏洞挖掘模式）
+        cwe: CWE类型
+        send_message: 消息发送回调
+        include_call_chain_code: 是否包含调用链代码
+        slice_before: 切片前行数
+        slice_after: 切片后行数
+        danger_api_list: 危险API列表
+        full_func_line_threshold: 全函数行数阈值
+        work_mode: 工作模式 - "reproduction"（漏洞复现）或 "discovery"（漏洞挖掘）
+    """
     # ---------- 动态定位 ----------
     paths = locate_paths(chat_id, history_root, binary_filename)
     WORK_DIR     = Path(paths["WORK_DIR"])     
@@ -1239,7 +1372,7 @@ async def main(chat_id: str,
         post_func_path = os.path.join(FOLDER_B, f"{post_func}.c")
         
         if os.path.exists(pre_func_path) and os.path.exists(post_func_path):
-            tasks.append(r.async_query2bot(pre_func_path, post_func_path, cve_details, cwe))
+            tasks.append(r.async_query2bot(pre_func_path, post_func_path, cve_details, cwe, work_mode=work_mode))
             func_paths.append((pre_func_path, post_func_path))
         else:
             logger.warning(f"缺少文件 {pre_func_path} 或 {post_func_path}，跳过")

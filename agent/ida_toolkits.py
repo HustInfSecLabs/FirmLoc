@@ -221,6 +221,93 @@ class IdaToolkit(BaseToolkit):
             return {}
 
 
+    async def get_string_context(self, binary_path: str, strings: list, max_xrefs: int = 10,
+                            context_url: str = "http://localhost:5000/string_context") -> dict:
+        """获取可疑字符串的代码上下文（交叉引用分析）
+        
+        通过IDA分析字符串在二进制中的使用位置，获取反编译后的函数代码作为上下文。
+        
+        Args:
+            binary_path: 二进制文件路径或IDB路径
+            strings: 可疑字符串列表，每个元素是字典，包含:
+                - value: 字符串值
+                - address: 字符串地址（可选，如 "0x12345"）
+                - vaddr: 虚拟地址（可选）
+            max_xrefs: 每个字符串最大交叉引用数量
+            context_url: IDA服务端点
+            
+        Returns:
+            dict: 包含字符串上下文分析结果
+                {
+                    "status": "success",
+                    "binary_path": "...",
+                    "idb_path": "...",
+                    "results": [
+                        {
+                            "string_value": "admin",
+                            "address": "0x12345",
+                            "xref_count": 3,
+                            "functions": [
+                                {
+                                    "name": "check_login",
+                                    "address": "0x4000",
+                                    "xref_address": "0x4050",
+                                    "decompiled_code": "..."
+                                }
+                            ]
+                        }
+                    ]
+                }
+        """
+        if not strings:
+            logger.warning("No strings provided for context analysis")
+            return {"status": "error", "message": "No strings provided"}
+        
+        # 提取文件名，服务端会用它在当天目录下查找已分析的IDB
+        import os as _os
+        binary_name = _os.path.basename(binary_path)
+        
+        # 准备请求数据
+        request_data = {
+            "binary_path": binary_path,
+            "binary_name": binary_name,  # 明确传递文件名
+            "strings": strings,
+            "max_xrefs": max_xrefs
+        }
+        
+        def _send_request():
+            logger.info(f"Sending string context request: {len(strings)} strings for {binary_name} to {context_url}")
+            return requests.post(
+                context_url,
+                json=request_data,
+                timeout=3600  # 1 hour timeout
+            )
+        
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, _send_request)
+        except requests.exceptions.Timeout:
+            logger.error("String context request timed out")
+            return {"status": "error", "message": "Request timed out"}
+        except Exception as e:
+            logger.error(f"String context request failed: {e}")
+            return {"status": "error", "message": str(e)}
+        
+        if response.status_code != 200:
+            logger.error(f"String context service failed: HTTP {response.status_code}")
+            try:
+                error_msg = response.json().get("message", response.text)
+            except:
+                error_msg = response.text
+            return {"status": "error", "message": error_msg, "http_status": response.status_code}
+        
+        try:
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to parse string context response: {e}")
+            return {"status": "error", "message": f"Failed to parse response: {e}"}
+
+
     def get_tools(self) -> List[FunctionTool]:
         r"""Returns a list of FunctionTool objects representing the functions in the toolkit.
 
@@ -231,7 +318,8 @@ class IdaToolkit(BaseToolkit):
             FunctionTool(self.get_screenshots),
             FunctionTool(self.get_binexport),
             FunctionTool(self.get_pseudo_c),
-            FunctionTool(self.extract_strings)
+            FunctionTool(self.extract_strings),
+            FunctionTool(self.get_string_context)
         ]
 
 if __name__ == "__main__":

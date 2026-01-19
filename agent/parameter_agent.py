@@ -1,5 +1,6 @@
 import json
 import re
+from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from agent.base import Agent
@@ -7,8 +8,119 @@ from model.base import ChatModel
 from log import logger
 
 
-EXTRACTION_PROMPT = (
+class WorkMode(str, Enum):
+    """工作模式枚举"""
+    REPRODUCTION = "reproduction"  # 漏洞复现模式（需要CVE ID）
+    DISCOVERY = "discovery"        # 漏洞挖掘模式（需要CWE类型）
+
+
+# CWE类型到敏感二进制的映射，用于漏洞挖掘模式下的启发式筛选
+CWE_SENSITIVE_BINARIES = {
+    "CWE-78": ["httpd", "cgi", "mini_httpd", "goahead", "boa", "uhttpd", "lighttpd", "busybox", "sh", "ash", "system"],
+    "CWE-77": ["httpd", "cgi", "mini_httpd", "goahead", "boa", "uhttpd", "lighttpd", "busybox", "sh", "ash"],
+    "CWE-120": ["httpd", "upnpd", "samba", "ftpd", "telnetd", "sshd", "dhcpd", "dnsd"],
+    "CWE-121": ["httpd", "upnpd", "samba", "ftpd", "telnetd", "sshd", "dhcpd", "dnsd"],
+    "CWE-122": ["httpd", "upnpd", "samba", "ftpd", "telnetd", "sshd", "dhcpd", "dnsd"],
+    "CWE-125": ["httpd", "upnpd", "samba", "parser", "decoder"],
+    "CWE-787": ["httpd", "upnpd", "samba", "ftpd", "telnetd", "sshd", "parser"],
+    "CWE-22": ["httpd", "ftpd", "samba", "mini_httpd", "goahead", "boa", "uhttpd", "file"],
+    "CWE-23": ["httpd", "ftpd", "samba", "mini_httpd", "goahead", "boa", "uhttpd", "file"],
+    "CWE-416": ["httpd", "upnpd", "samba", "malloc", "free"],
+    "CWE-415": ["httpd", "upnpd", "samba", "malloc", "free"],
+    "CWE-476": ["httpd", "upnpd", "samba", "parser"],
+    "CWE-134": ["httpd", "cgi", "syslog", "printf", "format"],
+    "CWE-190": ["httpd", "parser", "decoder", "atoi", "strtol"],
+    "CWE-191": ["httpd", "parser", "decoder", "atoi", "strtol"],
+    "CWE-798": ["httpd", "login", "auth", "password", "admin", "config"],
+    "CWE-259": ["httpd", "login", "auth", "password", "admin", "config"],
+    "CWE-287": ["httpd", "login", "auth", "session", "token", "cookie"],
+    "CWE-306": ["httpd", "cgi", "api", "admin"],
+    "CWE-352": ["httpd", "cgi", "web", "form"],
+    "CWE-434": ["httpd", "upload", "cgi", "file"],
+    "CWE-502": ["httpd", "deserialize", "json", "xml", "pickle"],
+    "CWE-611": ["xml", "parser", "libxml", "expat"],
+    "CWE-918": ["httpd", "curl", "wget", "http", "request"],
+}
+
+# CWE类型描述映射
+CWE_DESCRIPTIONS = {
+    "CWE-78": "OS Command Injection - 操作系统命令注入漏洞",
+    "CWE-77": "Command Injection - 命令注入漏洞",
+    "CWE-120": "Buffer Copy without Checking Size of Input - 缓冲区溢出漏洞",
+    "CWE-121": "Stack-based Buffer Overflow - 栈缓冲区溢出漏洞",
+    "CWE-122": "Heap-based Buffer Overflow - 堆缓冲区溢出漏洞",
+    "CWE-125": "Out-of-bounds Read - 越界读取漏洞",
+    "CWE-787": "Out-of-bounds Write - 越界写入漏洞",
+    "CWE-22": "Path Traversal - 路径遍历漏洞",
+    "CWE-23": "Relative Path Traversal - 相对路径遍历漏洞",
+    "CWE-416": "Use After Free - 释放后使用漏洞",
+    "CWE-415": "Double Free - 双重释放漏洞",
+    "CWE-476": "NULL Pointer Dereference - 空指针解引用漏洞",
+    "CWE-134": "Use of Externally-Controlled Format String - 格式化字符串漏洞",
+    "CWE-190": "Integer Overflow - 整数溢出漏洞",
+    "CWE-191": "Integer Underflow - 整数下溢漏洞",
+    "CWE-798": "Use of Hard-coded Credentials - 硬编码凭证漏洞",
+    "CWE-259": "Use of Hard-coded Password - 硬编码密码漏洞",
+    "CWE-287": "Improper Authentication - 不当认证漏洞",
+    "CWE-306": "Missing Authentication for Critical Function - 关键功能缺少认证",
+    "CWE-352": "Cross-Site Request Forgery - CSRF漏洞",
+    "CWE-434": "Unrestricted Upload of File with Dangerous Type - 危险文件上传漏洞",
+    "CWE-502": "Deserialization of Untrusted Data - 不可信数据反序列化漏洞",
+    "CWE-611": "XML External Entity Reference - XXE漏洞",
+    "CWE-918": "Server-Side Request Forgery - SSRF漏洞",
+}
+
+
+EXTRACTION_PROMPT_DISCOVERY = (
     "你是一个专业的安全分析助手，擅长从用户的自然语言需求中提取结构化参数。\n"
+    "当前为【漏洞挖掘模式】，用户希望基于CWE漏洞类型在固件中发现潜在漏洞。\n\n"
+    "请从用户输入中提取以下关键字段：\n"
+    "- cwe_id：形如 CWE-XXX 的漏洞类型编号（如 CWE-78、CWE-120）。\n"
+    "  也可以从漏洞类型描述中推断，例如：\n"
+    "  * '命令注入' -> CWE-78\n"
+    "  * '缓冲区溢出' -> CWE-120\n"
+    "  * '栈溢出' -> CWE-121\n"
+    "  * '堆溢出' -> CWE-122\n"
+    "  * '路径遍历' -> CWE-22\n"
+    "  * '格式化字符串' -> CWE-134\n"
+    "  * '整数溢出' -> CWE-190\n"
+    "  * '越界写入' -> CWE-787\n"
+    "  * '越界读取' -> CWE-125\n"
+    "  * 'UAF/释放后使用' -> CWE-416\n"
+    "  如果用户没有明确指定，请返回空字符串。\n"
+    "- cve_id：形如 CVE-YYYY-NNNN 的编号（可选，如果用户提供则提取）。\n"
+    "- binary_filename：需要分析的目标固件或二进制文件名称。可以是：\n"
+    "  * 完整的文件名（如 firmware.bin、httpd）\n"
+    "  * 设备型号（如 Netgear R9000、DIR-878）\n"
+    "  * 产品名称（如 DSL-AC3100）\n"
+    "  * 厂商名称（如 Netgear、D-Link、TP-Link）\n"
+    "  只要用户明确指出要分析的目标，都应提取到此字段。\n"
+    "- vendor：设备厂商名称（如 Netgear、D-Link、TP-Link、ASUS、Tenda等），用于搜索历史CVE参考信息。\n\n"
+    "严格按照下述 JSON 模板输出（禁止输出额外解释或Markdown标记）：\n"
+    "{\n"
+    "  \"cwe_id\": \"\",           // 字符串，CWE编号，若缺失请保持为空字符串\n"
+    "  \"cve_id\": \"\",           // 字符串，CVE编号（可选），若缺失请保持为空字符串\n"
+    "  \"binary_filename\": \"\",  // 字符串，若缺失请保持为空字符串\n"
+    "  \"vendor\": \"\",           // 字符串，设备厂商名称，若缺失请保持为空字符串\n"
+    "  \"confidence\": {\n"
+    "    \"cwe_id\": \"high|medium|low|none\",\n"
+    "    \"cve_id\": \"high|medium|low|none\",\n"
+    "    \"binary_filename\": \"high|medium|low|none\",\n"
+    "    \"vendor\": \"high|medium|low|none\"\n"
+    "  },\n"
+    "  \"notes\": \"\",            // 可选补充说明，可为空字符串\n"
+    "  \"missing_fields\": []      // 列表: 例如 [\"cwe_id\"] 表示缺失字段\n"
+    "}\n\n"
+    "请确保只返回合法的 JSON 文本。用户输入如下：\n"
+    "<<<\n"
+    "{user_input}\n"
+    ">>>\n"
+)
+
+
+EXTRACTION_PROMPT_REPRODUCTION = (
+    "你是一个专业的安全分析助手，擅长从用户的自然语言需求中提取结构化参数。\n"
+    "当前为【漏洞复现模式】，用户希望复现已知的CVE漏洞。\n\n"
     "请从用户输入中提取以下关键字段：\n"
     "- cve_id：形如 CVE-YYYY-NNNN 的编号（区分大小写）。如果没有明确的CVE编号，请返回空字符串。\n"
     "- binary_filename：需要分析的目标固件或二进制文件名称。可以是：\n"
@@ -25,7 +137,7 @@ EXTRACTION_PROMPT = (
     "    \"binary_filename\": \"high|medium|low|none\"\n"
     "  },\n"
     "  \"notes\": \"\",            // 可选补充说明，可为空字符串\n"
-    "  \"missing_fields\": []      // 列表: 例如 [\\\"cve_id\\\"] 表示缺失字段\n"
+    "  \"missing_fields\": []      // 列表: 例如 [\"cve_id\"] 表示缺失字段\n"
     "}\n\n"
     "请确保只返回合法的 JSON 文本。用户输入如下：\n"
     "<<<\n"
@@ -35,17 +147,32 @@ EXTRACTION_PROMPT = (
 
 
 class ParameterAgent(Agent):
-    """调用大模型抽取漏洞复现所需的关键参数。"""
+    """调用大模型抽取漏洞分析所需的关键参数。
+    
+    支持两种工作模式：
+    - REPRODUCTION: 漏洞复现模式，需要 CVE ID + binary_filename
+    - DISCOVERY: 漏洞挖掘模式，需要 CWE ID + binary_filename
+    """
 
-    REQUIRED_FIELDS = ("cve_id", "binary_filename")
+    # 不同模式下的必填字段
+    REQUIRED_FIELDS_REPRODUCTION = ("cve_id", "binary_filename")
+    REQUIRED_FIELDS_DISCOVERY = ("cwe_id", "binary_filename")
 
-    def __init__(self, chat_model: ChatModel) -> None:
+    def __init__(self, chat_model: ChatModel, work_mode: WorkMode = WorkMode.DISCOVERY) -> None:
         super().__init__(chat_model)
+        self.work_mode = work_mode
+
+    @property
+    def required_fields(self) -> Tuple[str, ...]:
+        """根据工作模式返回必填字段"""
+        if self.work_mode == WorkMode.REPRODUCTION:
+            return self.REQUIRED_FIELDS_REPRODUCTION
+        return self.REQUIRED_FIELDS_DISCOVERY
 
     def process(self, query: str) -> Dict[str, Any]:  # type: ignore[override]
         """向大模型请求解析结果，并结合启发式兜底逻辑。"""
         query = (query or "").strip()
-        logger.info("ParameterAgent processing query: %s", query)
+        logger.info("ParameterAgent processing query (mode=%s): %s", self.work_mode.value, query)
         raw_response: Optional[str] = None
         errors: List[str] = []
         llm_result: Dict[str, Any] = {}
@@ -53,7 +180,11 @@ class ParameterAgent(Agent):
         if not query:
             errors.append("empty_query")
         else:
-            prompt = EXTRACTION_PROMPT.replace("{user_input}", query)
+            # 根据工作模式选择不同的提取Prompt
+            if self.work_mode == WorkMode.DISCOVERY:
+                prompt = EXTRACTION_PROMPT_DISCOVERY.replace("{user_input}", query)
+            else:
+                prompt = EXTRACTION_PROMPT_REPRODUCTION.replace("{user_input}", query)
             try:
                 raw_response = self.chat_model.chat(prompt)
                 llm_result = self._parse_response(raw_response)
@@ -65,12 +196,20 @@ class ParameterAgent(Agent):
         normalized = self._normalize_result(llm_result)
         heuristic = self._heuristic_extract(query)
 
-        for field in self.REQUIRED_FIELDS:
+        # 合并启发式提取结果
+        for field in self.required_fields:
+            if not normalized.get(field) and heuristic.get(field):
+                normalized[field] = heuristic[field]
+        
+        # 额外字段也尝试合并（如 vendor）
+        for field in ["vendor", "cve_id", "cwe_id"]:
             if not normalized.get(field) and heuristic.get(field):
                 normalized[field] = heuristic[field]
 
-        missing = [field for field in self.REQUIRED_FIELDS if not normalized.get(field)]
+        missing = [field for field in self.required_fields if not normalized.get(field)]
         normalized["missing_fields"] = missing
+        normalized["work_mode"] = self.work_mode.value
+        
         if errors:
             normalized.setdefault("errors", []).extend(errors)
         if raw_response is not None:
@@ -127,20 +266,60 @@ class ParameterAgent(Agent):
     def _normalize_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         normalized = {
             "cve_id": (result or {}).get("cve_id", "").strip() if result else "",
+            "cwe_id": (result or {}).get("cwe_id", "").strip() if result else "",
             "binary_filename": (result or {}).get("binary_filename", "").strip() if result else "",
+            "vendor": (result or {}).get("vendor", "").strip() if result else "",
             "confidence": (result or {}).get("confidence", {}),
             "notes": (result or {}).get("notes", ""),
             "missing_fields": (result or {}).get("missing_fields", []),
         }
+        # 标准化 CWE ID 格式
+        if normalized["cwe_id"]:
+            normalized["cwe_id"] = self._normalize_cwe_id(normalized["cwe_id"])
         return normalized
 
-    def _heuristic_extract(self, query: str) -> Dict[str, Optional[str]]:
-        if not query:
-            return {"cve_id": None, "binary_filename": None}
+    def _normalize_cwe_id(self, cwe_id: str) -> str:
+        """标准化CWE ID格式为 CWE-XXX"""
+        cwe_id = cwe_id.strip().upper()
+        # 如果只是数字，添加CWE-前缀
+        if cwe_id.isdigit():
+            return f"CWE-{cwe_id}"
+        # 如果已经是CWE-XXX格式
+        match = re.match(r"CWE[- ]?(\d+)", cwe_id, re.IGNORECASE)
+        if match:
+            return f"CWE-{match.group(1)}"
+        return cwe_id
 
+    def _heuristic_extract(self, query: str) -> Dict[str, Optional[str]]:
+        """启发式提取参数"""
+        if not query:
+            return {"cve_id": None, "cwe_id": None, "binary_filename": None, "vendor": None}
+
+        # 提取CVE ID
         cve_match = re.search(r"CVE-\d{4}-\d{4,7}", query, re.IGNORECASE)
         cve_id = cve_match.group(0).upper() if cve_match else None
 
+        # 提取CWE ID
+        cwe_match = re.search(r"CWE[- ]?(\d+)", query, re.IGNORECASE)
+        cwe_id = f"CWE-{cwe_match.group(1)}" if cwe_match else None
+        
+        # 如果没有明确的CWE ID，尝试从漏洞类型描述推断
+        if not cwe_id:
+            cwe_id = self._infer_cwe_from_description(query)
+
+        # 提取厂商名称
+        vendor = None
+        vendor_patterns = [
+            r"(?:厂商|vendor|manufacturer)[:\s：]*([A-Za-z][\w\-]+)",
+            r"\b(Netgear|D-Link|TP-Link|ASUS|Tenda|Linksys|Cisco|Huawei|ZTE|Xiaomi|Ruijie|H3C|TOTOLINK|TRENDnet|Buffalo|Belkin|Synology|QNAP|Ubiquiti)\b",
+        ]
+        for pattern in vendor_patterns:
+            match = re.search(pattern, query, re.IGNORECASE)
+            if match:
+                vendor = match.group(1).strip()
+                break
+
+        # 提取二进制文件名
         binary_name = None
         heuristics: List[Tuple[str, str]] = [
             (r"binary\s*(?:name|filename|file)?\s*(?:is|=|:)?\s*([\w .\-]+)", "binary keyword"),
@@ -159,14 +338,76 @@ class ParameterAgent(Agent):
                     logger.debug("Heuristic binary name match (%s): %s", source, candidate)
                     break
 
-        return {"cve_id": cve_id, "binary_filename": binary_name}
+        return {"cve_id": cve_id, "cwe_id": cwe_id, "binary_filename": binary_name, "vendor": vendor}
+
+    def _infer_cwe_from_description(self, query: str) -> Optional[str]:
+        """从漏洞类型描述推断CWE ID"""
+        query_lower = query.lower()
+        
+        # 漏洞类型描述到CWE的映射
+        description_to_cwe = [
+            # 命令注入
+            (["命令注入", "command injection", "os command", "系统命令", "shell注入"], "CWE-78"),
+            # 缓冲区溢出
+            (["缓冲区溢出", "buffer overflow", "栈溢出", "stack overflow", "stack-based"], "CWE-121"),
+            (["堆溢出", "heap overflow", "heap-based"], "CWE-122"),
+            (["缓冲区", "buffer"], "CWE-120"),
+            # 越界
+            (["越界写", "out-of-bounds write", "oob write"], "CWE-787"),
+            (["越界读", "out-of-bounds read", "oob read"], "CWE-125"),
+            # 路径遍历
+            (["路径遍历", "path traversal", "目录遍历", "directory traversal", "../"], "CWE-22"),
+            # 格式化字符串
+            (["格式化字符串", "format string"], "CWE-134"),
+            # 整数溢出
+            (["整数溢出", "integer overflow"], "CWE-190"),
+            (["整数下溢", "integer underflow"], "CWE-191"),
+            # UAF
+            (["use after free", "uaf", "释放后使用"], "CWE-416"),
+            (["double free", "双重释放"], "CWE-415"),
+            # 空指针
+            (["空指针", "null pointer", "nullptr"], "CWE-476"),
+            # 认证相关
+            (["硬编码", "hard-coded", "hardcoded", "内置密码"], "CWE-798"),
+            (["认证绕过", "authentication bypass", "未授权"], "CWE-287"),
+            # 注入
+            (["sql注入", "sql injection"], "CWE-89"),
+            (["xss", "跨站脚本"], "CWE-79"),
+            # SSRF/XXE
+            (["ssrf", "服务端请求伪造"], "CWE-918"),
+            (["xxe", "xml外部实体"], "CWE-611"),
+        ]
+        
+        for keywords, cwe in description_to_cwe:
+            for keyword in keywords:
+                if keyword in query_lower:
+                    logger.debug("Inferred CWE from description: %s -> %s", keyword, cwe)
+                    return cwe
+        
+        return None
 
 
 class ParameterCollector:
-    """在系统运行前与用户交互，收集必要的参数。"""
+    """在系统运行前与用户交互，收集必要的参数。
+    
+    支持两种工作模式：
+    - REPRODUCTION: 漏洞复现模式
+    - DISCOVERY: 漏洞挖掘模式
+    """
 
-    FIELD_PROMPTS = {
+    FIELD_PROMPTS_REPRODUCTION = {
         "cve_id": "未识别到明确的 CVE ID。请提供形如 CVE-2024-12345 的编号，便于后续检索。",
+        "binary_filename": "未识别到目标固件/二进制名称。请说明需要分析的设备或二进制文件名称。",
+    }
+    
+    FIELD_PROMPTS_DISCOVERY = {
+        "cwe_id": (
+            "未识别到明确的 CWE 类型。请提供漏洞类型，例如：\n"
+            "- CWE-78（命令注入）\n"
+            "- CWE-120（缓冲区溢出）\n"
+            "- CWE-22（路径遍历）\n"
+            "- 或直接描述漏洞类型，如'命令注入'、'栈溢出'等"
+        ),
         "binary_filename": "未识别到目标固件/二进制名称。请说明需要分析的设备或二进制文件名称。",
     }
 
@@ -175,12 +416,29 @@ class ParameterCollector:
         chat_id: str,
         send_callback: Callable[[Dict[str, Any]], Awaitable[None]],
         chat_model: ChatModel,
+        work_mode: WorkMode = WorkMode.DISCOVERY,
         parameter_agent: Optional[ParameterAgent] = None
     ) -> None:
         self.chat_id = str(chat_id)
-        self.agent = parameter_agent or ParameterAgent(chat_model)
+        self.work_mode = work_mode
+        self.agent = parameter_agent or ParameterAgent(chat_model, work_mode=work_mode)
         self._send_callback = send_callback
-        self.parameters: Dict[str, Optional[str]] = {field: None for field in ParameterAgent.REQUIRED_FIELDS}
+        
+        # 根据工作模式初始化参数和提示词
+        self.field_prompts = (
+            self.FIELD_PROMPTS_REPRODUCTION if work_mode == WorkMode.REPRODUCTION 
+            else self.FIELD_PROMPTS_DISCOVERY
+        )
+        self.parameters: Dict[str, Optional[str]] = {
+            field: None for field in self.agent.required_fields
+        }
+        # 额外存储可选参数（如vendor用于漏洞挖掘时搜索历史CVE）
+        self.optional_parameters: Dict[str, Optional[str]] = {
+            "vendor": None,
+            "cve_id": None if work_mode == WorkMode.DISCOVERY else None,
+            "cwe_id": None if work_mode == WorkMode.REPRODUCTION else None,
+        }
+        
         self.prompted_fields: set[str] = set()
         self.initial_message_sent = False
         self.completed = False
@@ -197,16 +455,25 @@ class ParameterCollector:
             if self.original_query is None:
                 self.original_query = message
         if not self.initial_message_sent:
-            await self._send("参数收集智能体已启动，正在解析您的需求。", message_type="header1")
+            mode_desc = "漏洞挖掘" if self.work_mode == WorkMode.DISCOVERY else "漏洞复现"
+            await self._send(f"参数收集智能体已启动（{mode_desc}模式），正在解析您的需求。", message_type="header1")
             self.initial_message_sent = True
 
         result = self.agent.process(message)
-        for field in ParameterAgent.REQUIRED_FIELDS:
+        
+        # 更新必填参数
+        for field in self.agent.required_fields:
             value = result.get(field)
             if isinstance(value, str) and value.strip():
                 self.parameters[field] = value.strip()
+        
+        # 更新可选参数
+        for field in self.optional_parameters:
+            value = result.get(field)
+            if isinstance(value, str) and value.strip():
+                self.optional_parameters[field] = value.strip()
 
-        missing = [field for field in ParameterAgent.REQUIRED_FIELDS if not self.parameters.get(field)]
+        missing = [field for field in self.agent.required_fields if not self.parameters.get(field)]
 
         if result.get("errors"):
             await self._send("参数解析时出现异常，已启用兜底策略，请确认后继续。")
@@ -215,7 +482,7 @@ class ParameterCollector:
             prompts = []
             for field in missing:
                 if field not in self.prompted_fields:
-                    prompts.append(self.FIELD_PROMPTS.get(field, f"请提供 {field}"))
+                    prompts.append(self.field_prompts.get(field, f"请提供 {field}"))
                     self.prompted_fields.add(field)
             if prompts:
                 await self._send("\n".join(prompts))
@@ -223,26 +490,40 @@ class ParameterCollector:
                 await self._send("仍然缺少必要信息，请补充上述参数后再次发送。")
             return {
                 "ready": False,
-                "parameters": self.parameters.copy(),
+                "parameters": {**self.parameters, **self.optional_parameters},
                 "missing": missing,
-                "query": "\n".join(self.history)
+                "query": "\n".join(self.history),
+                "work_mode": self.work_mode.value
             }
 
         if not self.completed:
-            summary = (
-                "参数收集完成。\n"
-                f"- CVE ID: {self.parameters['cve_id']}\n"
-                f"- 目标二进制/固件: {self.parameters['binary_filename']}\n"
-                "系统将继续执行后续分析。"
-            )
+            if self.work_mode == WorkMode.DISCOVERY:
+                cwe_desc = CWE_DESCRIPTIONS.get(self.parameters.get('cwe_id', ''), '')
+                summary = (
+                    "参数收集完成（漏洞挖掘模式）。\n"
+                    f"- CWE 类型: {self.parameters.get('cwe_id', 'N/A')}"
+                    f"{' - ' + cwe_desc if cwe_desc else ''}\n"
+                    f"- 目标二进制/固件: {self.parameters.get('binary_filename', 'N/A')}\n"
+                )
+                if self.optional_parameters.get('vendor'):
+                    summary += f"- 厂商: {self.optional_parameters['vendor']}\n"
+                summary += "系统将继续执行漏洞挖掘分析。"
+            else:
+                summary = (
+                    "参数收集完成（漏洞复现模式）。\n"
+                    f"- CVE ID: {self.parameters.get('cve_id', 'N/A')}\n"
+                    f"- 目标二进制/固件: {self.parameters.get('binary_filename', 'N/A')}\n"
+                    "系统将继续执行漏洞复现分析。"
+                )
             await self._send(summary, message_type="header2")
             self.completed = True
 
         return {
             "ready": True,
-            "parameters": self.parameters.copy(),
+            "parameters": {**self.parameters, **self.optional_parameters},
             "missing": [],
-            "query": "\n".join(self.history)
+            "query": "\n".join(self.history),
+            "work_mode": self.work_mode.value
         }
 
     async def _send(self, content: str, message_type: str = "message") -> None:

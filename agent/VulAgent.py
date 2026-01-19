@@ -10,6 +10,7 @@ from typing import Optional, Set, List
 
 from model import ChatModel, AgentModel
 from agent import UserAgent, PlannerAgent, ida
+from agent.parameter_agent import WorkMode, CWE_DESCRIPTIONS
 from state import ProgressEnum
 from agent.bindiff_agent import BindiffAgent
 from agent.ida_toolkits import IdaToolkit
@@ -37,7 +38,10 @@ class VulnAgent:
         user_input: str,
         websocket: WebSocket,
         cve_id: Optional[str] = None,
+        cwe_id: Optional[str] = None,
         binary_filename: Optional[str] = None,
+        vendor: Optional[str] = None,
+        work_mode: str = WorkMode.DISCOVERY.value,
         user_model: ChatModel = AgentModel("DeepSeek"),
         planner_model: ChatModel = AgentModel("DeepSeek"),
         config_dir: str = './history',
@@ -50,7 +54,12 @@ class VulnAgent:
         self.user_input = user_input
         self.websocket = websocket
         self.cve_id = cve_id
+        self.cwe_id = cwe_id
         self.binary_filename = binary_filename
+        self.vendor = vendor
+        
+        # 工作模式：漏洞复现 or 漏洞挖掘
+        self.work_mode = WorkMode(work_mode) if isinstance(work_mode, str) else work_mode
         
         self.is_last = False
         self.agent = None
@@ -179,16 +188,85 @@ class VulnAgent:
         }]
 
     def _load_cve_details(self, search_result_path: str) -> tuple[str, str]:
+        """从搜索结果中加载CVE详情和CWE类型"""
         try:
             with open(search_result_path, 'r', encoding='utf-8') as f:
                 content = json.load(f)
-            cve = content['vulnerabilities'][0]['cve']
-            details = json.dumps(cve['descriptions'][0]["value"])
-            cwe = json.dumps(cve['weaknesses'][0]["description"][0]['value'])
+            
+            vulnerabilities = content.get('vulnerabilities', [])
+            if not vulnerabilities:
+                logger.warning("搜索结果中没有CVE记录")
+                return "", ""
+            
+            cve = vulnerabilities[0].get('cve', {})
+            
+            # 获取CVE描述
+            descriptions = cve.get('descriptions', [])
+            details = ""
+            for desc in descriptions:
+                if desc.get("lang") == "en":
+                    details = desc.get("value", "")
+                    break
+            if not details and descriptions:
+                details = descriptions[0].get("value", "")
+            
+            # 获取CWE类型
+            cwe = ""
+            weaknesses = cve.get('weaknesses', [])
+            for weakness in weaknesses:
+                for desc in weakness.get("description", []):
+                    if desc.get("value", "").startswith("CWE-"):
+                        cwe = desc.get("value")
+                        break
+                if cwe:
+                    break
+            
             return details, cwe
         except (FileNotFoundError, KeyError, json.JSONDecodeError, IndexError) as exc:
             logger.warning("解析 CVE 详情失败: %s", exc)
             return "", ""
+    
+    def _load_discovery_context(self, search_result_path: str) -> dict:
+        """从搜索结果中加载漏洞挖掘上下文（历史CVE参考）"""
+        try:
+            with open(search_result_path, 'r', encoding='utf-8') as f:
+                content = json.load(f)
+            
+            vulnerabilities = content.get('vulnerabilities', [])
+            reference_cves = []
+            
+            for vuln in vulnerabilities[:5]:  # 最多取5个作为参考
+                cve = vuln.get('cve', {})
+                cve_id = cve.get('id', '')
+                
+                # 获取描述
+                descriptions = cve.get('descriptions', [])
+                desc_text = ""
+                for desc in descriptions:
+                    if desc.get("lang") == "en":
+                        desc_text = desc.get("value", "")[:200]
+                        break
+                
+                if cve_id:
+                    reference_cves.append({
+                        "cve_id": cve_id,
+                        "description": desc_text
+                    })
+            
+            return {
+                "reference_cves": reference_cves,
+                "total_found": content.get('totalResults', 0),
+                "search_info": content.get('search_info', {})
+            }
+        except Exception as exc:
+            logger.warning("加载漏洞挖掘上下文失败: %s", exc)
+            return {"reference_cves": [], "total_found": 0}
+    
+    def _get_cwe_description(self, cwe_id: str) -> str:
+        """获取CWE类型的描述"""
+        if not cwe_id:
+            return ""
+        return CWE_DESCRIPTIONS.get(cwe_id.upper(), f"Vulnerability type: {cwe_id}")
 
     def on_status_update(self, command=None, tool=None, tool_status=None, tool_result=None):
         if command is not None:
@@ -240,12 +318,22 @@ class VulnAgent:
         :param query: 用户查询内容
         :return: 聊天响应
         """
-
-        if not self.cve_id or not self.binary_filename:
-            error_msg = "缺少CVE编号或目标二进制文件名称，无法继续执行分析。"
-            await self.send_message(error_msg, message_type="message")
-            logger.error(error_msg)
-            return error_msg
+        
+        # 根据工作模式检查必要参数
+        if self.work_mode == WorkMode.REPRODUCTION:
+            # 漏洞复现模式：需要CVE ID
+            if not self.cve_id or not self.binary_filename:
+                error_msg = "漏洞复现模式需要提供CVE编号和目标二进制文件名称。"
+                await self.send_message(error_msg, message_type="message")
+                logger.error(error_msg)
+                return error_msg
+        else:
+            # 漏洞挖掘模式：需要CWE ID
+            if not self.cwe_id or not self.binary_filename:
+                error_msg = "漏洞挖掘模式需要提供CWE类型和目标二进制文件名称。"
+                await self.send_message(error_msg, message_type="message")
+                logger.error(error_msg)
+                return error_msg
 
         resolved_mode = self._determine_analysis_mode()
         files = self.files
@@ -296,28 +384,79 @@ class VulnAgent:
         self.agent = "Intelligence Agent"
         self.tool = None
         self.state = ProgressEnum.RUNNING
-        await self.send_message("情报收集智能体收集CVE相关信息",
-                                 message_type="header1",
-                                 agent=self.agent)
-        search_result = self.online_search_agent.process(task_id=self.chat_id, cve_id=self.cve_id)
-        logger.info("Online search result: %s", search_result)
+        
+        # 根据工作模式执行不同的情报收集策略
+        cve_details = ""
+        cwe = self.cwe_id or ""
+        reference_cves = None
+        discovery_context = {}
+        
+        if self.work_mode == WorkMode.REPRODUCTION:
+            # 漏洞复现模式：搜索特定CVE
+            await self.send_message("情报收集智能体收集CVE相关信息",
+                                     message_type="header1",
+                                     agent=self.agent)
+            search_result = self.online_search_agent.process(
+                task_id=self.chat_id, 
+                cve_id=self.cve_id,
+                work_mode="reproduction"
+            )
+            logger.info("Online search result: %s", search_result)
+            
+            if search_result.get('status') == 'success':
+                with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
+                    tool_content = [{"type": "text", "content": f.read()}]
+                    await self.send_message("调用在线搜索API访问https://services.nvd.nist.gov",
+                                            message_type="command",
+                                            tool_type="graphics",
+                                            tool_content=tool_content,
+                                            agent=self.agent,
+                                            tool="Online Search",
+                                            tool_status="running")
+                cve_details, cwe = self._load_cve_details(search_result['search_result_path'])
+        else:
+            # 漏洞挖掘模式：搜索历史同类型CVE作为参考
+            cwe_desc = self._get_cwe_description(self.cwe_id)
+            await self.send_message(f"情报收集智能体搜索历史{self.cwe_id}类型CVE作为参考\n类型描述: {cwe_desc}",
+                                     message_type="header1",
+                                     agent=self.agent)
+            search_result = self.online_search_agent.process(
+                task_id=self.chat_id,
+                cwe_id=self.cwe_id,
+                vendor=self.vendor,
+                model=self.binary_filename,
+                work_mode="discovery"
+            )
+            logger.info("Online search result (discovery mode): %s", search_result)
+            
+            if search_result.get('status') == 'success':
+                with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    tool_content = [{"type": "text", "content": content}]
+                    await self.send_message(
+                        f"搜索到 {search_result.get('total_cves', 0)} 个相关历史CVE作为参考",
+                        message_type="command",
+                        tool_type="graphics",
+                        tool_content=tool_content,
+                        agent=self.agent,
+                        tool="Online Search",
+                        tool_status="running"
+                    )
+                discovery_context = self._load_discovery_context(search_result['search_result_path'])
+                reference_cves = content
+                # 使用CWE描述作为cve_details的替代
+                cve_details = f"{self.cwe_id}: {cwe_desc}"
+                cwe = self.cwe_id
+            else:
+                # 搜索失败也继续，使用CWE描述
+                cve_details = f"{self.cwe_id}: {cwe_desc}"
+                cwe = self.cwe_id
+                await self.send_message(
+                    f"历史CVE搜索未找到结果，将使用CWE类型特征进行漏洞挖掘",
+                    message_type="message",
+                    agent=self.agent
+                )
 
-        with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
-            tool_content = [
-                {
-                    "type": "text",
-                    "content": f"{f.read()}"
-                }
-            ]
-            await self.send_message("调用在线搜索API访问https://services.nvd.nist.gov",
-                                        message_type="command",
-                                        tool_type="graphics",
-                                        tool_content=tool_content,
-                                        agent=self.agent,
-                                        tool="Online Search",
-                                        tool_status="running")
-
-        cve_details, cwe = self._load_cve_details(search_result['search_result_path'])
         analysis_pairs: List[dict] = []
 
         if resolved_mode == AnalysisMode.FIRMWARE:
@@ -347,16 +486,27 @@ class VulnAgent:
             self.config_manager.update_agent_status("Binwalk Agent", "Binary Filter Agent")
             self.config_manager.update_tool_status("Binwalk", "Binary Filter")
             self.agent = "Binary Filter Agent"
-            await self.send_message("Binary Filter Agent筛选可疑文件列表",
-                                     message_type="header1",
-                                     agent=self.agent)
+            
+            # 根据工作模式显示不同的提示信息
+            if self.work_mode == WorkMode.DISCOVERY:
+                await self.send_message(f"Binary Filter Agent基于{self.cwe_id}特征筛选可疑文件",
+                                         message_type="header1",
+                                         agent=self.agent)
+            else:
+                await self.send_message("Binary Filter Agent筛选可疑文件列表",
+                                         message_type="header1",
+                                         agent=self.agent)
 
+            # 调用 BinaryFilterAgent，传入工作模式和相关参数
             llm_result = self.BinaryFilterAgent.process(
                 binary_filename=self.binary_filename,
                 extracted_files_path=binwalk_results[0]['extracted_files_path'],
-                cve_details=cve_details
+                cve_details=cve_details,
+                cwe_id=self.cwe_id if self.work_mode == WorkMode.DISCOVERY else None,
+                work_mode=self.work_mode.value,
+                reference_cves=reference_cves
             )
-            logger.info("LLM result: %s", llm_result)
+            logger.info("BinaryFilter result: %s", llm_result)
 
             if llm_result.get("status") != "success" or not llm_result.get("suspicious_binaries"):
                 error_msg = llm_result.get("message", "BinaryFilter 未返回可疑二进制")
@@ -497,7 +647,8 @@ class VulnAgent:
                 post_binary_filename=os.path.basename(file2),
                 cve_details=cve_details,
                 cwe=cwe,
-                send_message=self.send_message
+                send_message=self.send_message,
+                work_mode=self.work_mode.value  # 传递工作模式
             )
 
         self.is_last = True
