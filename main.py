@@ -13,7 +13,7 @@ from enum import Enum
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 
-from agent import VulnAgent, run_repair_agent, ParameterCollector, HardcodedStringAuditor
+from agent import VulnAgent, run_repair_agent, ParameterCollector, HardcodedStringAuditor, WorkMode
 from model import AgentModel
 from config import config_manager
 from log import logger
@@ -32,6 +32,8 @@ jst = timezone(timedelta(hours=9))
 
 parameter_collectors: Dict[str, ParameterCollector] = {}
 
+# 默认工作模式配置（可通过环境变量或配置文件修改）
+DEFAULT_WORK_MODE = WorkMode.REPRODUCTION  # 漏洞挖掘模式
 
 class WebSocketChatSession:
     """Manage a single websocket session including heartbeat and agent lifecycle."""
@@ -119,17 +121,24 @@ class WebSocketChatSession:
 
         params = result.get("parameters", {})
         merged_query = result.get("query") or content
+        work_mode = result.get("work_mode", DEFAULT_WORK_MODE.value)
         parameter_collectors.pop(chat_id, None)
-        self._agent_task = asyncio.create_task(self._run_agent(chat_id, merged_query, params))
+        self._agent_task = asyncio.create_task(self._run_agent(chat_id, merged_query, params, work_mode))
 
-    async def _run_agent(self, chat_id: str, query: str, params: Dict[str, Any]) -> None:
+    async def _run_agent(self, chat_id: str, query: str, params: Dict[str, Any], work_mode: str = None) -> None:
         try:
+            # 确定工作模式
+            mode = work_mode or DEFAULT_WORK_MODE.value
+            
             agent = VulnAgent(
                 chat_id,
                 query,
                 self.websocket,
                 cve_id=params.get("cve_id"),
-                binary_filename=params.get("binary_filename")
+                cwe_id=params.get("cwe_id"),
+                binary_filename=params.get("binary_filename"),
+                vendor=params.get("vendor"),
+                work_mode=mode
             )
             await agent.chat()
         except Exception as exc:  # pylint: disable=broad-except
@@ -153,7 +162,13 @@ class WebSocketChatSession:
     def _ensure_collector(self, chat_id: str) -> ParameterCollector:
         collector = parameter_collectors.get(chat_id)
         if collector is None:
-            collector = ParameterCollector(chat_id, self._send_json, AgentModel("DeepSeek"))
+            # 使用默认的漏洞挖掘模式创建ParameterCollector
+            collector = ParameterCollector(
+                chat_id, 
+                self._send_json, 
+                AgentModel("DeepSeek"),
+                work_mode=DEFAULT_WORK_MODE
+            )
             parameter_collectors[chat_id] = collector
         else:
             collector.update_sender(self._send_json)
@@ -375,10 +390,12 @@ async def hardcode_audit(
             )
         target_path = save_path
 
-    if not target_path or not is_binary_file(target_path):
+    # Check file type: JAR files are also allowed
+    is_jar = target_path and target_path.lower().endswith('.jar')
+    if not target_path or (not is_jar and not is_binary_file(target_path)):
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": "文件不是可识别的二进制/可执行文件", "data": None},
+            content={"code": 400, "msg": "文件不是可识别的二进制/可执行文件或JAR文件", "data": None},
         )
 
     try:
@@ -386,7 +403,7 @@ async def hardcode_audit(
         result = await auditor.audit(
             target_path,
             chat_id=audit_chat_id,
-            ida_version=get_binary_architecture(target_path),
+            ida_version=None if is_jar else get_binary_architecture(target_path),
         )
     except Exception as exc:
         logger.error("硬编码字符串审计失败: %s", exc)

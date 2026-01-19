@@ -1,6 +1,8 @@
 from agent.base import Agent
+from agent.parameter_agent import CWE_SENSITIVE_BINARIES, CWE_DESCRIPTIONS
 from model.base import ChatModel
 from pathlib import Path
+from log import logger
 import json
 import re
 import tiktoken
@@ -8,7 +10,8 @@ import os
 import subprocess
 import stat
 
-PROMPT = """You are a security analyst who specializes in analyzing binary files that may have vulnerabilities based on the names of affected services/programs and their vulnerability types mentioned in CVE descriptions and other information.
+# 漏洞复现模式的Prompt（基于CVE信息筛选）
+PROMPT_REPRODUCTION = """You are a security analyst who specializes in analyzing binary files that may have vulnerabilities based on the names of affected services/programs and their vulnerability types mentioned in CVE descriptions and other information.
 You need to find relevant binary files that may have vulnerabilities in the executable binary list [directory] (extracted from the firmware directory) and CVE information [CVE details] of the {binary_filename} device provided below.
 
 Strictly output **raw JSON only** in the following format (do NOT wrap with Markdown code fences):
@@ -53,19 +56,112 @@ Now the following is a real application scenario. Please analyze the following i
 Please make sure that the file path really exists.
 """
 
-# 下面是一个分析成功的示例输出:
-# {{
-#     "status": "success", 
-#     "message": "发现1个可疑的二进制文件",
-#     "suspicious_binaries": [
-#         {{
-#             "binary_name": "upnpd",
-#             "binary_path": "/usr/sbin/upnpd",
-#             "reason": "CVE-2021-27239描述中提到upnpd服务存在栈溢出漏洞"
-#         }}
-#     ]
-# }}
+# 漏洞挖掘模式的Prompt（基于CWE类型筛选）
+PROMPT_DISCOVERY = """You are a security analyst specializing in vulnerability discovery. Your task is to identify binary files that are most likely to contain {cwe_type} vulnerabilities.
 
+**Vulnerability Type Information:**
+- CWE ID: {cwe_id}
+- Description: {cwe_description}
+
+**CWE-Specific Analysis Guidelines:**
+{cwe_guidelines}
+
+**Historical Reference CVEs (if available):**
+{reference_cves}
+
+**Target Device:** {binary_filename}
+
+Your task: Analyze the executable binary list below and identify binaries that are most likely to contain {cwe_type} vulnerabilities.
+
+Strictly output **raw JSON only** in the following format (do NOT wrap with Markdown code fences):
+{{
+"status": "success" | "error",
+"message": "Analysis description",
+"suspicious_binaries": [
+{{
+"binary_name": "Binary file name",
+"binary_path": "Binary file path",
+"reason": "Explain why this binary is likely to have {cwe_type} vulnerability",
+"priority": "high|medium|low"
+}}
+]
+}}
+
+Rules:
+- suspicious_binaries can output up to 5, sorted by priority (highest first).
+- Focus on binaries that:
+  * Handle external input (network, files, user input)
+  * Match the vulnerability pattern for {cwe_id}
+  * Are common targets for this vulnerability type
+- If no suspicious binaries can be determined, set status to "error" with a clear message.
+- Do not include any extra text, Markdown, or explanations outside the JSON.
+
+[directory]
+{directory}
+[directory end]
+Please make sure that the file path really exists.
+"""
+
+# CWE类型特定的分析指南
+CWE_ANALYSIS_GUIDELINES = {
+    "CWE-78": """
+- Focus on binaries that execute shell commands (system(), popen(), exec*)
+- Look for web servers (httpd, lighttpd, goahead, boa, mini_httpd, uhttpd)
+- Look for CGI handlers and scripts processors
+- Network services that parse user input and pass to system commands
+- Configuration utilities that accept user parameters
+""",
+    "CWE-77": """
+- Similar to CWE-78, focus on command execution
+- Look for binaries using shell interpreters
+- Configuration management tools
+""",
+    "CWE-120": """
+- Focus on binaries handling buffer operations (strcpy, memcpy, sprintf)
+- Network daemons (httpd, ftpd, telnetd, sshd)
+- Protocol parsers (upnpd, dnsd, dhcpd)
+- Firmware update handlers
+""",
+    "CWE-121": """
+- Focus on binaries with local buffer operations
+- Look for parsers and decoders
+- Network services processing structured data
+""",
+    "CWE-122": """
+- Focus on binaries with dynamic memory allocation
+- Complex parsers (XML, JSON, config files)
+- Media/file format handlers
+""",
+    "CWE-22": """
+- Focus on file servers and upload handlers
+- Web servers with file access functionality
+- FTP servers (ftpd, vsftpd)
+- File management utilities
+""",
+    "CWE-787": """
+- Focus on array/buffer write operations
+- Network packet handlers
+- Protocol decoders
+- Media file parsers
+""",
+    "CWE-125": """
+- Focus on array/buffer read operations
+- Data parsers and format handlers
+- Network data processors
+""",
+    "CWE-416": """
+- Focus on complex state management
+- Session handlers
+- Connection managers
+- Resource cleanup code
+""",
+    "CWE-798": """
+- Focus on authentication modules
+- Login handlers
+- Configuration files with embedded credentials
+- Admin interfaces
+""",
+}
 class BinaryFilterAgent(Agent):
     """用于筛选可能存在漏洞的二进制文件的Agent"""
     
@@ -301,39 +397,180 @@ class BinaryFilterAgent(Agent):
             "message": f"模型响应无法解析: {fallback_message}",
             "suspicious_binaries": []
         }, last_raw
+    
+    def _heuristic_filter_by_cwe(self, executable_binaries: str, cwe_id: str) -> list:
+        """
+        基于CWE类型的启发式筛选，返回优先级排序的二进制列表
+        """
+        if not cwe_id or not executable_binaries:
+            return []
         
-    def process(self, binary_filename: str, extracted_files_path: str, cve_details: str) -> dict:
+        sensitive_keywords = CWE_SENSITIVE_BINARIES.get(cwe_id.upper(), [])
+        if not sensitive_keywords:
+            return []
+        
+        binaries = executable_binaries.strip().split('\n')
+        scored_binaries = []
+        
+        for binary_path in binaries:
+            binary_name = Path(binary_path).name.lower()
+            score = 0
+            matched_keywords = []
+            
+            for keyword in sensitive_keywords:
+                if keyword.lower() in binary_name:
+                    score += 2
+                    matched_keywords.append(keyword)
+                elif keyword.lower() in binary_path.lower():
+                    score += 1
+                    matched_keywords.append(keyword)
+            
+            if score > 0:
+                scored_binaries.append({
+                    "path": binary_path,
+                    "name": Path(binary_path).name,
+                    "score": score,
+                    "keywords": matched_keywords
+                })
+        
+        # 按分数降序排序
+        scored_binaries.sort(key=lambda x: x["score"], reverse=True)
+        return scored_binaries[:10]  # 返回前10个
+    
+    def _format_reference_cves(self, cve_details: str, max_cves: int = 5) -> str:
+        """格式化参考CVE信息用于Prompt"""
+        if not cve_details:
+            return "No historical CVE references available."
+        
         try:
-            print("开始分析并筛选可疑的二进制文件...")
+            # 尝试解析JSON格式的CVE详情
+            if isinstance(cve_details, str) and cve_details.strip().startswith('{'):
+                cve_data = json.loads(cve_details)
+                vulnerabilities = cve_data.get("vulnerabilities", [])[:max_cves]
+                if vulnerabilities:
+                    formatted = []
+                    for vuln in vulnerabilities:
+                        cve = vuln.get("cve", {})
+                        cve_id = cve.get("id", "Unknown")
+                        desc = ""
+                        for d in cve.get("descriptions", []):
+                            if d.get("lang") == "en":
+                                desc = d.get("value", "")[:200]
+                                break
+                        formatted.append(f"- {cve_id}: {desc}...")
+                    return "\n".join(formatted)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        
+        # 如果是纯文本，直接截取前500字符
+        if len(cve_details) > 500:
+            return cve_details[:500] + "..."
+        return cve_details
+        
+    def process(self, binary_filename: str, extracted_files_path: str, 
+                cve_details: str = None, cwe_id: str = None, 
+                work_mode: str = "reproduction", reference_cves: str = None) -> dict:
+        """
+        筛选可疑二进制文件
+        
+        Args:
+            binary_filename: 目标设备/固件名称
+            extracted_files_path: 提取的固件文件路径
+            cve_details: CVE详情（漏洞复现模式使用）
+            cwe_id: CWE编号（漏洞挖掘模式使用）
+            work_mode: 工作模式 - "reproduction" 或 "discovery"
+            reference_cves: 参考CVE信息（漏洞挖掘模式可选）
+        """
+        try:
+            logger.info(f"BinaryFilterAgent开始分析 (mode={work_mode}, cwe={cwe_id})...")
+            print(f"开始分析并筛选可疑的二进制文件... (mode={work_mode})")
             
             # 获取目录结构
             directory_structure = self._get_directory_structure(extracted_files_path)
-            
             print(f"directory_structure:\n{directory_structure}")
 
             executable_binaries = self._get_executable_binaries(extracted_files_path)
-
             print(f"executable_binaries:\n{executable_binaries}")
-
-            prompt = PROMPT.format(
-                binary_filename = binary_filename,
-                directory=executable_binaries,
-                cve_details=cve_details
-            )
+            
+            # 根据工作模式选择不同的筛选策略
+            if work_mode == "discovery" and cwe_id:
+                # 漏洞挖掘模式：基于CWE类型筛选
+                prompt = self._build_discovery_prompt(
+                    binary_filename, executable_binaries, cwe_id, reference_cves
+                )
+            else:
+                # 漏洞复现模式：基于CVE信息筛选
+                prompt = PROMPT_REPRODUCTION.format(
+                    binary_filename=binary_filename,
+                    directory=executable_binaries,
+                    cve_details=cve_details or "No CVE details provided"
+                )
 
             enc = tiktoken.get_encoding("cl100k_base")
             enc = tiktoken.encoding_for_model("gpt-4o")
             token_ids = enc.encode(prompt)
             print(f"Prompt token 数: {len(token_ids)}")
+            
             process_result, raw_response = self._chat_and_parse_with_retry(prompt, max_attempts=2)
             print(f"大模型原始返回结果：{raw_response}")
+            
+            # 如果LLM没有返回结果，在漏洞挖掘模式下使用启发式筛选作为兜底
+            if work_mode == "discovery" and cwe_id:
+                if process_result.get("status") == "error" or not process_result.get("suspicious_binaries"):
+                    logger.info("LLM筛选无结果，使用启发式筛选作为兜底...")
+                    heuristic_results = self._heuristic_filter_by_cwe(executable_binaries, cwe_id)
+                    if heuristic_results:
+                        process_result = {
+                            "status": "success",
+                            "message": f"基于CWE-{cwe_id}启发式规则筛选出可疑二进制",
+                            "suspicious_binaries": [
+                                {
+                                    "binary_name": r["name"],
+                                    "binary_path": r["path"],
+                                    "reason": f"匹配CWE敏感关键词: {', '.join(r['keywords'])}"
+                                }
+                                for r in heuristic_results[:5]
+                            ]
+                        }
 
             return process_result
                 
         except Exception as e:
+            logger.error(f"BinaryFilterAgent处理过程发生错误: {str(e)}")
             print(f"BinaryFilterAgent处理过程发生错误: {str(e)}")
             return {
                 "status": "error",
                 "message": f"process failed: {str(e)}",
                 "suspicious_binaries": []
             }
+    
+    def _build_discovery_prompt(self, binary_filename: str, executable_binaries: str,
+                                 cwe_id: str, reference_cves: str = None) -> str:
+        """构建漏洞挖掘模式的Prompt"""
+        cwe_id_upper = cwe_id.upper()
+        cwe_description = CWE_DESCRIPTIONS.get(cwe_id_upper, "Unknown vulnerability type")
+        cwe_guidelines = CWE_ANALYSIS_GUIDELINES.get(cwe_id_upper, "Focus on binaries that handle external input and match common vulnerability patterns.")
+        
+        # 格式化参考CVE
+        formatted_refs = self._format_reference_cves(reference_cves) if reference_cves else "No historical CVE references available."
+        
+        # 基于CWE的启发式预筛选提示
+        heuristic_hints = self._heuristic_filter_by_cwe(executable_binaries, cwe_id)
+        if heuristic_hints:
+            hint_text = "\n**Pre-filtered candidates based on CWE patterns (for reference):**\n"
+            for h in heuristic_hints[:5]:
+                hint_text += f"- {h['name']} (matched: {', '.join(h['keywords'])})\n"
+        else:
+            hint_text = ""
+        
+        prompt = PROMPT_DISCOVERY.format(
+            binary_filename=binary_filename,
+            cwe_type=cwe_description,
+            cwe_id=cwe_id_upper,
+            cwe_description=cwe_description,
+            cwe_guidelines=cwe_guidelines + hint_text,
+            reference_cves=formatted_refs,
+            directory=executable_binaries
+        )
+        
+        return prompt
