@@ -318,7 +318,6 @@ class VulnAgent:
         :param query: 用户查询内容
         :return: 聊天响应
         """
-        
         # 根据工作模式检查必要参数
         if self.work_mode == WorkMode.REPRODUCTION:
             # 漏洞复现模式：需要CVE ID
@@ -504,9 +503,23 @@ class VulnAgent:
                 cve_details=cve_details,
                 cwe_id=self.cwe_id if self.work_mode == WorkMode.DISCOVERY else None,
                 work_mode=self.work_mode.value,
-                reference_cves=reference_cves
+                reference_cves=reference_cves,
+                old_firmware_path=binwalk_results[0]['extracted_files_path'],
+                new_firmware_path=binwalk_results[1]['extracted_files_path'],
+                enable_diff_filter=True
             )
             logger.info("BinaryFilter result: %s", llm_result)
+            
+            # 如果有差异统计信息，显示给用户
+            if llm_result.get("diff_statistics"):
+                stats = llm_result["diff_statistics"]
+                diff_msg = (f"二进制差异统计: "
+                          f"修改={stats['modified_count']}, "
+                          f"新增={stats['added_count']}, "
+                          f"删除={stats['removed_count']}, "
+                          f"未变化={stats['unchanged_count']}")
+                await self.send_message(diff_msg, message_type="message", agent=self.agent)
+                logger.info(diff_msg)
 
             if llm_result.get("status") != "success" or not llm_result.get("suspicious_binaries"):
                 error_msg = llm_result.get("message", "BinaryFilter 未返回可疑二进制")
