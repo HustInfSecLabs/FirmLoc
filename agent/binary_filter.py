@@ -3,6 +3,7 @@ from agent.parameter_agent import CWE_SENSITIVE_BINARIES, CWE_DESCRIPTIONS
 from model.base import ChatModel
 from pathlib import Path
 from log import logger
+from tools.binary_diff_detector import find_modified_binaries, format_diff_summary, get_modified_binaries_list
 import json
 import re
 import tiktoken
@@ -469,7 +470,9 @@ class BinaryFilterAgent(Agent):
         
     def process(self, binary_filename: str, extracted_files_path: str, 
                 cve_details: str = None, cwe_id: str = None, 
-                work_mode: str = "reproduction", reference_cves: str = None) -> dict:
+                work_mode: str = "reproduction", reference_cves: str = None,
+                old_firmware_path: str = None, new_firmware_path: str = None,
+                enable_diff_filter: bool = True) -> dict:
         """
         筛选可疑二进制文件
         
@@ -480,17 +483,64 @@ class BinaryFilterAgent(Agent):
             cwe_id: CWE编号（漏洞挖掘模式使用）
             work_mode: 工作模式 - "reproduction" 或 "discovery"
             reference_cves: 参考CVE信息（漏洞挖掘模式可选）
+            old_firmware_path: 旧版本固件解压路径（用于差异检测）
+            new_firmware_path: 新版本固件解压路径（用于差异检测）
+            enable_diff_filter: 是否启用差异筛选（默认True）
         """
         try:
-            logger.info(f"BinaryFilterAgent开始分析 (mode={work_mode}, cwe={cwe_id})...")
+            logger.info(f"BinaryFilterAgent开始分析 (mode={work_mode}, cwe={cwe_id}, diff_filter={enable_diff_filter})...")
             print(f"开始分析并筛选可疑的二进制文件... (mode={work_mode})")
             
-            # 获取目录结构
-            directory_structure = self._get_directory_structure(extracted_files_path)
-            print(f"directory_structure:\n{directory_structure}")
-
-            executable_binaries = self._get_executable_binaries(extracted_files_path)
-            print(f"executable_binaries:\n{executable_binaries}")
+            # 第一步：获取所有可执行二进制文件
+            all_executable_binaries = self._get_executable_binaries(extracted_files_path)
+            print(f"扫描到 {len(all_executable_binaries.strip().split(chr(10)))} 个可执行二进制文件")
+            
+            # 第二步：如果启用差异筛选且提供了两个固件路径，则先筛选出有差异的文件
+            filtered_binaries = all_executable_binaries
+            diff_info = None
+            
+            if enable_diff_filter and old_firmware_path and new_firmware_path:
+                logger.info("开始检测两个版本之间的二进制文件差异...")
+                print("正在检测两个固件版本之间的二进制差异...")
+                
+                # 将可执行二进制列表转换为路径列表
+                binary_paths = [line.strip() for line in all_executable_binaries.strip().split('\n') if line.strip()]
+                
+                # 调用差异检测工具
+                diff_result = find_modified_binaries(old_firmware_path, new_firmware_path, binary_paths)
+                diff_info = diff_result
+                
+                # 打印差异摘要
+                diff_summary = format_diff_summary(diff_result)
+                logger.info(f"差异检测结果:\n{diff_summary}")
+                print(diff_summary)
+                
+                # 获取修改过的文件列表（包含modified和added，不包含removed）
+                modified_list = get_modified_binaries_list(diff_result, include_added=True, include_removed=False)
+                
+                if modified_list:
+                    filtered_binaries = "\n".join(modified_list)
+                    logger.info(f"筛选后保留 {len(modified_list)} 个有差异的二进制文件")
+                    print(f"筛选后保留 {len(modified_list)} 个有差异的二进制文件，将仅分析这些文件")
+                else:
+                    logger.warning("未检测到任何二进制文件有差异，将分析所有二进制文件")
+                    print("警告: 未检测到任何二进制文件有差异，将分析所有二进制文件")
+                    filtered_binaries = all_executable_binaries
+            else:
+                if not enable_diff_filter:
+                    logger.info("差异筛选已禁用，将分析所有二进制文件")
+                    print("差异筛选已禁用，将分析所有二进制文件")
+                else:
+                    logger.warning("未提供固件路径，跳过差异检测，将分析所有二进制文件")
+                    print("未提供固件路径信息，跳过差异检测")
+            
+            # 第三步：将筛选后的二进制列表提交给LLM分析
+            print(f"准备将 {len(filtered_binaries.strip().split(chr(10)))} 个文件提交给大模型进行智能筛选...")
+            executable_binaries = filtered_binaries
+            
+            # 第三步：将筛选后的二进制列表提交给LLM分析
+            print(f"准备将 {len(filtered_binaries.strip().split(chr(10)))} 个文件提交给大模型进行智能筛选...")
+            executable_binaries = filtered_binaries
             
             # 根据工作模式选择不同的筛选策略
             if work_mode == "discovery" and cwe_id:
@@ -513,6 +563,15 @@ class BinaryFilterAgent(Agent):
             
             process_result, raw_response = self._chat_and_parse_with_retry(prompt, max_attempts=2)
             print(f"大模型原始返回结果：{raw_response}")
+            
+            # 如果检测到了差异信息，将差异统计添加到返回结果中
+            if diff_info:
+                process_result["diff_statistics"] = {
+                    "modified_count": len(diff_info.get("modified", [])),
+                    "added_count": len(diff_info.get("added", [])),
+                    "removed_count": len(diff_info.get("removed", [])),
+                    "unchanged_count": len(diff_info.get("unchanged", []))
+                }
             
             # 如果LLM没有返回结果，在漏洞挖掘模式下使用启发式筛选作为兜底
             if work_mode == "discovery" and cwe_id:
