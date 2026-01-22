@@ -362,6 +362,257 @@ def format_samples_for_prompt(positive_samples, negative_samples):
     
     return "\n".join(prompt_parts)
 
+# ———— Token计数和智能总结相关函数 ————
+def count_tokens(text: str, model: str = "gpt-4") -> int:
+    """计算文本的token数量"""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+        return len(encoding.encode(text))
+    except Exception as e:
+        logger.warning(f"Token计数失败，使用近似估算: {e}")
+        # 粗略估算：1 token ≈ 4个字符（对于英文）或1.5个字符（对于中文）
+        # 使用保守估计
+        return len(text) // 2
+
+def extract_vulnerability_entries(results: str) -> List[Dict[str, Any]]:
+    """从分析结果中提取各个漏洞条目，并解析评分"""
+    entries = []
+    # 按分隔符切分
+    sections = re.split(r'===\s+(.+?\.c)\s+vs\s+(.+?\.c)\s+===', results)
+    
+    for i in range(1, len(sections), 3):
+        if i + 1 < len(sections):
+            pre_file = sections[i]
+            post_file = sections[i + 1]
+            content = sections[i + 2] if i + 2 < len(sections) else ""
+            
+            # 提取漏洞评分
+            score = 0
+            score_match = re.search(r'["\']?漏洞评分["\']?\s*[:：]\s*(\d+)', content, re.IGNORECASE)
+            if score_match:
+                score = int(score_match.group(1))
+            
+            # 提取是否为真实漏洞的判断
+            is_vuln = False
+            # 检查是否有明确的漏洞分析（RAG二次判断）
+            if 'RAG二次判断' in content or '漏洞成因' in content:
+                # 检查是否有明确的"无漏洞"或"非漏洞"判断
+                if not re.search(r'(无漏洞|非漏洞|不是漏洞|false\s*fix)', content, re.IGNORECASE):
+                    is_vuln = True
+            
+            entries.append({
+                'pre_file': pre_file,
+                'post_file': post_file,
+                'content': content.strip(),
+                'score': score,
+                'is_vuln': is_vuln,
+                'length': len(content)
+            })
+    
+    return entries
+
+def prioritize_entries(entries: List[Dict[str, Any]], max_tokens: int = 60000) -> tuple[List[Dict], List[Dict]]:
+    """根据评分和重要性对条目进行优先级排序，返回高优先级和低优先级条目"""
+    # 按评分降序排序
+    sorted_entries = sorted(entries, key=lambda x: (x['score'], x['is_vuln']), reverse=True)
+    
+    high_priority = []
+    low_priority = []
+    current_tokens = 0
+    
+    # 计算SUMMARY_PROMPT的基础token数
+    base_tokens = count_tokens(SUMMARY_PROMPT)
+    available_tokens = max_tokens - base_tokens - 2000  # 留2000 token作为输出空间
+    
+    for entry in sorted_entries:
+        entry_tokens = count_tokens(entry['content'])
+        
+        # 高分漏洞（>=7分）或确认的漏洞优先保留
+        if entry['score'] >= 7 or entry['is_vuln']:
+            if current_tokens + entry_tokens <= available_tokens:
+                high_priority.append(entry)
+                current_tokens += entry_tokens
+            else:
+                # 即使超出token限制，至少保留漏洞的摘要信息
+                low_priority.append(entry)
+        else:
+            low_priority.append(entry)
+    
+    # 如果还有空间，添加中等分数的条目
+    for entry in sorted_entries:
+        if entry not in high_priority and entry not in low_priority:
+            entry_tokens = count_tokens(entry['content'])
+            if current_tokens + entry_tokens <= available_tokens:
+                high_priority.append(entry)
+                current_tokens += entry_tokens
+            else:
+                low_priority.append(entry)
+    
+    return high_priority, low_priority
+
+def create_abbreviated_entry(entry: Dict[str, Any]) -> str:
+    """为低优先级条目创建缩略信息"""
+    return f"=== {entry['pre_file']} vs {entry['post_file']} ===\n" \
+           f"[评分: {entry['score']}] [长度: {entry['length']} 字符]\n" \
+           f"[摘要] 由于内容过长已省略，如需详细信息请查看完整日志\n\n"
+
+async def generate_smart_summary(results: str, agent: str, send_message=None) -> str:
+    """智能生成总结，处理token超限问题"""
+    
+    # 1. 提取所有漏洞条目
+    entries = extract_vulnerability_entries(results)
+    
+    if not entries:
+        logger.warning("未能从结果中提取到漏洞条目")
+        return "分析完成，但未检测到明确的漏洞条目。"
+    
+    # 2. 计算总token数
+    total_tokens = count_tokens(results)
+    logger.info(f"分析结果总token数: {total_tokens}")
+    
+    # 3. 如果token数在安全范围内，直接生成总结
+    if total_tokens < 60000:  # 给模型留足够的输入空间
+        summary_prompt = SUMMARY_PROMPT.replace("{$result$}", results)
+        return await async_gpt_inference(
+            prompt=summary_prompt,
+            temperature=0,
+            default_system_prompt="You are a security analysis summary assistant."
+        )
+    
+    # 4. Token超限，使用智能策略
+    logger.warning(f"分析结果token数({total_tokens})超出限制，启用智能总结策略")
+    
+    if send_message:
+        await send_message(
+            f"⚠️ 分析结果较多({len(entries)}个函数对)，正在进行智能总结...",
+            "message",
+            agent=agent
+        )
+    
+    # 5. 对条目进行优先级排序和筛选
+    high_priority, low_priority = prioritize_entries(entries)
+    
+    logger.info(f"高优先级条目: {len(high_priority)}, 低优先级条目: {len(low_priority)}")
+    
+    # 6. 构建总结输入
+    summarized_results = []
+    
+    # 添加高优先级条目（完整内容）
+    for entry in high_priority:
+        summarized_results.append(f"=== {entry['pre_file']} vs {entry['post_file']} ===\n{entry['content']}\n")
+    
+    # 添加低优先级条目（缩略信息）
+    if low_priority:
+        summarized_results.append("\n=== 其他分析结果（已缩略） ===\n")
+        for entry in low_priority:
+            summarized_results.append(create_abbreviated_entry(entry))
+    
+    filtered_results = "\n".join(summarized_results)
+    
+    # 7. 如果筛选后仍然超限，则分批总结
+    filtered_tokens = count_tokens(filtered_results)
+    
+    if filtered_tokens > 60000:
+        logger.warning("筛选后仍超限，采用分批总结策略")
+        return await batch_summarize(high_priority, low_priority, agent, send_message)
+    
+    # 8. 生成最终总结
+    summary_prompt = SUMMARY_PROMPT.replace("{$result$}", filtered_results)
+    final_summary = await async_gpt_inference(
+        prompt=summary_prompt,
+        temperature=0,
+        default_system_prompt="You are a security analysis summary assistant."
+    )
+    
+    # 9. 附加统计信息
+    stats = f"\n\n📊 统计信息:\n" \
+            f"- 总分析函数对: {len(entries)}\n" \
+            f"- 高危漏洞(>=7分): {sum(1 for e in entries if e['score'] >= 7)}\n" \
+            f"- 中危漏洞(4-6分): {sum(1 for e in entries if 4 <= e['score'] < 7)}\n" \
+            f"- 低危漏洞(1-3分): {sum(1 for e in entries if 1 <= e['score'] < 4)}\n" \
+            f"- 详细总结条目: {len(high_priority)}\n" \
+            f"- 缩略显示条目: {len(low_priority)}"
+    
+    return final_summary + stats
+
+async def batch_summarize(high_priority: List[Dict], low_priority: List[Dict], 
+                         agent: str, send_message=None) -> str:
+    """分批总结策略：将条目分成多个批次，分别总结后再汇总"""
+    
+    batch_size = 5  # 每批处理5个条目
+    batch_summaries = []
+    
+    # 分批处理高优先级条目
+    for i in range(0, len(high_priority), batch_size):
+        batch = high_priority[i:i + batch_size]
+        
+        if send_message:
+            await send_message(
+                f"正在总结第 {i//batch_size + 1} 批条目 ({len(batch)} 个函数对)...",
+                "message",
+                agent=agent
+            )
+        
+        batch_content = "\n".join([
+            f"=== {e['pre_file']} vs {e['post_file']} ===\n{e['content']}\n"
+            for e in batch
+        ])
+        
+        batch_prompt = f"""请对以下漏洞分析结果进行简要总结：
+
+{batch_content}
+
+请关注：
+1. 发现的主要漏洞类型
+2. 漏洞的严重程度
+3. 漏洞的成因和利用方式（如果有）
+"""
+        
+        try:
+            summary = await async_gpt_inference(
+                prompt=batch_prompt,
+                temperature=0,
+                default_system_prompt="You are a security analysis summary assistant."
+            )
+            batch_summaries.append(f"### 批次 {i//batch_size + 1} 总结:\n{summary}")
+        except Exception as e:
+            logger.error(f"批次{i//batch_size + 1}总结失败: {e}")
+            batch_summaries.append(f"### 批次 {i//batch_size + 1}: 总结失败")
+    
+    # 汇总所有批次
+    final_prompt = f"""以下是分批次的漏洞分析总结，请生成一个综合性的最终总结报告：
+
+{''.join(batch_summaries)}
+
+低优先级条目统计：
+- 共 {len(low_priority)} 个函数对未详细展示
+
+请生成：
+1. 整体漏洞情况概述
+2. 主要发现的漏洞类型和严重程度
+3. 关键风险点总结
+4. 修复建议（如适用）
+"""
+    
+    final_summary = await async_gpt_inference(
+        prompt=final_prompt,
+        temperature=0,
+        default_system_prompt="You are a security analysis summary assistant."
+    )
+    
+    # 添加统计信息
+    all_entries = high_priority + low_priority
+    stats = f"\n\n📊 统计信息:\n" \
+            f"- 总分析函数对: {len(all_entries)}\n" \
+            f"- 高危漏洞(>=7分): {sum(1 for e in all_entries if e['score'] >= 7)}\n" \
+            f"- 中危漏洞(4-6分): {sum(1 for e in all_entries if 4 <= e['score'] < 7)}\n" \
+            f"- 低危漏洞(1-3分): {sum(1 for e in all_entries if 1 <= e['score'] < 4)}\n" \
+            f"- 分批总结数: {len(batch_summaries)}\n" \
+            f"- 详细分析条目: {len(high_priority)}\n" \
+            f"- 缩略显示条目: {len(low_priority)}"
+    
+    return final_summary + stats
+
 # ———— 配置区 ————
 def locate_paths(chat_id: str, history_root: str | Path, binary_filename: str) -> dict:
 
@@ -1419,12 +1670,10 @@ async def main(chat_id: str,
     try:
         with open(LOG_FILE, 'r', encoding='utf-8') as f:
             results = f.read()
-        summary_prompt = SUMMARY_PROMPT.replace("{$result$}", results)
-        summary = await async_gpt_inference(
-            prompt=summary_prompt,
-            temperature=0,
-            default_system_prompt="You are a security analysis summary assistant."
-        )
+        
+        # 使用token计数和智能截断来生成总结
+        summary = await generate_smart_summary(results, r.agent, send_message)
+        
         logger.info("总结报告：")
         logger.info(summary)
         if send_message:
