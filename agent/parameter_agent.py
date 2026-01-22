@@ -72,46 +72,49 @@ CWE_DESCRIPTIONS = {
 
 
 EXTRACTION_PROMPT_DISCOVERY = (
-    "你是一个专业的安全分析助手，擅长从用户的自然语言需求中提取结构化参数。\n"
+    "你是一个专业的安全分析助手，擅长从用户的多轮对话中提取和维护结构化参数。\n"
     "当前为【漏洞挖掘模式】，用户希望基于CWE漏洞类型在固件中发现潜在漏洞。\n\n"
-    "请从用户输入中提取以下关键字段：\n"
-    "- cwe_id：形如 CWE-XXX 的漏洞类型编号（如 CWE-78、CWE-120）。\n"
-    "  也可以从漏洞类型描述中推断，例如：\n"
-    "  * '命令注入' -> CWE-78\n"
-    "  * '缓冲区溢出' -> CWE-120\n"
-    "  * '栈溢出' -> CWE-121\n"
-    "  * '堆溢出' -> CWE-122\n"
-    "  * '路径遍历' -> CWE-22\n"
-    "  * '格式化字符串' -> CWE-134\n"
-    "  * '整数溢出' -> CWE-190\n"
-    "  * '越界写入' -> CWE-787\n"
-    "  * '越界读取' -> CWE-125\n"
-    "  * 'UAF/释放后使用' -> CWE-416\n"
-    "  如果用户没有明确指定，请返回空字符串。\n"
-    "- cve_id：形如 CVE-YYYY-NNNN 的编号（可选，如果用户提供则提取）。\n"
-    "- binary_filename：需要分析的目标固件或二进制文件名称。可以是：\n"
-    "  * 完整的文件名（如 firmware.bin、httpd）\n"
-    "  * 设备型号（如 Netgear R9000、DIR-878）\n"
-    "  * 产品名称（如 DSL-AC3100）\n"
-    "  * 厂商名称（如 Netgear、D-Link、TP-Link）\n"
-    "  只要用户明确指出要分析的目标，都应提取到此字段。\n"
-    "- vendor：设备厂商名称（如 Netgear、D-Link、TP-Link、ASUS、Tenda等），用于搜索历史CVE参考信息。\n\n"
+    "需要提取的关键字段（必填）：\n"
+    "1. cwe_id：形如 CWE-XXX 的漏洞类型编号（如 CWE-78、CWE-120）\n"
+    "   支持从漏洞类型描述中推断：\n"
+    "   * '命令注入' -> CWE-78\n"
+    "   * '缓冲区溢出' -> CWE-120\n"
+    "   * '栈溢出' -> CWE-121\n"
+    "   * '堆溢出' -> CWE-122\n"
+    "   * '路径遍历' -> CWE-22\n"
+    "   * '格式化字符串' -> CWE-134\n"
+    "   * '整数溢出' -> CWE-190\n"
+    "   * '越界写入' -> CWE-787\n"
+    "   * '越界读取' -> CWE-125\n"
+    "   * 'UAF/释放后使用' -> CWE-416\n\n"
+    "2. binary_filename：目标固件或二进制文件名称\n"
+    "   可以是文件名（如 httpd、firmware.bin）、设备型号（如 DIR-878）、\n"
+    "   产品名称（如 DSL-AC3100）、厂商名称（如 QNAP）等任何能定位目标的信息\n\n"
+    "可选字段：\n"
+    "- vendor：设备厂商名称（如 Netgear、D-Link、TP-Link、ASUS、Tenda、QNAP等）\n"
+    "- cve_id：如果用户提供了参考CVE编号（形如 CVE-YYYY-NNNN）\n\n"
+    "【历史已收集的参数】：\n"
+    "{existing_params}\n\n"
+    "【重要】：\n"
+    "1. 请保留历史已收集的参数，除非本次用户明确要修改\n"
+    "2. 新的用户输入可能只是补充缺失的信息，不要覆盖已有信息\n"
+    "3. 仔细分析所有历史对话，综合提取完整参数\n\n"
     "严格按照下述 JSON 模板输出（禁止输出额外解释或Markdown标记）：\n"
     "{\n"
-    "  \"cwe_id\": \"\",           // 字符串，CWE编号，若缺失请保持为空字符串\n"
-    "  \"cve_id\": \"\",           // 字符串，CVE编号（可选），若缺失请保持为空字符串\n"
-    "  \"binary_filename\": \"\",  // 字符串，若缺失请保持为空字符串\n"
-    "  \"vendor\": \"\",           // 字符串，设备厂商名称，若缺失请保持为空字符串\n"
+    "  \"cwe_id\": \"\",           // 字符串，若仍未找到保持为空\n"
+    "  \"cve_id\": \"\",           // 字符串（可选），若未提及保持为空\n"
+    "  \"binary_filename\": \"\",  // 字符串，若仍未找到保持为空\n"
+    "  \"vendor\": \"\",           // 字符串（可选），若未提及保持为空\n"
     "  \"confidence\": {\n"
     "    \"cwe_id\": \"high|medium|low|none\",\n"
     "    \"cve_id\": \"high|medium|low|none\",\n"
     "    \"binary_filename\": \"high|medium|low|none\",\n"
     "    \"vendor\": \"high|medium|low|none\"\n"
     "  },\n"
-    "  \"notes\": \"\",            // 可选补充说明，可为空字符串\n"
-    "  \"missing_fields\": []      // 列表: 例如 [\"cwe_id\"] 表示缺失字段\n"
+    "  \"notes\": \"\",            // 简要说明从对话中提取到了什么信息\n"
+    "  \"missing_fields\": []      // 列表：仍然缺失的必填字段，如 [\"cwe_id\", \"binary_filename\"]\n"
     "}\n\n"
-    "请确保只返回合法的 JSON 文本。用户输入如下：\n"
+    "完整的历史对话如下：\n"
     "<<<\n"
     "{user_input}\n"
     ">>>\n"
@@ -119,27 +122,32 @@ EXTRACTION_PROMPT_DISCOVERY = (
 
 
 EXTRACTION_PROMPT_REPRODUCTION = (
-    "你是一个专业的安全分析助手，擅长从用户的自然语言需求中提取结构化参数。\n"
+    "你是一个专业的安全分析助手，擅长从用户的多轮对话中提取和维护结构化参数。\n"
     "当前为【漏洞复现模式】，用户希望复现已知的CVE漏洞。\n\n"
-    "请从用户输入中提取以下关键字段：\n"
-    "- cve_id：形如 CVE-YYYY-NNNN 的编号（区分大小写）。如果没有明确的CVE编号，请返回空字符串。\n"
-    "- binary_filename：需要分析的目标固件或二进制文件名称。可以是：\n"
-    "  * 完整的文件名（如 firmware.bin、httpd）\n"
-    "  * 设备型号（如 Netgear R9000、DIR-878）\n"
-    "  * 产品名称（如 DSL-AC3100）\n"
-    "  只要用户明确指出要分析的目标，都应提取到此字段。如果完全没有提及任何设备或文件，才返回空字符串。\n\n"
+    "需要提取的关键字段（必填）：\n"
+    "1. cve_id：形如 CVE-YYYY-NNNN 的编号（如 CVE-2024-12345）\n"
+    "   注意区分大小写，必须是有效的CVE编号格式\n\n"
+    "2. binary_filename：目标固件或二进制文件名称\n"
+    "   可以是文件名（如 httpd、firmware.bin）、设备型号（如 DIR-878）、\n"
+    "   产品名称（如 DSL-AC3100）、厂商名称（如 QNAP）等任何能定位目标的信息\n\n"
+    "【历史已收集的参数】：\n"
+    "{existing_params}\n\n"
+    "【重要】：\n"
+    "1. 请保留历史已收集的参数，除非本次用户明确要修改\n"
+    "2. 新的用户输入可能只是补充缺失的信息，不要覆盖已有信息\n"
+    "3. 仔细分析所有历史对话，综合提取完整参数\n\n"
     "严格按照下述 JSON 模板输出（禁止输出额外解释或Markdown标记）：\n"
     "{\n"
-    "  \"cve_id\": \"\",          // 字符串，若缺失请保持为空字符串\n"
-    "  \"binary_filename\": \"\", // 字符串，若缺失请保持为空字符串\n"
+    "  \"cve_id\": \"\",          // 字符串，若仍未找到保持为空\n"
+    "  \"binary_filename\": \"\", // 字符串，若仍未找到保持为空\n"
     "  \"confidence\": {\n"
     "    \"cve_id\": \"high|medium|low|none\",\n"
     "    \"binary_filename\": \"high|medium|low|none\"\n"
     "  },\n"
-    "  \"notes\": \"\",            // 可选补充说明，可为空字符串\n"
-    "  \"missing_fields\": []      // 列表: 例如 [\"cve_id\"] 表示缺失字段\n"
+    "  \"notes\": \"\",            // 简要说明从对话中提取到了什么信息\n"
+    "  \"missing_fields\": []      // 列表：仍然缺失的必填字段，如 [\"cve_id\", \"binary_filename\"]\n"
     "}\n\n"
-    "请确保只返回合法的 JSON 文本。用户输入如下：\n"
+    "完整的历史对话如下：\n"
     "<<<\n"
     "{user_input}\n"
     ">>>\n"
@@ -169,10 +177,18 @@ class ParameterAgent(Agent):
             return self.REQUIRED_FIELDS_REPRODUCTION
         return self.REQUIRED_FIELDS_DISCOVERY
 
-    def process(self, query: str) -> Dict[str, Any]:  # type: ignore[override]
-        """向大模型请求解析结果，并结合启发式兜底逻辑。"""
+    def process(self, query: str, existing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:  # type: ignore[override]
+        """向大模型请求解析结果，并结合启发式兜底逻辑。
+        
+        Args:
+            query: 用户输入的查询文本（可以是多轮对话的累积）
+            existing_params: 历史已收集的参数字典
+        """
         query = (query or "").strip()
+        existing_params = existing_params or {}
         logger.info("ParameterAgent processing query (mode=%s): %s", self.work_mode.value, query)
+        logger.debug("Existing params: %s", existing_params)
+        
         raw_response: Optional[str] = None
         errors: List[str] = []
         llm_result: Dict[str, Any] = {}
@@ -180,11 +196,18 @@ class ParameterAgent(Agent):
         if not query:
             errors.append("empty_query")
         else:
+            # 构建已收集参数的描述
+            existing_params_desc = self._format_existing_params(existing_params)
+            
             # 根据工作模式选择不同的提取Prompt
             if self.work_mode == WorkMode.DISCOVERY:
                 prompt = EXTRACTION_PROMPT_DISCOVERY.replace("{user_input}", query)
             else:
                 prompt = EXTRACTION_PROMPT_REPRODUCTION.replace("{user_input}", query)
+            
+            # 插入已收集的参数信息
+            prompt = prompt.replace("{existing_params}", existing_params_desc)
+            
             try:
                 raw_response = self.chat_model.chat(prompt)
                 llm_result = self._parse_response(raw_response)
@@ -217,6 +240,25 @@ class ParameterAgent(Agent):
 
         logger.info("ParameterAgent result: %s", normalized)
         return normalized
+
+    def _format_existing_params(self, params: Dict[str, Any]) -> str:
+        """格式化已收集的参数为易读的文本描述"""
+        if not params:
+            return "（暂无已收集的参数）"
+        
+        lines = []
+        for key, value in params.items():
+            if value and str(value).strip():
+                # 为CWE ID添加描述
+                if key == "cwe_id" and value in CWE_DESCRIPTIONS:
+                    lines.append(f"  - {key}: {value} ({CWE_DESCRIPTIONS[value]})")
+                else:
+                    lines.append(f"  - {key}: {value}")
+        
+        if not lines:
+            return "（暂无已收集的参数）"
+        
+        return "\n".join(lines)
 
     def _parse_response(self, response: str) -> Dict[str, Any]:
         if not response:
@@ -449,45 +491,62 @@ class ParameterCollector:
         self._send_callback = send_callback
 
     async def handle_message(self, message: str) -> Dict[str, Any]:
+        """处理用户消息并收集参数
+        
+        此方法会将历史对话累积后一起传给LLM进行分析，确保对话记忆。
+        """
         message = (message or "").strip()
         if message:
-            self.history.append(message)
+            self.history.append(f"用户: {message}")
             if self.original_query is None:
                 self.original_query = message
+        
         if not self.initial_message_sent:
             mode_desc = "漏洞挖掘" if self.work_mode == WorkMode.DISCOVERY else "漏洞复现"
-            await self._send(f"参数收集智能体已启动（{mode_desc}模式），正在解析您的需求。", message_type="header1")
+            await self._send(f"参数收集智能体已启动（{mode_desc}模式），正在解析您的需求...", message_type="header1")
             self.initial_message_sent = True
 
-        result = self.agent.process(message)
+        # 将所有历史对话拼接成完整上下文
+        full_context = "\n".join(self.history)
         
-        # 更新必填参数
+        # 传入已收集的参数，让LLM保持记忆
+        current_params = {**self.parameters, **self.optional_parameters}
+        result = self.agent.process(full_context, existing_params=current_params)
+        
+        # 获取LLM的notes，用于向用户反馈
+        llm_notes = result.get("notes", "")
+        
+        # 更新必填参数（只更新非空值）
         for field in self.agent.required_fields:
             value = result.get(field)
             if isinstance(value, str) and value.strip():
+                old_value = self.parameters.get(field)
                 self.parameters[field] = value.strip()
+                # 记录参数更新
+                if old_value != value.strip():
+                    logger.info("Parameter updated: %s = %s (was: %s)", field, value.strip(), old_value)
         
-        # 更新可选参数
+        # 更新可选参数（只更新非空值）
         for field in self.optional_parameters:
             value = result.get(field)
             if isinstance(value, str) and value.strip():
+                old_value = self.optional_parameters.get(field)
                 self.optional_parameters[field] = value.strip()
+                if old_value != value.strip():
+                    logger.info("Optional parameter updated: %s = %s (was: %s)", field, value.strip(), old_value)
 
         missing = [field for field in self.agent.required_fields if not self.parameters.get(field)]
 
         if result.get("errors"):
-            await self._send("参数解析时出现异常，已启用兜底策略，请确认后继续。")
+            await self._send("⚠️ 参数解析时出现异常，已启用兜底策略。")
+
+        # 构建状态摘要
+        await self._send_status_summary(missing, llm_notes)
 
         if missing:
-            prompts = []
-            for field in missing:
-                if field not in self.prompted_fields:
-                    prompts.append(self.field_prompts.get(field, f"请提供 {field}"))
-                    self.prompted_fields.add(field)
-            if prompts:
-                await self._send("\n".join(prompts))
-            else:
-                await self._send("仍然缺少必要信息，请补充上述参数后再次发送。")
+            # 构建更详细的缺失信息提示
+            await self._send_missing_prompts(missing)
+            
             return {
                 "ready": False,
                 "parameters": {**self.parameters, **self.optional_parameters},
@@ -496,26 +555,9 @@ class ParameterCollector:
                 "work_mode": self.work_mode.value
             }
 
+        # 所有参数收集完成
         if not self.completed:
-            if self.work_mode == WorkMode.DISCOVERY:
-                cwe_desc = CWE_DESCRIPTIONS.get(self.parameters.get('cwe_id', ''), '')
-                summary = (
-                    "参数收集完成（漏洞挖掘模式）。\n"
-                    f"- CWE 类型: {self.parameters.get('cwe_id', 'N/A')}"
-                    f"{' - ' + cwe_desc if cwe_desc else ''}\n"
-                    f"- 目标二进制/固件: {self.parameters.get('binary_filename', 'N/A')}\n"
-                )
-                if self.optional_parameters.get('vendor'):
-                    summary += f"- 厂商: {self.optional_parameters['vendor']}\n"
-                summary += "系统将继续执行漏洞挖掘分析。"
-            else:
-                summary = (
-                    "参数收集完成（漏洞复现模式）。\n"
-                    f"- CVE ID: {self.parameters.get('cve_id', 'N/A')}\n"
-                    f"- 目标二进制/固件: {self.parameters.get('binary_filename', 'N/A')}\n"
-                    "系统将继续执行漏洞复现分析。"
-                )
-            await self._send(summary, message_type="header2")
+            await self._send_completion_summary()
             self.completed = True
 
         return {
@@ -525,6 +567,97 @@ class ParameterCollector:
             "query": "\n".join(self.history),
             "work_mode": self.work_mode.value
         }
+
+    async def _send_status_summary(self, missing: List[str], llm_notes: str) -> None:
+        """发送当前参数收集状态摘要"""
+        collected = []
+        
+        # 汇总已收集的必填参数
+        for field in self.agent.required_fields:
+            value = self.parameters.get(field)
+            if value:
+                if field == "cwe_id" and value in CWE_DESCRIPTIONS:
+                    collected.append(f"✓ {self._get_field_display_name(field)}: {value} ({CWE_DESCRIPTIONS[value]})")
+                else:
+                    collected.append(f"✓ {self._get_field_display_name(field)}: {value}")
+        
+        # 汇总已收集的可选参数
+        for field, value in self.optional_parameters.items():
+            if value:
+                collected.append(f"✓ {self._get_field_display_name(field)}（可选）: {value}")
+        
+        # 汇总缺失的参数
+        missing_names = [f"✗ {self._get_field_display_name(field)}" for field in missing]
+        
+        if collected or missing_names:
+            status_lines = ["📋 当前参数收集状态："]
+            if collected:
+                status_lines.extend(collected)
+            if missing_names:
+                status_lines.append("\n仍需补充：")
+                status_lines.extend(missing_names)
+            
+            if llm_notes:
+                status_lines.append(f"\n💡 {llm_notes}")
+            
+            await self._send("\n".join(status_lines))
+
+    async def _send_missing_prompts(self, missing: List[str]) -> None:
+        """发送缺失参数的详细提示"""
+        prompts = []
+        for field in missing:
+            if field not in self.prompted_fields:
+                prompt_text = self.field_prompts.get(field, f"请提供 {self._get_field_display_name(field)}")
+                prompts.append(f"❓ {prompt_text}")
+                self.prompted_fields.add(field)
+        
+        if prompts:
+            await self._send("\n\n".join(prompts))
+        else:
+            # 已经提示过所有缺失字段，给出更友好的提示
+            missing_display = "、".join([self._get_field_display_name(f) for f in missing])
+            await self._send(
+                f"⚠️ 仍缺少以下必要信息：{missing_display}\n\n"
+                f"请提供上述信息后，系统将继续执行分析。您可以用自然语言描述，无需严格遵循格式。"
+            )
+
+    async def _send_completion_summary(self) -> None:
+        """发送参数收集完成摘要"""
+        if self.work_mode == WorkMode.DISCOVERY:
+            cwe_desc = CWE_DESCRIPTIONS.get(self.parameters.get('cwe_id', ''), '')
+            summary = [
+                "✅ 参数收集完成（漏洞挖掘模式）",
+                f"  • CWE 类型: {self.parameters.get('cwe_id', 'N/A')}"
+            ]
+            if cwe_desc:
+                summary.append(f"    {cwe_desc}")
+            summary.append(f"  • 目标二进制/固件: {self.parameters.get('binary_filename', 'N/A')}")
+            
+            if self.optional_parameters.get('vendor'):
+                summary.append(f"  • 厂商: {self.optional_parameters['vendor']}")
+            if self.optional_parameters.get('cve_id'):
+                summary.append(f"  • 参考CVE: {self.optional_parameters['cve_id']}")
+            
+            summary.append("\n🚀 系统将继续执行漏洞挖掘分析...")
+        else:
+            summary = [
+                "✅ 参数收集完成（漏洞复现模式）",
+                f"  • CVE ID: {self.parameters.get('cve_id', 'N/A')}",
+                f"  • 目标二进制/固件: {self.parameters.get('binary_filename', 'N/A')}",
+                "\n🚀 系统将继续执行漏洞复现分析..."
+            ]
+        
+        await self._send("\n".join(summary), message_type="header2")
+
+    def _get_field_display_name(self, field: str) -> str:
+        """获取字段的友好显示名称"""
+        display_names = {
+            "cve_id": "CVE编号",
+            "cwe_id": "CWE类型",
+            "binary_filename": "目标固件/二进制",
+            "vendor": "设备厂商",
+        }
+        return display_names.get(field, field)
 
     async def _send(self, content: str, message_type: str = "message") -> None:
         payload = {
