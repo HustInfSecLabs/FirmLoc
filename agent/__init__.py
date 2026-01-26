@@ -16,3 +16,5 @@ from .parameter_agent import (
     CWE_DESCRIPTIONS
 )
 from .hardcoded_string_audit import HardcodedStringAuditor
+from .vuln_react_agent import VulnReActAgent, VulnReActRefiner, react_analyze_function_pair
+from .vuln_tools import VulnToolContext, PseudoCodeIndex, create_vuln_tools

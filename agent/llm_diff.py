@@ -11,11 +11,14 @@ from openai import OpenAI
 from pathlib import Path
 import glob, time, random
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 from model import AgentModel
 from log import logger
 from agent.data_flow_utils import format_key_param_data_flow, format_vuln_context
+
+# ReAct Agent 相关导入（延迟导入以避免循环依赖）
+# from agent.vuln_react_agent import VulnReActAgent, VulnReActRefiner
 
 
 # 读取漏洞类型对应的Scenario和Property的JSON文件路径
@@ -984,12 +987,20 @@ class Refiner:
         LOG_FILE,
         pre_binary_name=None,
         post_binary_name=None,
-            include_call_chain_code: bool = True,
+        include_call_chain_code: bool = True,
         pseudo_indexes: Optional[Dict[str, Any]] = None,
         slice_before: int = DEFAULT_SLICE_BEFORE,
         slice_after: int = DEFAULT_SLICE_AFTER,
         danger_apis: Optional[List[str]] = None,
         full_func_line_threshold: int = 120,
+        # ReAct Agent 相关参数
+        use_react_agent: bool = True,
+        pre_pseudo_file: Optional[str] = None,
+        post_pseudo_file: Optional[str] = None,
+    react_model_name: str = "DeepSeek",  # 对应 config.ini 中的 LLM.{model_name} 配置节
+    react_max_iterations: int = 20,
+        send_message: Optional[Callable] = None,
+        history_dir: Optional[str] = None,
     ):
         self.log = LOG_FILE
         self.context_log = f"{LOG_FILE}.ctx"  # 将上下文单独存储，避免污染 vuln_analysis_results.json
@@ -1015,6 +1026,18 @@ class Refiner:
         # 二进制文件锁，防止对同一文件的并发 IDA 分析
         self._binary_locks = {}
         self._lock_access_lock = asyncio.Lock()  # 保护 _binary_locks 的访问
+        
+        # ReAct Agent 配置
+        self.use_react_agent = use_react_agent
+        self.pre_pseudo_file = pre_pseudo_file
+        self.post_pseudo_file = post_pseudo_file
+        self.react_model_name = react_model_name
+        self.react_max_iterations = react_max_iterations
+        self.send_message = send_message
+        self.history_dir = history_dir
+        
+        # 延迟初始化 ReAct Agent（在需要时创建）
+        self._react_refiner = None
 
     async def _get_lock_for_binary(self, binary_name):
         async with self._lock_access_lock:
@@ -1359,14 +1382,21 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         
         if need_rag:
             logger.info(f"对 {os.path.basename(fa)} vs {os.path.basename(fb)} 进行二次判断")
-            # 进行RAG二次判断，传递二进制文件名和工作模式
-            rag_result = await self.async_rag_query2bot(
-                fa, fb, cve_details, cwe,
-                pre_binary_name=self.pre_binary_name,
-                post_binary_name=self.post_binary_name,
-                work_mode=work_mode
-            )
-            final_result = f"初次分析结果:\n{result}\n\nRAG二次分析结果:\n{rag_result}"
+            
+            # 使用 ReAct Agent 进行二次分析
+            if self.use_react_agent:
+                rag_result = await self.async_react_query(
+                    fa, fb, cve_details, cwe, work_mode
+                )
+            else:
+                # 进行RAG二次判断，传递二进制文件名和工作模式（旧方式，已弃用）
+                rag_result = await self.async_rag_query2bot(
+                    fa, fb, cve_details, cwe,
+                    pre_binary_name=self.pre_binary_name,
+                    post_binary_name=self.post_binary_name,
+                    work_mode=work_mode
+                )
+            final_result = f"初次分析结果:\n{result}\n\nReAct智能分析结果:\n{rag_result}"
         else:
             final_result = result if result else "分析结果为空"
         
@@ -1374,8 +1404,59 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         self._task_cache[cache_key] = final_result
         return final_result
     
+    async def async_react_query(self, fa, fb, cve_details=None, cwe=None, work_mode: str = "reproduction") -> str:
+        """使用 ReAct Agent 进行二次分析
+        
+        Args:
+            fa: 补丁前的伪C文件路径
+            fb: 补丁后的伪C文件路径
+            cve_details: CVE详情
+            cwe: CWE信息
+            work_mode: 工作模式
+        
+        Returns:
+            分析结果字符串
+        """
+        # 延迟导入，避免循环依赖
+        from agent.vuln_react_agent import VulnReActRefiner
+        
+        # 懒初始化 ReAct Refiner
+        if self._react_refiner is None:
+            logger.info("初始化 ReAct Agent...")
+            self._react_refiner = VulnReActRefiner(
+                log_file=self.log,
+                pre_binary_name=self.pre_binary_name,
+                post_binary_name=self.post_binary_name,
+                pre_pseudo_file=self.pre_pseudo_file,
+                post_pseudo_file=self.post_pseudo_file,
+                model_name=self.react_model_name,
+                max_iterations=self.react_max_iterations,
+                send_message=self.send_message,
+                history_dir=self.history_dir
+            )
+        
+        try:
+            result = await self._react_refiner.refine(
+                fa=fa,
+                fb=fb,
+                cve_details=cve_details or "",
+                cwe=cwe or "",
+                work_mode=work_mode
+            )
+            return result
+        except Exception as e:
+            logger.error(f"ReAct Agent 分析失败: {e}")
+            # 降级到旧方式
+            logger.info("降级到传统 RAG 分析...")
+            return await self.async_rag_query2bot(
+                fa, fb, cve_details, cwe,
+                pre_binary_name=self.pre_binary_name,
+                post_binary_name=self.post_binary_name,
+                work_mode=work_mode
+            )
+    
     async def async_rag_query2bot(self, fa, fb, cve_details=None, cwe=None, pre_binary_name=None, post_binary_name=None, work_mode: str = "reproduction") -> str:
-        """异步版本的rag_query2bot函数，获取函数调用链信息并添加到提示词中
+        """异步版本的rag_query2bot函数，获取函数调用链信息并添加到提示词中（旧方式，作为降级备选）
         
         Args:
             fa: 补丁前的伪C文件路径
@@ -1535,7 +1616,9 @@ async def main(chat_id: str,
          slice_after: int = DEFAULT_SLICE_AFTER,
          danger_api_list: Optional[List[str]] = None,
          full_func_line_threshold: int = 300,
-         work_mode: str = "reproduction"):
+         work_mode: str = "reproduction",
+         react_model_name: str = "DeepSeek",
+         react_max_iterations: int = 20):
     """
     主函数：对比两个固件版本的二进制差异并分析漏洞
     
@@ -1555,6 +1638,8 @@ async def main(chat_id: str,
         danger_api_list: 危险API列表
         full_func_line_threshold: 全函数行数阈值
         work_mode: 工作模式 - "reproduction"（漏洞复现）或 "discovery"（漏洞挖掘）
+        react_model_name: ReAct Agent 使用的模型配置名称（对应 config.ini 中的 LLM.{model_name} 节）
+    react_max_iterations: ReAct Agent 最大迭代次数
     """
     # ---------- 动态定位 ----------
     paths = locate_paths(chat_id, history_root, binary_filename)
@@ -1611,6 +1696,14 @@ async def main(chat_id: str,
         slice_after=slice_after,
         danger_apis=danger_api_list,
         full_func_line_threshold=full_func_line_threshold,
+        # ReAct Agent 配置
+        use_react_agent=True,
+        pre_pseudo_file=pre_c,
+        post_pseudo_file=post_c,
+        react_model_name=react_model_name,  # 使用函数参数
+    react_max_iterations=react_max_iterations,
+        send_message=send_message,
+        history_dir=str(WORK_DIR),
     )
 
     # 定义并行处理函数对的任务列表
@@ -1701,13 +1794,15 @@ async def llm_diff(chat_id: str, history_root: str, binary_filename: str,
                  slice_before: int = DEFAULT_SLICE_BEFORE,
                  slice_after: int = DEFAULT_SLICE_AFTER,
                  danger_api_list: Optional[List[str]] = None,
-                 full_func_line_threshold: int = 300):
+                 full_func_line_threshold: int = 300,
+                 react_model_name: str = "DeepSeek",
+                 react_max_iterations: int = 20):
     """包装函数，保持与原代码的兼容性"""
     return await main(
         chat_id,
         history_root,
         binary_filename,
-    post_binary_filename=post_binary_filename,
+        post_binary_filename=post_binary_filename,
         pre_c=pre_c,
         post_c=post_c,
         cve_details=cve_details,
@@ -1718,6 +1813,8 @@ async def llm_diff(chat_id: str, history_root: str, binary_filename: str,
         slice_after=slice_after,
         danger_api_list=danger_api_list,
         full_func_line_threshold=full_func_line_threshold,
+        react_model_name=react_model_name,
+        react_max_iterations=react_max_iterations,
     )
 
 if __name__ == "__main__":
