@@ -9,8 +9,8 @@ from .online_search import OnlineSearchAgent
 from .binary_filter import BinaryFilterAgent
 from .repair_agent import run_repair_agent
 from .parameter_agent import (
-    ParameterAgent, 
-    ParameterCollector, 
+    ParameterAgent,
+    ParameterCollector,
     WorkMode,
     CWE_SENSITIVE_BINARIES,
     CWE_DESCRIPTIONS
@@ -18,3 +18,4 @@ from .parameter_agent import (
 from .hardcoded_string_audit import HardcodedStringAuditor
 from .vuln_react_agent import VulnReActAgent, VulnReActRefiner, react_analyze_function_pair
 from .vuln_tools import VulnToolContext, PseudoCodeIndex, create_vuln_tools
+from .path_reach_agent import PathReachAgent, PathReachResult, PathReachStatus, RiskLevel, PathReachSummary
