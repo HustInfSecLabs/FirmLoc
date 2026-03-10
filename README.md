@@ -80,19 +80,11 @@ pip install -r requirements.txt
 
 编辑 `config/config.ini`：
 
-- `[LLM]` 选择模型服务（如 WenXin、Qwen、OpenAI、Claude、GLM 等），并在对应小节填入 `api_key`、`base_url`。
-- `[result.path] savedir` 为运行数据根目录（默认 `history`）。
-- `[CVE]` 段参数为必填：
-	- `cve_id`：要复现/分析的 CVE 编号，用于情报收集阶段抓取相关信息（不可为空）。
-	- `binary_filename`：需要分析的固件名（或关键标识），用于可疑文件筛选（不可为空）。
+- 选择模型服务（现有 GPT、WenXin、DeepSeek、Qwen、Claude、GLM 分节），在对应小节填入 `api_key`、`base_url`、`model_name`。
+- `[result.path].savedir` 为运行数据根目录（默认 `history`）。
+- IDA 远端服务地址在 `[IDA_SERVICE].service_url` 配置。
 
-示例：
-
-```ini
-[CVE]
-cve_id = CVE-2024-12345
-binary_filename = Qnap HS-251
-```
+说明：运行时所需的 `cve_id`（可选）/`cwe_id`（可选）/`binary_filename` 等任务参数不再写在配置文件里，而是由 WebSocket 会话中的参数收集智能体与用户交互获取（见后文“启动分析”）。支持“漏洞复现”（提供 CVE）与“漏洞挖掘”（仅提供 CWE/漏洞类型）两种模式。
 
 
 ### 5) 配置 IDA 后端服务（Windows）
@@ -162,6 +154,7 @@ upload_firmware("/path/to/firmware_new.bin", chat_id)
 		"content": "请根据两个版本的固件文件，分析差异并给出可能存在的漏洞和成因。"
 	}
 	```
+- 会先由“参数收集智能体”与用户对话，识别 `binary_filename` 以及 `cve_id` 或 `cwe_id`（缺一则提示补充）。
 - 服务会持续推送流水线阶段、命令与截图链接（`/static/images/...`）。
 
 ### 获取对话列表
@@ -193,6 +186,7 @@ upload_firmware("/path/to/firmware_new.bin", chat_id)
 | --- | --- | --- |
 | 固件比较（默认） | 上传两个固件/镜像文件（.bin/.img/.tar 等） | Binwalk 自动解包 → Binary Filter 从提取目录挑选可疑二进制 → IDA/BinDiff/LLM | 
 | 二进制/Windows 程序比较 | 上传两个可执行文件（ELF/Mach-O/PE，例如 `.so`、`.exe`、`.dll`） | 自动跳过 Binwalk 与文件筛选，直接将用户提供的二进制对送入 IDA → BinDiff → LLM |
+| 漏洞挖掘（仅有 CWE/漏洞类型） | WebSocket 会话提供 `binary_filename` + `cwe_id/漏洞类型`（无 CVE） | 情报阶段以 CWE/关键词检索；Binary Filter/LLM prompt 自动降级，仍按 Binwalk → IDA → BinDiff → LLM 全流程运行 |
 
 > 说明：当系统检测到上传的两个文件都带有 ELF/Mach-O/PE 头时，会自动切换到“二进制比较”模式，适用于 Windows 程序或已手动提取出的二进制对。若希望强制执行固件模式，只需上传原始固件镜像；若希望直接比较二进制，请确保同一个 `chat_id` 目录下仅包含那两个可执行文件，以避免歧义。
 
@@ -213,7 +207,7 @@ VulnAgent/
 		bindiff_tool.py        # 调用 bindiff CLI
 		bindiff_visual.py      # 通过鼠标宏操控 BinDiff UI 并自动截图
 	config/
-		config.ini             # LLM 服务、保存目录、CVE 提示项等配置
+		config.ini             # LLM 服务、保存目录、IDA 服务地址
 	history/                 # 运行数据根目录（按 chat_id 分组）
 	images/                  # 静态图片目录（通过 /static/images 提供）
 	requirements.txt         # Python 依赖
