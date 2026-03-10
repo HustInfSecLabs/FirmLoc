@@ -354,3 +354,106 @@ def is_binary_file(file_path: str) -> bool:
             return True
 
     return False
+
+
+# ==================== JSON 解析工具 ====================
+
+def strip_markdown_code_block(content: str) -> str:
+    """移除markdown代码块标记"""
+    content = content.strip()
+    if content.startswith('```json'):
+        content = content[7:].strip()
+    elif content.startswith('```'):
+        content = content[3:].strip()
+    if content.endswith('```'):
+        content = content[:-3].strip()
+    return content
+
+
+def find_json_object_end(content: str) -> int:
+    """
+    找到第一个完整JSON对象的结束位置
+    
+    使用状态机方式匹配括号,正确处理字符串内的引号和转义字符
+    
+    Args:
+        content: 以'{'开头的字符串
+        
+    Returns:
+        JSON对象的结束位置(不包含),如果未找到返回0
+    """
+    if not content or not content.startswith('{'):
+        return 0
+    
+    brace_count = 0
+    in_string = False
+    escape_next = False
+    
+    for i, char in enumerate(content):
+        if escape_next:
+            escape_next = False
+            continue
+        
+        if char == '\\':
+            escape_next = True
+            continue
+        
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        
+        if not in_string:
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    return i + 1
+    
+    return 0
+
+
+def extract_first_json(content: str) -> dict:
+    """
+    从内容中提取第一个JSON对象
+    
+    Args:
+        content: 可能包含JSON的文本内容
+        
+    Returns:
+        解析后的字典,如果解析失败返回空字典
+    """
+    import json
+    
+    cleaned = strip_markdown_code_block(content)
+    if not cleaned.startswith('{'):
+        return {}
+    
+    json_end = find_json_object_end(cleaned)
+    if json_end == 0:
+        return {}
+    
+    try:
+        return json.loads(cleaned[:json_end])
+    except json.JSONDecodeError:
+        return {}
+
+
+def severity_to_score(severity: str) -> int:
+    """
+    将严重程度字符串转换为数字分数
+    
+    Args:
+        severity: 严重程度字符串 (Critical/High/Medium/Low等)
+        
+    Returns:
+        对应的分数 (8/5/2/0)
+    """
+    severity_lower = severity.lower() if severity else ""
+    if severity_lower in ["critical", "high"]:
+        return 8
+    elif severity_lower in ["medium", "moderate"]:
+        return 5
+    elif severity_lower in ["low", "minor"]:
+        return 2
+    return 0

@@ -121,6 +121,39 @@ class ReasoningStreamHandler(BaseCallbackHandler):
             logger.error(f"发送推理消息失败: {e}")
 
 
+def clean_react_output(text: str) -> str:
+    """
+    清理 ReAct Agent 的输出,移除可能干扰解析的格式符号
+    
+    Args:
+        text: 原始 LLM 输出文本
+        
+    Returns:
+        清理后的文本
+    """
+    if not text:
+        return text
+    
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        # 移除独立的 ** 行（可能是格式错误）
+        if line.strip() == '**':
+            continue
+        
+        # 处理包含 Action: 或 Action Input: 的行
+        if 'Action:' in line or 'Action Input:' in line:
+            # 移除所有 ** 符号（开头、中间、结尾）
+            line = line.replace('**', '')
+            # 清理可能的多余空格
+            line = re.sub(r'\s+', ' ', line).strip()
+            
+        cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines)
+
+
 class VulnReActAgent:
     """
     漏洞分析 ReAct 智能体
@@ -133,7 +166,7 @@ class VulnReActAgent:
 
 {tools}
 
-Use the following format:
+Use the following format STRICTLY:
 
 Question: the input question you must answer
 Thought: you should always think about what to do
@@ -144,10 +177,14 @@ Observation: the result of the action
 Thought: I now know the final answer
 Final Answer: the final answer to the original input question
 
-IMPORTANT: 
+CRITICAL RULES: 
+- Action MUST start with "Action: " followed by exactly one tool name from [{tool_names}]
+- DO NOT use markdown formatting like **, *, or ``` in Action lines
+- DO NOT add extra text after Action or Action Input
 - Action Input MUST be valid JSON format, e.g., {{"function_name": "do_system", "version": "pre"}}
 - When you have enough information, use the submit_analysis tool to provide your final verdict
 - Do not repeat the same tool call with the same parameters
+- After calling submit_analysis, you MUST stop and wait for Final Answer
 
 Begin!
 
@@ -166,7 +203,7 @@ Thought: {agent_scratchpad}"""
         post_binary_name: str,
         model_name: str = "GPT",
         temperature: float = 0,
-        max_iterations: int = 20,
+        max_iterations: int = 50,
         ida_service_url: str = "http://10.12.189.21:5000",
         send_message: Optional[Callable] = None,
         history_dir: Optional[str] = None
@@ -271,6 +308,27 @@ Thought: {agent_scratchpad}"""
             prompt=prompt
         )
     
+    def _handle_parsing_error(self, error: Exception) -> str:
+        """
+        处理 Agent 输出解析错误
+        
+        当 LLM 输出格式不符合 ReAct 规范时，尝试修复或给出友好提示
+        """
+        error_msg = str(error)
+        logger.warning(f"Agent 输出解析错误: {error_msg}")
+        
+        # 检查是否是 Action 格式错误
+        if "is not a valid tool" in error_msg or "Could not parse LLM output" in error_msg:
+            return (
+                "Invalid output format detected. Please follow the EXACT format:\n"
+                "Action: <tool_name>\n"
+                "Action Input: <valid_json>\n\n"
+                "Do NOT use markdown formatting (**, *, ```) in Action lines.\n"
+                "Available tools: get_function_body, get_callers, get_callees, get_data_flow, submit_analysis"
+            )
+        
+        return f"Parsing error: {error_msg}. Please check your output format and try again."
+    
     def _create_executor(self) -> AgentExecutor:
         """创建 Agent 执行器"""
         # 创建回调处理器
@@ -283,7 +341,7 @@ Thought: {agent_scratchpad}"""
             tools=self.tools,
             max_iterations=self.max_iterations,
             verbose=True,
-            handle_parsing_errors=True,
+            handle_parsing_errors=self._handle_parsing_error,
             return_intermediate_steps=True,
             callbacks=callbacks
         )
@@ -427,7 +485,7 @@ class VulnReActRefiner:
         pre_pseudo_file: str,
         post_pseudo_file: str,
         model_name: str = "GPT",
-        max_iterations: int = 20,
+        max_iterations: int = 50,
         send_message: Optional[Callable] = None,
         history_dir: Optional[str] = None
     ):

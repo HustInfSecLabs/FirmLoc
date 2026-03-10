@@ -6,8 +6,6 @@ import subprocess
 import tiktoken
 import asyncio
 import requests
-import concurrent.futures
-from openai import OpenAI
 from pathlib import Path
 import glob, time, random
 from datetime import datetime
@@ -16,9 +14,6 @@ from typing import Any, Dict, List, Optional, Callable
 from model import AgentModel
 from log import logger
 from agent.data_flow_utils import format_key_param_data_flow, format_vuln_context
-
-# ReAct Agent 相关导入（延迟导入以避免循环依赖）
-# from agent.vuln_react_agent import VulnReActAgent, VulnReActRefiner
 
 
 # 读取漏洞类型对应的Scenario和Property的JSON文件路径
@@ -379,38 +374,53 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
 
 def extract_vulnerability_entries(results: str) -> List[Dict[str, Any]]:
     """从分析结果中提取各个漏洞条目，并解析评分"""
-    entries = []
-    # 按分隔符切分
-    sections = re.split(r'===\s+(.+?\.c)\s+vs\s+(.+?\.c)\s+===', results)
+    from utils.utils import extract_first_json, severity_to_score
     
-    for i in range(1, len(sections), 3):
-        if i + 1 < len(sections):
-            pre_file = sections[i]
-            post_file = sections[i + 1]
-            content = sections[i + 2] if i + 2 < len(sections) else ""
+    entries = []
+    # 按分隔符切分 - 支持普通分析和ReAct分析两种格式
+    sections = re.split(r'===\s+(.+?\.c)\s+vs\s+(.+?\.c)(?:\s+\(ReAct[^)]*\))?\s+===', results)
+    
+    for idx in range(1, len(sections), 3):
+        if idx + 1 >= len(sections):
+            break
             
-            # 提取漏洞评分
-            score = 0
-            score_match = re.search(r'["\']?漏洞评分["\']?\s*[:：]\s*(\d+)', content, re.IGNORECASE)
-            if score_match:
-                score = int(score_match.group(1))
-            
-            # 提取是否为真实漏洞的判断
-            is_vuln = False
-            # 检查是否有明确的漏洞分析（RAG二次判断）
+        pre_file = sections[idx]
+        post_file = sections[idx + 1]
+        content = sections[idx + 2] if idx + 2 < len(sections) else ""
+        
+        # 提取漏洞评分(传统中文格式)
+        score = 0
+        score_match = re.search(r'["\']?漏洞评分["\']?\s*[:：]\s*(\d+)', content, re.IGNORECASE)
+        if score_match:
+            score = int(score_match.group(1))
+        
+        # 提取是否为真实漏洞的判断
+        is_vuln = False
+        
+        # 尝试解析JSON格式的ReAct分析结果
+        result_data = extract_first_json(content)
+        if result_data:
+            vuln_found = result_data.get("vulnerability_found", "").lower()
+            if vuln_found == "yes":
+                is_vuln = True
+                severity = result_data.get("severity", "")
+                json_score = severity_to_score(severity)
+                score = max(score, json_score if json_score > 0 else 5)  # 默认中危
+        
+        # 传统方法:检查是否有明确的漏洞分析（RAG二次判断）
+        if not is_vuln:
             if 'RAG二次判断' in content or '漏洞成因' in content:
-                # 检查是否有明确的"无漏洞"或"非漏洞"判断
                 if not re.search(r'(无漏洞|非漏洞|不是漏洞|false\s*fix)', content, re.IGNORECASE):
                     is_vuln = True
-            
-            entries.append({
-                'pre_file': pre_file,
-                'post_file': post_file,
-                'content': content.strip(),
-                'score': score,
-                'is_vuln': is_vuln,
-                'length': len(content)
-            })
+        
+        entries.append({
+            'pre_file': pre_file,
+            'post_file': post_file,
+            'content': content.strip(),
+            'score': score,
+            'is_vuln': is_vuln,
+            'length': len(content)
+        })
     
     return entries
 
@@ -659,14 +669,6 @@ def locate_paths(chat_id: str, history_root: str | Path, binary_filename: str) -
         FOLDER_B=str(folder_b),
         LOG_FILE=str(log_file)
     )
-# BinDiff 导出结果
-#RESULTS_FILE  = r"D:\HUSTCourse\402\chenyi_zhu\TestCase\httpd06_vs_httpd08.results"
-# 切分后输出目录
-#FOLDER_A      = r"D:\HUSTCourse\402\chenyi_zhu\TestCase\folder_a"
-#FOLDER_B      = r"D:\HUSTCourse\402\chenyi_zhu\TestCase\folder_b"
-# refiner 日志
-#LOG_FILE      = r"D:\HUSTCourse\402\chenyi_zhu\TestCase\vuln_analysis_results.json"
-# ————————————————
 
 # 正则：匹配 bindiff 行并捕获相似度、函数名
 res_pat = re.compile(
@@ -1618,7 +1620,7 @@ async def main(chat_id: str,
          full_func_line_threshold: int = 300,
          work_mode: str = "reproduction",
          react_model_name: str = "DeepSeek",
-         react_max_iterations: int = 20):
+         react_max_iterations: int = 50):
     """
     主函数：对比两个固件版本的二进制差异并分析漏洞
     
@@ -1649,7 +1651,8 @@ async def main(chat_id: str,
     FOLDER_A, FOLDER_B = paths["FOLDER_A"], paths["FOLDER_B"]
     LOG_FILE = paths["LOG_FILE"]
 
-    globals().update(paths)        # 直接把常量名注入全局
+    # 注意：不使用 globals().update(paths)，避免多轮循环分析时全局变量被覆盖
+    # 所有路径变量已在上方显式赋值，后续直接使用局部变量
 
     logger.info("路径确认：")
     for k, v in paths.items():
@@ -1759,7 +1762,7 @@ async def main(chat_id: str,
     # 使用 asyncio.gather 执行任务，但消息已在每个任务完成时发送
     # 结果按完成顺序发送给前端，用户可以实时看到进度
     await asyncio.gather(*bounded_tasks)
-    # 5. 最后生成总结
+    # 5. 最后生成总
     try:
         with open(LOG_FILE, 'r', encoding='utf-8') as f:
             results = f.read()
@@ -1796,7 +1799,7 @@ async def llm_diff(chat_id: str, history_root: str, binary_filename: str,
                  danger_api_list: Optional[List[str]] = None,
                  full_func_line_threshold: int = 300,
                  react_model_name: str = "DeepSeek",
-                 react_max_iterations: int = 20):
+                 react_max_iterations: int = 50):
     """包装函数，保持与原代码的兼容性"""
     return await main(
         chat_id,
