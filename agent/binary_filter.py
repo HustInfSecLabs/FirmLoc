@@ -385,9 +385,37 @@ class BinaryFilterAgent(Agent):
 
             normalized, warning = self._normalize_process_result(process_result)
             if normalized:
-                if warning:
-                    normalized["message"] = f"{normalized.get('message', '')} | {warning}".strip(" |")
-                return normalized, raw_response
+                # 检查是否返回了有效结果
+                has_binaries = bool(normalized.get("suspicious_binaries"))
+                status_is_success = normalized.get("status") == "success"
+                
+                # 如果是最后一次尝试，或者返回了有效的可疑二进制列表，则接受结果
+                is_last_attempt = (attempt == max_attempts - 1)
+                
+                if has_binaries or status_is_success or is_last_attempt:
+                    if warning:
+                        normalized["message"] = f"{normalized.get('message', '')} | {warning}".strip(" |")
+                    return normalized, raw_response
+                
+                # 否则，如果模型返回了 error 且没有可疑二进制，触发重试
+                if not has_binaries and not status_is_success:
+                    error_msg = f"模型返回 status=error 且未找到可疑二进制。原因: {normalized.get('message', '未知')}"
+                    errors.append(error_msg)
+                    logger.warning(f"第 {attempt + 1} 次尝试: {error_msg}，将进行重试...")
+                    
+                    # 构造更强烈的重试提示
+                    retry_hint = (
+                        "\n\n上一次分析未能找到可疑的二进制文件。"
+                        "请重新仔细分析提供的二进制列表和漏洞信息，"
+                        "尝试从以下角度寻找可能存在漏洞的二进制文件："
+                        "\n1. 文件名中包含与漏洞相关的服务名称（如httpd、cgi、admin等）"
+                        "\n2. 路径中包含网络服务相关目录（如/usr/sbin、/bin、/usr/bin等）"
+                        "\n3. 常见的网络服务程序和守护进程"
+                        "\n\n如果确实无法找到明确的可疑文件，请至少返回2-3个最有可能相关的二进制文件。"
+                        "\n严格按照JSON格式输出，status设为\"success\"，并在suspicious_binaries数组中至少包含1-3个条目。"
+                    )
+                    prompt = prompt + retry_hint
+                    continue
 
             errors.append(warning or "模型返回内容无法规范化")
             prompt = self._build_retry_prompt(prompt, errors[-1])
@@ -436,6 +464,83 @@ class BinaryFilterAgent(Agent):
         
         # 按分数降序排序
         scored_binaries.sort(key=lambda x: x["score"], reverse=True)
+        return scored_binaries[:10]  # 返回前10个
+    
+    def _heuristic_filter_by_cve(self, executable_binaries: str, cve_details: str) -> list:
+        """
+        基于CVE描述的启发式筛选，提取CVE中提到的服务/程序名称
+        
+        从CVE描述中提取常见的服务名、程序名，然后在二进制列表中匹配
+        """
+        if not cve_details or not executable_binaries:
+            return []
+        
+        # 常见的服务/程序关键词（优先级从高到低）
+        common_services = {
+            # Web服务器
+            "httpd": 15, "apache": 15, "nginx": 15, "lighttpd": 15, 
+            "goahead": 15, "boa": 15, "uhttpd": 15, "mini_httpd": 15,
+            "thttpd": 15, "mongoose": 15,
+            # CGI/脚本处理
+            "cgi": 12, "cgi-bin": 12, "php": 10, "fcgi": 10,
+            # FTP服务
+            "ftpd": 15, "vsftpd": 15, "proftpd": 15, "pure-ftpd": 15,
+            # 远程访问
+            "sshd": 15, "telnetd": 15, "dropbear": 15,
+            # 网络服务
+            "upnpd": 12, "miniupnpd": 12, "samba": 12, "smbd": 12,
+            "dhcpd": 10, "dnsmasq": 10, "hostapd": 10,
+            # 其他常见服务
+            "busybox": 8, "login": 10, "admin": 10, "config": 8,
+            "setup": 10, "upgrade": 10, "update": 10,
+        }
+        
+        # 从CVE描述中提取关键词
+        cve_lower = cve_details.lower()
+        extracted_keywords = {}
+        
+        for keyword, weight in common_services.items():
+            if keyword in cve_lower:
+                extracted_keywords[keyword] = weight
+        
+        # 如果没有提取到关键词，使用默认的高优先级服务
+        if not extracted_keywords:
+            logger.warning("CVE描述中未找到明确的服务名，使用默认优先级列表")
+            extracted_keywords = {
+                "httpd": 10, "cgi": 8, "ftpd": 8, "sshd": 8, 
+                "telnetd": 8, "upnpd": 8, "admin": 6, "setup": 6
+            }
+        
+        # 对二进制列表进行评分
+        binaries = executable_binaries.strip().split('\n')
+        scored_binaries = []
+        
+        for binary_path in binaries:
+            binary_name = Path(binary_path).name.lower()
+            binary_path_lower = binary_path.lower()
+            score = 0
+            matched_keywords = []
+            
+            for keyword, weight in extracted_keywords.items():
+                if keyword in binary_name:
+                    score += weight * 2  # 文件名匹配权重加倍
+                    matched_keywords.append(keyword)
+                elif keyword in binary_path_lower:
+                    score += weight  # 路径匹配使用原权重
+                    matched_keywords.append(keyword)
+            
+            if score > 0:
+                scored_binaries.append({
+                    "path": binary_path,
+                    "name": Path(binary_path).name,
+                    "score": score,
+                    "keywords": list(set(matched_keywords))  # 去重
+                })
+        
+        # 按分数降序排序
+        scored_binaries.sort(key=lambda x: x["score"], reverse=True)
+        
+        logger.info(f"CVE启发式筛选: 从 {len(binaries)} 个二进制中找到 {len(scored_binaries)} 个匹配")
         return scored_binaries[:10]  # 返回前10个
     
     def _format_reference_cves(self, cve_details: str, max_cves: int = 5) -> str:
@@ -489,11 +594,10 @@ class BinaryFilterAgent(Agent):
         """
         try:
             logger.info(f"BinaryFilterAgent开始分析 (mode={work_mode}, cwe={cwe_id}, diff_filter={enable_diff_filter})...")
-            print(f"开始分析并筛选可疑的二进制文件... (mode={work_mode})")
             
             # 第一步：获取所有可执行二进制文件
             all_executable_binaries = self._get_executable_binaries(extracted_files_path)
-            print(f"扫描到 {len(all_executable_binaries.strip().split(chr(10)))} 个可执行二进制文件")
+            logger.info(f"扫描到 {len(all_executable_binaries.strip().split(chr(10)))} 个可执行二进制文件")
             
             # 第二步：如果启用差异筛选且提供了两个固件路径，则先筛选出有差异的文件
             filtered_binaries = all_executable_binaries
@@ -501,7 +605,6 @@ class BinaryFilterAgent(Agent):
             
             if enable_diff_filter and old_firmware_path and new_firmware_path:
                 logger.info("开始检测两个版本之间的二进制文件差异...")
-                print("正在检测两个固件版本之间的二进制差异...")
                 
                 # 将可执行二进制列表转换为路径列表
                 binary_paths = [line.strip() for line in all_executable_binaries.strip().split('\n') if line.strip()]
@@ -513,7 +616,6 @@ class BinaryFilterAgent(Agent):
                 # 打印差异摘要
                 diff_summary = format_diff_summary(diff_result)
                 logger.info(f"差异检测结果:\n{diff_summary}")
-                print(diff_summary)
                 
                 # 获取修改过的文件列表（包含modified和added，不包含removed）
                 modified_list = get_modified_binaries_list(diff_result, include_added=True, include_removed=False)
@@ -521,25 +623,17 @@ class BinaryFilterAgent(Agent):
                 if modified_list:
                     filtered_binaries = "\n".join(modified_list)
                     logger.info(f"筛选后保留 {len(modified_list)} 个有差异的二进制文件")
-                    print(f"筛选后保留 {len(modified_list)} 个有差异的二进制文件，将仅分析这些文件")
                 else:
                     logger.warning("未检测到任何二进制文件有差异，将分析所有二进制文件")
-                    print("警告: 未检测到任何二进制文件有差异，将分析所有二进制文件")
                     filtered_binaries = all_executable_binaries
             else:
                 if not enable_diff_filter:
                     logger.info("差异筛选已禁用，将分析所有二进制文件")
-                    print("差异筛选已禁用，将分析所有二进制文件")
                 else:
                     logger.warning("未提供固件路径，跳过差异检测，将分析所有二进制文件")
-                    print("未提供固件路径信息，跳过差异检测")
             
             # 第三步：将筛选后的二进制列表提交给LLM分析
-            print(f"准备将 {len(filtered_binaries.strip().split(chr(10)))} 个文件提交给大模型进行智能筛选...")
-            executable_binaries = filtered_binaries
-            
-            # 第三步：将筛选后的二进制列表提交给LLM分析
-            print(f"准备将 {len(filtered_binaries.strip().split(chr(10)))} 个文件提交给大模型进行智能筛选...")
+            logger.info(f"准备将 {len(filtered_binaries.strip().split(chr(10)))} 个文件提交给大模型进行智能筛选...")
             executable_binaries = filtered_binaries
             
             # 根据工作模式选择不同的筛选策略
@@ -559,10 +653,10 @@ class BinaryFilterAgent(Agent):
             enc = tiktoken.get_encoding("cl100k_base")
             enc = tiktoken.encoding_for_model("gpt-4o")
             token_ids = enc.encode(prompt)
-            print(f"Prompt token 数: {len(token_ids)}")
+            logger.debug(f"Prompt token 数: {len(token_ids)}")
             
             process_result, raw_response = self._chat_and_parse_with_retry(prompt, max_attempts=2)
-            print(f"大模型原始返回结果：{raw_response}")
+            logger.debug(f"大模型原始返回结果：{raw_response}")
             
             # 如果检测到了差异信息，将差异统计添加到返回结果中
             if diff_info:
@@ -573,10 +667,11 @@ class BinaryFilterAgent(Agent):
                     "unchanged_count": len(diff_info.get("unchanged", []))
                 }
             
-            # 如果LLM没有返回结果，在漏洞挖掘模式下使用启发式筛选作为兜底
-            if work_mode == "discovery" and cwe_id:
-                if process_result.get("status") == "error" or not process_result.get("suspicious_binaries"):
-                    logger.info("LLM筛选无结果，使用启发式筛选作为兜底...")
+            # 如果LLM没有返回结果，使用启发式筛选作为兜底
+            if process_result.get("status") == "error" or not process_result.get("suspicious_binaries"):
+                if work_mode == "discovery" and cwe_id:
+                    # 漏洞挖掘模式：使用CWE启发式筛选
+                    logger.info("LLM筛选无结果，使用CWE启发式筛选作为兜底...")
                     heuristic_results = self._heuristic_filter_by_cwe(executable_binaries, cwe_id)
                     if heuristic_results:
                         process_result = {
@@ -591,12 +686,30 @@ class BinaryFilterAgent(Agent):
                                 for r in heuristic_results[:5]
                             ]
                         }
+                        logger.info(f"启发式筛选返回 {len(process_result['suspicious_binaries'])} 个可疑二进制")
+                elif work_mode == "reproduction" and cve_details:
+                    # 漏洞复现模式：基于CVE描述的启发式筛选
+                    logger.info("LLM筛选无结果，使用CVE启发式筛选作为兜底...")
+                    heuristic_results = self._heuristic_filter_by_cve(executable_binaries, cve_details)
+                    if heuristic_results:
+                        process_result = {
+                            "status": "success",
+                            "message": f"基于CVE描述启发式规则筛选出可疑二进制",
+                            "suspicious_binaries": [
+                                {
+                                    "binary_name": r["name"],
+                                    "binary_path": r["path"],
+                                    "reason": f"匹配CVE关键词: {', '.join(r['keywords'])}"
+                                }
+                                for r in heuristic_results[:5]
+                            ]
+                        }
+                        logger.info(f"启发式筛选返回 {len(process_result['suspicious_binaries'])} 个可疑二进制")
 
             return process_result
                 
         except Exception as e:
             logger.error(f"BinaryFilterAgent处理过程发生错误: {str(e)}")
-            print(f"BinaryFilterAgent处理过程发生错误: {str(e)}")
             return {
                 "status": "error",
                 "message": f"process failed: {str(e)}",
