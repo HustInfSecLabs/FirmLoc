@@ -344,7 +344,7 @@ class ParameterAgent(Agent):
         # 提取CWE ID
         cwe_match = re.search(r"CWE[- ]?(\d+)", query, re.IGNORECASE)
         cwe_id = f"CWE-{cwe_match.group(1)}" if cwe_match else None
-        
+
         # 如果没有明确的CWE ID，尝试从漏洞类型描述推断
         if not cwe_id:
             cwe_id = self._infer_cwe_from_description(query)
@@ -379,6 +379,11 @@ class ParameterAgent(Agent):
                     binary_name = candidate
                     logger.debug("Heuristic binary name match (%s): %s", source, candidate)
                     break
+
+        if not binary_name:
+            firmware_like_match = re.search(r"\b([A-Za-z0-9_\-.]+\.(?:bin|img|elf|so|exe|dll|tar))\b", query, re.IGNORECASE)
+            if firmware_like_match:
+                binary_name = firmware_like_match.group(1).strip()
 
         return {"cve_id": cve_id, "cwe_id": cwe_id, "binary_filename": binary_name, "vendor": vendor}
 
@@ -485,6 +490,7 @@ class ParameterCollector:
         self.initial_message_sent = False
         self.completed = False
         self.history: List[str] = []
+        self.user_messages: List[str] = []
         self.original_query: Optional[str] = None
 
     def update_sender(self, send_callback: Callable[[Dict[str, Any]], Awaitable[None]]) -> None:
@@ -497,9 +503,11 @@ class ParameterCollector:
         """
         message = (message or "").strip()
         if message:
-            self.history.append(f"用户: {message}")
-            if self.original_query is None:
+            if not self.original_query:
                 self.original_query = message
+            if message not in self.user_messages:
+                self.user_messages.append(message)
+                self.history.append(f"用户: {message}")
         
         if not self.initial_message_sent:
             mode_desc = "漏洞挖掘" if self.work_mode == WorkMode.DISCOVERY else "漏洞复现"
@@ -551,7 +559,7 @@ class ParameterCollector:
                 "ready": False,
                 "parameters": {**self.parameters, **self.optional_parameters},
                 "missing": missing,
-                "query": "\n".join(self.history),
+                "query": self.original_query or "\n".join(self.user_messages) or "\n".join(self.history),
                 "work_mode": self.work_mode.value
             }
 
