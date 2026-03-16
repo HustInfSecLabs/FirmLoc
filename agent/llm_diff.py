@@ -716,51 +716,73 @@ import re
 
 def split_functions(file_path):
     """
-    扫描伪 C，识别所有函数 base name 及其完整文本区间（按大括号成对匹配）。
-    返回 dict: base_name -> (start_idx, end_idx)。
-    """
-    sig_simple = re.compile(r'^[\w\*\s]+?([A-Za-z_]\w*)\s*\([^)]*\)\s*$')   # 只有函数声明（无{）
-    sig_brace  = re.compile(r'^[\w\*\s]+?([A-Za-z_]\w*)\s*\([^)]*\)\s*\{')  # 函数声明直接带{
+    基于 Hex-Rays 注释头切分函数（不使用 {}，绝对稳定）
 
-    with open(file_path, 'r', encoding='utf-8') as f:
+    注释头格式示例：
+    /**********************************************************************
+     * 函数: saveParentControlInfo (地址: 0x4a081c)
+     **********************************************************************/
+
+    返回：
+      dict: func_name -> (start_idx, end_idx)
+    """
+    import re
+
+    hdr_begin = re.compile(r'^\s*/\*{5,}')
+    hdr_func  = re.compile(
+        r'^\s*\*\s*函数:\s*([A-Za-z_]\w*)\s*\(地址:\s*0x[0-9A-Fa-f]+\)'
+    )
+    hdr_end   = re.compile(r'^\s*\*{5,}\s*/\s*$')
+
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         lines = f.read().splitlines(keepends=True)
 
-    funcs = {}
     total = len(lines)
+    headers = []   # [(func_name, header_start_line)]
+
     i = 0
-
     while i < total:
-        line = lines[i].strip()
-        m = sig_brace.match(line) or (sig_simple.match(line) if (i+1 < total and lines[i+1].strip() == "{") else None)
-
-        if m:
-            func_name = m.group(1)
-            start_idx = i
-
-            # 如果当前行没有{，跳到下一行找
-            if '{' not in line:
-                i += 1
-
-            brace_count = 0
-            found_opening = False
-
-            # 统计括号数量，直到匹配完成
-            while i < total:
-                brace_count += lines[i].count('{')
-                brace_count -= lines[i].count('}')
-                if lines[i].count('{'):
-                    found_opening = True
-                i += 1
-                if found_opening and brace_count == 0:
-                    break
-
-            end_idx = i
-            funcs[func_name] = (start_idx, end_idx)
-
-        else:
+        if not hdr_begin.match(lines[i]):
             i += 1
+            continue
+
+        name = None
+        j = i + 1
+
+        # 在注释块内找“函数: xxx”
+        while j < total and j < i + 12:
+            m = hdr_func.match(lines[j])
+            if m:
+                name = m.group(1)
+                break
+            j += 1
+
+        if not name:
+            i += 1
+            continue
+
+        headers.append((name, i))
+
+        # 跳过整个注释头
+        while j < total and not hdr_end.match(lines[j]):
+            j += 1
+        i = j + 1
+
+    # 用“下一个注释头”作为当前函数的结束
+    funcs = {}
+    for idx, (name, start) in enumerate(headers):
+        end = headers[idx + 1][1] if idx + 1 < len(headers) else total
+        funcs[name] = (start, end)
+
+        #  关键增强：如果是单前导 "_"，同时注册去掉 "_" 的别名
+        if name.startswith("_") and not name.startswith("__"):
+            alias = name[1:]
+            if alias not in funcs:
+                funcs[alias] = (start, end)
+
 
     return funcs
+
 
 
 def build_pseudo_index(pseudo_file: Optional[str]):
@@ -999,8 +1021,8 @@ class Refiner:
         use_react_agent: bool = True,
         pre_pseudo_file: Optional[str] = None,
         post_pseudo_file: Optional[str] = None,
-    react_model_name: str = "DeepSeek",  # 对应 config.ini 中的 LLM.{model_name} 配置节
-    react_max_iterations: int = 20,
+        react_model_name: str = "DeepSeek",  # 对应 config.ini 中的 LLM.{model_name} 配置节
+        react_max_iterations: int = 50,
         send_message: Optional[Callable] = None,
         history_dir: Optional[str] = None,
     ):
