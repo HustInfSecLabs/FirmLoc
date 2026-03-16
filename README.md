@@ -1,283 +1,638 @@
-## VulnAgent
+# VulnAgent
 
-面向固件与二进制差异分析的多智能体系统。通过“Binwalk → IDA 反编译（远端服务）→ BinDiff 对比 → LLM 检测”流水线，自动定位不同版本固件中的潜在漏洞变化点，并输出可视化结果与分析报告。
+VulnAgent 是一个面向**固件、二进制以及源码差异分析**的安全分析系统。后端基于 FastAPI，围绕“文件上传 → 参数收集 → 多智能体分析 → 结果落盘 / WebSocket 实时回传”组织能力。
 
-本说明基于本地 Conda/Python 环境名称为“VulAgent”的假设，默认在 Linux 上运行主服务，Windows 侧运行 IDA 后端服务（可远程）。
+当前主线能力包括：
 
+- 固件/二进制差异分析
+- 独立 Source Diff 源码差异安全分析
+- Code Repair 源码修复辅助
+- Hardcoded String Audit 硬编码字符串审计
 
-## 架构与流程
+运行产物默认保存在 `history/` 下，静态图片和 HTML diff 可通过 `/static/images/...` 访问。
 
-- 主服务（Linux，FastAPI/uvicorn）
-	- 上传固件（POST /v1/files）并按 chat_id 归档到 `history/`。
-	- 通过 WebSocket（/v1/chat）驱动多智能体流水线，实时推送进度、终端命令与截图。
-	- 流水线：
-		1) Binwalk 提取固件文件系统
-		2) Binary Filter（结合 LLM 与上下文）筛选可疑二进制
-		3) 调用远端 IDAService 导出 BinExport/IDB 与伪 C
-		4) 本地调用 BinDiff CLI 对比两个版本
-		5) Detection Agent（LLM）对伪 C 差异进行解释与风险研判
+---
 
-- IDA 后端服务（Windows，Flask）
-	- 负责调度本地 IDA Pro（含 BinDiff 插件）生成截图、BinExport/IDB、伪 C 代码。
-	- 主服务通过 HTTP 接口访问（具体地址以 `config/config.ini` 的 `[IDA_SERVICE].service_url` 为准）。
+## 1. 功能概览
 
-输出产物集中在 `history/{chat_id}/` 下（含 binwalk 提取目录、ida 导出、bindiff 结果图与状态文件）。
+### 1.1 固件 / 二进制差异分析
 
+适用于两个版本的固件镜像、ELF、PE、动态库等输入。典型流程：
 
-## 环境要求
+1. 上传文件到同一个 `chat_id`
+2. 通过 `WS /v1/chat` 发起分析
+3. 后端参数采集器收集 `cve_id` / `cwe_id` / `binary_filename` 等信息
+4. 执行 Binwalk、IDA、BinDiff、LLM 分析
+5. 将事件、结果、产物写入 `history/<chat_id>/`
 
-- 操作系统
-	- 主服务：Linux（推荐 Ubuntu 20.04+/Debian 系列）
-	- IDAService：Windows（需安装 IDA Pro 7.x 与 BinDiff 插件）
+### 1.2 Source Diff（独立源码分析流）
 
-- 运行时与依赖
-	- Conda：建议使用 Miniconda/Anaconda
-	- Python：3.10（建议与 Conda 环境同名：VulAgent）
-	- 系统工具：
-		- binwalk（用于固件解包）
-		- BinDiff CLI（Linux 命令行版本，用于对比两个 .BinExport）
+Source Diff 是**独立工具流**，不接入 `/v1/chat` 主分析流程。它有自己的文件上传接口和 WebSocket 分析入口。
 
+支持上传源码文件后，对两个版本的源文件进行：
 
+- HTML diff 生成
+- hunk 级别差异抽取
+- 基于 LLM 的安全相关性判定
+- 安全变更摘要生成
 
-## 快速开始
+默认工作目录：
 
-### 1) 创建 Conda 环境（VulAgent）
+- 输入目录：`history/source_diff_sessions/<chat_id>/`
+- 输出目录：`history/source_diff_sessions/<chat_id>/source_diff/`
+
+同时会复制一份 HTML diff 到 `images/temp_diffs/`，前端可直接访问 `/static/images/temp_diffs/...`。
+
+### 1.3 Code Repair
+
+对上传的源码文件进行修复建议与交互式修复流程。
+
+### 1.4 Hardcoded String Audit
+
+对单个二进制/固件文件提取硬编码字符串，并结合大模型识别账号口令、命令执行痕迹、SQL 语句、中间件版本等敏感信息。
+
+---
+
+## 2. 目录结构
+
+```text
+VulnAgent/
+├── main.py                         # FastAPI 入口
+├── client.py                       # 固件/二进制分析示例客户端
+├── requirements.txt                # Python 依赖
+├── alembic.ini                     # Alembic 配置
+├── agent/
+│   ├── VulnAgent.py                # 主分析流程
+│   ├── source_diff_agent.py        # Source Diff 执行器
+│   ├── source_diff_parameter_agent.py
+│   ├── bindiff_agent.py
+│   ├── binwalk.py
+│   ├── ida_toolkits.py
+│   └── IDAService/                 # Windows 侧 IDA 服务
+├── config/
+│   ├── config.ini
+│   └── config.ini.example
+├── db/
+│   ├── models.py
+│   ├── session.py
+│   └── ...
+├── migrations/
+│   └── versions/
+└── history/                        # 默认运行产物目录
+```
+
+---
+
+## 3. 部署指南
+
+## 3.1 环境要求
+
+### Linux 主服务
+
+建议环境：
+
+- Ubuntu 20.04+ / Debian 系列
+- Python 3.10+
+- 可访问配置的大模型服务
+- 可访问 Windows 侧 IDAService（如启用固件/二进制逆向流程）
+
+### Windows IDAService（可远程）
+
+建议环境：
+
+- Windows
+- IDA Pro 7.x
+- BinDiff 插件
+- 可被 Linux 主服务访问的 HTTP 服务
+
+### 可选系统依赖
+
+根据使用场景选择安装：
+
+- `binwalk`：固件解包
+- `bindiff`：BinExport 对比
+- `xdotool`、`scrot`：Linux 图形界面下的 BinDiff UI 自动截图
+
+---
+
+## 3.2 创建 Python 环境
+
+可以使用 Conda，也可以直接使用 venv。
+
+### 方式一：Conda
 
 ```bash
 conda create -n VulAgent python=3.10 -y
 conda activate VulAgent
 ```
 
-### 2) 安装系统依赖（Linux）
+### 方式二：venv
 
 ```bash
-# 安装 binwalk（Debian/Ubuntu 示例）
-sudo apt update
-sudo apt install -y binwalk
-
-# 安装 BinDiff CLI（需从官方发布页下载 Linux 版本）
-# 假设已解压到 ~/tools/bindiff，并将可执行文件加入 PATH
-echo 'export PATH="$HOME/tools/bindiff:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-
-# 验证可执行
-binwalk --help
-bindiff --help
+python3.10 -m venv .venv
+source .venv/bin/activate
 ```
 
-### 3) 安装 Python 依赖
+---
+
+## 3.3 安装依赖
 
 ```bash
 cd VulnAgent
-
-# Linux 环境
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-
 ```
 
-### 4) 配置 LLM 与运行目录
+如果需要 PostgreSQL 驱动，建议额外安装：
 
-编辑 `config/config.ini`：
+```bash
+pip install psycopg[binary]
+```
 
-- 选择模型服务（现有 GPT、WenXin、DeepSeek、Qwen、Claude、GLM 分节），在对应小节填入 `api_key`、`base_url`、`model_name`。
-- `[result.path].savedir` 为运行数据根目录（默认 `history`）。
-- IDA 远端服务地址在 `[IDA_SERVICE].service_url` 配置。
+---
 
-说明：运行时所需的 `cve_id`（可选）/`cwe_id`（可选）/`binary_filename` 等任务参数不再写在配置文件里，而是由 WebSocket 会话中的参数收集智能体与用户交互获取（见后文“启动分析”）。支持“漏洞复现”（提供 CVE）与“漏洞挖掘”（仅提供 CWE/漏洞类型）两种模式。
+## 3.4 安装系统工具（按需）
 
+### Binwalk
 
-### 5) 配置 IDA 后端服务（Windows）
+```bash
+sudo apt update
+sudo apt install -y binwalk
+```
 
-参考 `agent/IDAService/README.md`：
+### BinDiff CLI
 
-1. 安装并可用的 IDA Pro（例如 7.5）与 BinDiff 插件（与 IDA 版本匹配）。
-2. 将 `export_binexport.py`、`export_hexrays.py` 与 `app.py` 放在同一目录；按需修改 `app.py` 中：
-	 - 脚本路径（两个 export 脚本的绝对路径）
-	 - IDA 可执行文件路径（如 ida64.exe）
-	 - Python 环境变量（PYTHONPATH/PYTHONHOME，通常与运行 `app.py` 的解释器一致）
-3. 启动：
-	 ```bash
-	 python app.py
-	 ```
+请从官方渠道安装 Linux 版 BinDiff，并确保 `bindiff` 在 `PATH` 中。
 
-IDA 服务 URL 现已在 `config/config.ini` 中配置（无需改代码）：
+```bash
+bindiff --help
+```
+
+### GUI 截图依赖
+
+```bash
+sudo apt install -y xdotool scrot
+```
+
+---
+
+## 3.5 配置文件
+
+复制示例配置并修改：
+
+```bash
+cp config/config.ini.example config/config.ini
+```
+
+重点配置项：
+
+### LLM 配置
+
+在 `config/config.ini` 中选择一个可用模型小节并填写：
+
+- `api_key`
+- `base_url`
+- `model_name`
+
+例如：
+
+```ini
+[LLM.DeepSeek]
+model_name = deepseek-chat
+api_key = YOUR_DEEPSEEK_API_KEY
+base_url = http://YOUR_DEEPSEEK_SERVER/v1
+```
+
+### 结果目录
+
+```ini
+[result.path]
+savedir = history
+```
+
+### IDA 服务地址
 
 ```ini
 [IDA_SERVICE]
 service_url = http://<windows_host>:5000
 ```
 
-请将 `<windows_host>` 替换为你的 Windows 机 IP/主机名（如 `10.12.xxx.xx`）。
+### 数据库配置
 
-说明：Windows 侧 IDA 后端服务需要提供以下路由，主服务会在 `service_url` 基础上拼接调用：
-- `GET/POST /reversing_analyze_screenshot`（截图打包下载）
-- `POST /export_binexport`（导出 BinExport/IDB）
-- `POST /export_pseudo_c`（导出伪 C）
+```ini
+[DATABASE]
+url =
+use_sqlite_fallback = true
+```
 
-### 6) 启动主服务（Linux）
+数据库 URL 的解析优先级为：
+
+1. 环境变量 `VULNAGENT_DATABASE_URL`
+2. `config.ini` 中 `[DATABASE].url`
+3. SQLite fallback（默认本地开发）
+
+---
+
+## 3.6 数据库初始化与迁移
+
+VulnAgent 当前同时兼容：
+
+- 本地开发：SQLite（默认）
+- 正式部署：PostgreSQL（推荐）
+
+### 本地开发（SQLite）
+
+如果不配置数据库 URL，系统会默认使用：
+
+```text
+history/vulnagent.db
+```
+
+启动服务时会自动调用 `init_db()`，创建基础表，并补齐 SQLite 兼容列。
+
+### PostgreSQL（推荐）
+
+示例：
 
 ```bash
-# 方式一：直接运行（默认 0.0.0.0:8000）
-python main.py
+export VULNAGENT_DATABASE_URL='postgresql+psycopg://postgres:postgres@localhost:5432/vulnagent'
+```
 
-# 方式二：使用 uvicorn（可自定义）
+然后执行 Alembic 迁移：
+
+```bash
+alembic upgrade head
+```
+
+如果你希望完全依赖 PostgreSQL 而不回退到 SQLite，可在 `config.ini` 中设置：
+
+```ini
+[DATABASE]
+use_sqlite_fallback = false
+```
+
+---
+
+## 3.7 配置 Windows 侧 IDAService
+
+请参考 `agent/IDAService/` 下的服务代码和说明，至少确保以下能力可用：
+
+- 导出 BinExport / IDB
+- 导出伪 C
+- 截图导出（如启用）
+
+主服务会通过 `config.ini` 中的 `[IDA_SERVICE].service_url` 调用远端接口。
+
+典型要求：
+
+1. 安装 IDA Pro 与 BinDiff 插件
+2. 配置好导出脚本路径
+3. 启动 Windows 侧 HTTP 服务
+4. 确保 Linux 主服务可以访问该地址
+
+---
+
+## 3.8 启动服务
+
+### 直接运行
+
+```bash
+python main.py
+```
+
+### 使用 uvicorn
+
+```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
+启动后默认监听：
 
-## 交互与接口
+- HTTP: `http://127.0.0.1:8000`
+- WebSocket: `ws://127.0.0.1:8000`
 
-### 上传固件
+静态资源路径：
 
-- 接口：`POST /v1/files`
-- 表单字段：
-	- `file`: 固件二进制文件（支持 .bin/.img/.elf/.tar 等常见固件与可执行格式）
-	- `chat_id`: 同一轮对话/对比任务的标识（两份不同版本固件需使用相同 chat_id）
+- `/static/images/...`
 
-示例（可参考 `client.py`）：
+---
 
-```python
-from client import upload_firmware
-upload_firmware("/path/to/firmware_old.bin", chat_id)
-upload_firmware("/path/to/firmware_new.bin", chat_id)
+## 4. 使用指南
+
+## 4.1 固件 / 二进制差异分析
+
+### 第一步：上传文件
+
+接口：`POST /v1/files`
+
+表单字段：
+
+- `file`: 上传文件
+- `chat_id`: 会话标识
+- `upload_role`: 可选，`old` 或 `new`
+
+示例：
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/v1/files' \
+  -F 'chat_id=demo_001' \
+  -F 'upload_role=old' \
+  -F 'file=@/path/to/old.bin'
+
+curl -X POST 'http://127.0.0.1:8000/v1/files' \
+  -F 'chat_id=demo_001' \
+  -F 'upload_role=new' \
+  -F 'file=@/path/to/new.bin'
 ```
 
-### 启动分析（WebSocket）
+也可以使用仓库内的 [client.py](client.py)。
 
-- 接口：`WS /v1/chat`
-- 初始消息：
-	```json
-	{
-		"chat_id": 123456,
-		"type": "message",
-		"content": "请根据两个版本的固件文件，分析差异并给出可能存在的漏洞和成因。"
-	}
-	```
-- 会先由“参数收集智能体”与用户对话，识别 `binary_filename` 以及 `cve_id` 或 `cwe_id`（缺一则提示补充）。
-- 服务会持续推送流水线阶段、命令与截图链接（`/static/images/...`）。
+### 第二步：通过 WebSocket 发起分析
 
-### 获取对话列表
+接口：`WS /v1/chat`
 
-- 接口：`GET /v1/chat_list`
+首条消息示例：
 
-### 代码修复模式（可选）
-
-- 上传源文件：`POST /v1/codeRepair/files`（仅允许 .c/.cpp/.h/.hpp）
-- 列表：`GET /v1/codeRepair/files?chat_id=...`
-- 删除：`DELETE /v1/codeRepair/file?chat_id=...&filename=...`
-- WebSocket 修复：`WS /v1/codeRepair/repair`
-
-### 硬编码字符串审计（新）
-
-- 接口：`POST /v1/hardcode_audit`
-- 表单字段：
-	- `file`: 单个二进制/固件文件（10MB 以内）
-	- `chat_id` (可选)：结果保存目录标识，默认自动生成
-- 行为：
-	1. 后端调用远端 IDAService 提取可打印的硬编码字符串
-	2. 将去重后的字符串列表发送给大模型，识别账号密码、SQL 语句、命令执行、固件/中间件名称与版本、预设/后门用户、疑似加密片段等敏感信息
-- 返回：结构化 JSON，包含审计概要、风险等级、可疑字符串列表与保存的本地结果路径
-
-
-## 支持的分析模式
-
-| 模式 | 触发方式 | 流程特性 |
-| --- | --- | --- |
-| 固件比较（默认） | 上传两个固件/镜像文件（.bin/.img/.tar 等） | Binwalk 自动解包 → Binary Filter 从提取目录挑选可疑二进制 → IDA/BinDiff/LLM | 
-| 二进制/Windows 程序比较 | 上传两个可执行文件（ELF/Mach-O/PE，例如 `.so`、`.exe`、`.dll`） | 自动跳过 Binwalk 与文件筛选，直接将用户提供的二进制对送入 IDA → BinDiff → LLM |
-| 漏洞挖掘（仅有 CWE/漏洞类型） | WebSocket 会话提供 `binary_filename` + `cwe_id/漏洞类型`（无 CVE） | 情报阶段以 CWE/关键词检索；Binary Filter/LLM prompt 自动降级，仍按 Binwalk → IDA → BinDiff → LLM 全流程运行 |
-
-> 说明：当系统检测到上传的两个文件都带有 ELF/Mach-O/PE 头时，会自动切换到“二进制比较”模式，适用于 Windows 程序或已手动提取出的二进制对。若希望强制执行固件模式，只需上传原始固件镜像；若希望直接比较二进制，请确保同一个 `chat_id` 目录下仅包含那两个可执行文件，以避免歧义。
-
-
-## 目录结构（节选）
-
-```
-VulnAgent/
-	main.py                  # FastAPI 入口
-	client.py                # 本地示例客户端（上传 + WS 收取输出）
-	agent/
-		VulnAgent.py           # 多智能体主流程（Binwalk → IDA → BinDiff → LLM）
-		binwalk.py             # Binwalk 调用封装
-		ida_toolkits.py        # 远端 IDAService HTTP 调用封装
-		bindiff_agent.py       # BinDiff 结果整理与截图
-		IDAService/            # Windows 侧 IDA 后端服务（Flask）
-	tools/
-		bindiff_tool.py        # 调用 bindiff CLI
-		bindiff_visual.py      # 通过鼠标宏操控 BinDiff UI 并自动截图
-	config/
-		config.ini             # LLM 服务、保存目录、IDA 服务地址
-	history/                 # 运行数据根目录（按 chat_id 分组）
-	images/                  # 静态图片目录（通过 /static/images 提供）
-	requirements.txt         # Python 依赖
+```json
+{
+  "chat_id": "demo_001",
+  "type": "message",
+  "content": "请分析两个版本之间的漏洞变化。"
+}
 ```
 
+服务端会继续追问可能缺失的参数，例如：
 
-## 常见问题（FAQ）
+- `binary_filename`
+- `cve_id`
+- `cwe_id`
+- 厂商信息
 
-1. `bindiff: command not found`？
-	 - 请先正确安装 BinDiff CLI（Linux 版），并将其路径加入 `PATH`，然后重新打开终端或 `source ~/.bashrc`。
+### 第三步：查看任务结果
 
-2. IDA/Bindiff 阶段无截图或报错？
-	- 确认 Windows 侧 IDAService 已启动，主机地址与端口在 `config/config.ini` 的 `[IDA_SERVICE].service_url` 配置（或通过环境变量覆盖）；
-	 - 确认 IDA Pro 与 BinDiff 插件匹配；
-	 - 检查 Windows 侧 export 脚本路径与权限；
-	 - 若仅 CLI 对比成功但 UI 截图失败，请在 Linux 桌面环境安装 `xdotool` 与 `scrot` 并使用 X11 会话（见下文“Bindiff UI 自动截图”）。
-	- 若不启用 Bindiff 截图功能，可在 `agent/bindiff_agent.py` 将调用行
-	  `screenshots = bindiff_ui(..., os.path.join(self.output_dir, "images"))` 改为 `screenshots = []`。
+接口：
 
+- `GET /v1/chat_list`
+- `GET /v1/tasks/{chat_id}`
+- `GET /v1/tasks/{chat_id}/events`
+- `GET /v1/tasks/{chat_id}/findings`
 
-3. Binwalk 提取为空或失败？
-	 - 确认 `binwalk` 安装成功且可用；
-	 - 某些固件需额外的解包依赖（如 `sasquatch`、`jefferson`、`ubi-reader` 等），请根据固件类型安装对应插件。
+---
 
-4. LLM 无法调用或额度不足？
-	 - 检查 `config/config.ini` 中的模型服务与 `api_key` 是否正确，避免将密钥提交到仓库；
-	 - 如使用企业代理或自建网关，请调整 `base_url`。
+## 4.2 Source Diff 使用方式
 
-## Bindiff UI 自动截图（鼠标宏）
+Source Diff 是单独入口。
 
-在 Bindiff 对比阶段，项目会调用 `tools/bindiff_visual.py` 使用鼠标宏自动化 BinDiff GUI 并截图常用视图（总览、调用图、已匹配函数、主侧未匹配、次侧未匹配）。
+### 支持的上传后缀
 
-依赖与环境要求（Linux 桌面）：
-- 已安装 BinDiff 并可通过 `bindiff -ui` 打开图形界面；
-- 已安装 `xdotool` 与 `scrot`：
-	```bash
-	sudo apt install -y xdotool scrot
-	```
-- 需在 X11 会话下运行（Wayland 下请启用 XWayland 或改用等效工具）；
-- 需要在能看到桌面的交互会话中运行（Server/无头环境不支持该 UI 自动化）。
+当前后端白名单包括：
 
-工作原理（简述）：
-- 启动 `bindiff -ui`，使用 `xdotool` 发送键鼠事件，按固定坐标点开/加载 `.BinDiff` 对比文件，切换到不同标签页；
-- 使用 `scrot -u` 截取活动窗口，图片保存在 `history/{chat_id}/bindiff/images/` 下；
-- 默认 `.BinDiff` 文件由前一步 CLI 阶段生成并临时拷贝到 `test/` 目录（由 `tools/bindiff_tool.py` 与 `agent/bindiff_agent.py` 协同完成）。
+- `.c`
+- `.cpp`
+- `.cc`
+- `.cxx`
+- `.h`
+- `.hpp`
+- `.hh`
+- `.hxx`
+- `.js`
 
-坐标与路径自定义：
-- 坐标锚点与按钮位置在 `tools/bindiff_visual.py` 顶部的 `ANCHOR` 与 `COORDINATES` 中定义，建议根据你的分辨率/DPI 手动微调；
-- 截图输出目录由调用方传入（默认 `history/{chat_id}/bindiff/images/`），`HOME/IMAGE_DIR/DIFF_FILE` 等常量也可按需修改；
-- 如 UI 自动化对你环境不稳定，可暂时跳过该步骤，仅使用 CLI 比对与结果解析。
+### 上传源码文件
 
-常见问题：
-- 截图为空或总是同一张：确保 `scrot -u` 能截到当前活动窗口；必要时在截图前增加 `time.sleep` 延时；
-- 点击/输入错位：调整 `ANCHOR/COORDINATES` 中的坐标，或改用窗口置顶/最大化后重新标定；
-- Wayland 环境：`xdotool`/`scrot` 在原生 Wayland 支持有限，建议切换 X11 会话或启用 XWayland。
+接口：`POST /v1/sourceDiff/files`
 
+```bash
+curl -X POST 'http://127.0.0.1:8000/v1/sourceDiff/files' \
+  -F 'chat_id=source_diff_demo' \
+  -F 'file=@/path/to/old.c'
 
-## 开发小贴士
+curl -X POST 'http://127.0.0.1:8000/v1/sourceDiff/files' \
+  -F 'chat_id=source_diff_demo' \
+  -F 'file=@/path/to/new.c'
+```
 
-- 产物（截图、BinExport、伪 C、BinDiff 文件）均会被拷贝到 `images/` 或 `history/{chat_id}/...`，前端可直接渲染 `/static/images/...` 链接；
-- `client.py` 提供了最小化的端到端示例：上传两份固件并建立 WebSocket 会话即可复现完整流水线。
+### 列出源码文件
 
+接口：`GET /v1/sourceDiff/files?chat_id=...`
 
-## 许可证
+```bash
+curl 'http://127.0.0.1:8000/v1/sourceDiff/files?chat_id=source_diff_demo'
+```
 
-本项目遵循仓库内声明的相应许可证（如有）。请在使用 IDA Pro、BinDiff 等第三方工具时遵守其各自的许可协议。
+### 删除源码文件
 
+接口：`DELETE /v1/sourceDiff/file?chat_id=...&filename=...`
 
-## 致谢
+```bash
+curl -X DELETE 'http://127.0.0.1:8000/v1/sourceDiff/file?chat_id=source_diff_demo&filename=old.c'
+```
 
-- Binwalk、IDA Pro、BinDiff 社区
-- 各大 LLM 服务提供方
+### 发起 Source Diff 分析
 
+接口：`WS /v1/sourceDiff/analyze`
+
+首条消息示例：
+
+```json
+{
+  "chat_id": "source_diff_demo",
+  "type": "message",
+  "content": "对比 old.c 和 new.c，CVE 是 CVE-2024-12345，重点看 CWE-787"
+}
+```
+
+参数采集器会从多轮对话中提取：
+
+- `file1`
+- `file2`
+- `cve_id`
+- `cwe`
+- `cve_details`
+
+分析完成后可得到：
+
+- HTML diff
+- hunk 级安全分析结果
+- 安全相关变更摘要
+
+结果目录：
+
+```text
+history/source_diff_sessions/<chat_id>/source_diff/
+```
+
+HTML diff 静态访问路径通常类似：
+
+```text
+/static/images/temp_diffs/<file1>_vs_<file2>.html
+```
+
+---
+
+## 4.3 Code Repair
+
+### 上传源码文件
+
+接口：`POST /v1/codeRepair/files`
+
+支持后缀：
+
+- `.c`
+- `.cpp`
+- `.h`
+- `.hpp`
+
+### 列表 / 删除
+
+- `GET /v1/codeRepair/files?chat_id=...`
+- `DELETE /v1/codeRepair/file?chat_id=...&filename=...`
+
+### 发起修复
+
+接口：`WS /v1/codeRepair/repair`
+
+首条消息至少需要：
+
+```json
+{
+  "chat_id": "repair_demo"
+}
+```
+
+---
+
+## 4.4 Hardcoded String Audit
+
+接口：`POST /v1/hardcode_audit`
+
+支持两种方式：
+
+1. 直接上传文件
+2. 传入已有文件路径 `file_path`
+
+示例：
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/v1/hardcode_audit' \
+  -F 'chat_id=string_audit_demo' \
+  -F 'file=@/path/to/sample.bin'
+```
+
+返回内容包括：
+
+- 审计概要
+- 风险等级
+- 可疑字符串列表
+- 本地结果目录
+
+---
+
+## 5. 常用接口一览
+
+### 任务与固件分析
+
+- `POST /v1/tasks`
+- `POST /v1/files`
+- `POST /v1/tasks/{chat_id}/files/{upload_role}`
+- `WS /v1/chat`
+- `GET /v1/chat_list`
+- `GET /v1/tasks/{chat_id}`
+- `GET /v1/tasks/{chat_id}/events`
+- `GET /v1/tasks/{chat_id}/findings`
+
+### Source Diff
+
+- `POST /v1/sourceDiff/files`
+- `GET /v1/sourceDiff/files`
+- `DELETE /v1/sourceDiff/file`
+- `WS /v1/sourceDiff/analyze`
+
+### Code Repair
+
+- `POST /v1/codeRepair/files`
+- `GET /v1/codeRepair/files`
+- `DELETE /v1/codeRepair/file`
+- `WS /v1/codeRepair/repair`
+
+### 审计能力
+
+- `POST /v1/hardcode_audit`
+
+---
+
+## 6. 运行产物说明
+
+默认根目录：
+
+```text
+history/
+```
+
+常见输出：
+
+- `history/<chat_id>/`：主分析任务产物
+- `history/source_diff_sessions/<chat_id>/`：Source Diff 输入目录
+- `history/source_diff_sessions/<chat_id>/source_diff/`：Source Diff 输出目录
+- `images/`：静态图片 / HTML diff 对外访问目录
+
+---
+
+## 7. 常见问题
+
+### 7.1 `bindiff: command not found`
+
+说明 BinDiff CLI 未正确安装或未加入 `PATH`。
+
+### 7.2 Binwalk 解包失败
+
+请检查：
+
+- `binwalk` 是否已安装
+- 固件格式是否需要额外插件（如 `sasquatch`、`jefferson`、`ubi-reader`）
+
+### 7.3 无法连接 IDAService
+
+请检查：
+
+- Windows 服务是否已启动
+- `config.ini` 中 `[IDA_SERVICE].service_url` 是否正确
+- Linux 主机到 Windows 主机的网络是否可达
+
+### 7.4 LLM 调用失败
+
+请检查：
+
+- `api_key` 是否正确
+- `base_url` 是否可访问
+- 所选 `model_name` 是否存在
+
+### 7.5 PostgreSQL 迁移失败
+
+请优先确认：
+
+- `VULNAGENT_DATABASE_URL` 是否正确
+- 是否安装了 `psycopg` 驱动
+- 是否已执行 `alembic upgrade head`
+
+---
+
+## 8. 开发说明
+
+- 后端入口为 [main.py](main.py)
+- Source Diff 执行逻辑位于 [agent/source_diff_agent.py](agent/source_diff_agent.py)
+- Source Diff 参数采集位于 [agent/source_diff_parameter_agent.py](agent/source_diff_parameter_agent.py)
+- 数据库会话与 URL 解析位于 [db/session.py](db/session.py)
+- Alembic 环境位于 [migrations/env.py](migrations/env.py)
+
+当前仓库未提供完整的后端自动化测试套件；修改后建议至少手工验证：
+
+1. `POST /v1/files` + `WS /v1/chat`
+2. `POST /v1/sourceDiff/files` + `WS /v1/sourceDiff/analyze`
+3. `POST /v1/codeRepair/files` + `WS /v1/codeRepair/repair`
+4. `POST /v1/hardcode_audit`
+
+---
+
+## 9. 许可证
+
+请遵守本仓库以及第三方工具（如 IDA Pro、BinDiff）的许可证要求。

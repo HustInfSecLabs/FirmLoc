@@ -1,0 +1,54 @@
+[Log]
+file_path = pt.log
+
+[tools]
+tools_path = tools/
+
+[LLM.GPT]
+model_name = gpt-4o
+api_key = YOUR_OPENAI_API_KEY
+base_url = https://api.openai.com/v1
+
+[LLM.WenXin]
+model_name = ernie-4.0-turbo-8k
+api_key = YOUR_WENXIN_API_KEY
+base_url = 
+
+[LLM.DeepSeek]
+model_name = deepseek-chat
+api_key = YOUR_DEEPSEEK_API_KEY
+base_url = http://YOUR_DEEPSEEK_SERVER/v1
+
+[LLM.Qwen]
+model_name = QWEN3
+api_key = YOUR_QWEN_API_KEY
+base_url = http://YOUR_QWEN_SERVER/v1
+
+[LLM.Claude]
+model_name = claude-3-7-sonnet-20250219
+api_key = YOUR_CLAUDE_API_KEY
+base_url = 
+ 
+[LLM.GLM]
+model_name = glm-4.5
+api_key = YOUR_GLM_API_KEY
+base_url = https://open.bigmodel.cn/api/paas/v4
+
+[result.path]
+savedir = history
+
+[DATABASE]
+# PostgreSQL 优先；生产/迁移场景建议通过环境变量 VULNAGENT_DATABASE_URL 注入
+# 示例：postgresql+psycopg://postgres:postgres@localhost:5432/vulnagent
+url =
+# 本地开发可临时回退到 SQLite；迁移到 DeepauditExtension 时应关闭
+use_sqlite_fallback = true
+
+[IDA_SERVICE]
+service_url = http://YOUR_IDA_SERVICE_HOST:5000
+
+[ZERO_DAY_AGENT]
+# DeepauditExtension 集成的 zero-day 路径分析服务地址
+service_url = http://localhost:8000/api/v1/zero-day-agent
+# 请求超时时间（秒）
+timeout = 14400

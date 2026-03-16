@@ -18,10 +18,19 @@ from agent.online_search import OnlineSearchAgent
 from agent.llm_diff import main as llm_diff
 from agent.path_reach_agent import PathReachAgent, PathReachStatus, RiskLevel
 from agent.binary_filter import BinaryFilterAgent
-from log import logger
 from utils import ConfigManager, PlanManager
 from utils.utils import get_firmware_files, copy_file, is_binary_file, get_binary_architecture
 from config import config_manager as config
+from db import (
+    ensure_task,
+    get_task_upload_slots,
+    mark_task_completed,
+    mark_task_failed,
+    record_detection_findings,
+    record_message,
+    record_path_reach_findings,
+)
+from log import logger
 
 
 class AnalysisMode(str, Enum):
@@ -57,10 +66,10 @@ class VulnAgent:
         self.cwe_id = cwe_id
         self.binary_filename = binary_filename
         self.vendor = vendor
-        
+
         # 工作模式：漏洞复现 or 漏洞挖掘
         self.work_mode = WorkMode(work_mode) if isinstance(work_mode, str) else work_mode
-        
+
         self.is_last = False
         self.agent = None
         self.tool_status = "stop"
@@ -68,7 +77,9 @@ class VulnAgent:
         self.command = None
         self.tool_result = None
 
-        self.files = get_firmware_files(f"{self.config_dir}/{self.chat_id}")
+        self.old_input_path: Optional[str] = None
+        self.new_input_path: Optional[str] = None
+        self.files = self._load_input_files()
         hint = (analysis_mode or AnalysisMode.AUTO.value).lower()
         if hint not in {mode.value for mode in AnalysisMode}:
             logger.warning("未知分析模式 %s，回退到 auto", hint)
@@ -77,6 +88,65 @@ class VulnAgent:
         self.resolved_mode: Optional[AnalysisMode] = None
 
         self._init_bot()
+
+    def _load_input_files(self) -> List[str]:
+        task_dir = f"{self.config_dir}/{self.chat_id}"
+
+        # 1) Consult DB upload slots first (authoritative source)
+        try:
+            slots = get_task_upload_slots(self.chat_id)
+            db_old = slots.get("old_input_path")
+            db_new = slots.get("new_input_path")
+            if db_old and os.path.isfile(db_old):
+                self.old_input_path = db_old
+            if db_new and os.path.isfile(db_new):
+                self.new_input_path = db_new
+            if self.old_input_path and self.new_input_path:
+                return [self.old_input_path, self.new_input_path]
+        except Exception as exc:
+            logger.warning("读取 DB 上传槽位失败，回退到目录扫描: %s", exc)
+
+        # 2) Filesystem scan fallback
+        task_files = get_firmware_files(task_dir)
+
+        old_candidates = []
+        new_candidates = []
+        fallback_files = []
+        for file_path in task_files:
+            name = Path(file_path).name
+            if name.startswith("old_"):
+                old_candidates.append(file_path)
+            elif name.startswith("new_"):
+                new_candidates.append(file_path)
+            else:
+                fallback_files.append(file_path)
+
+        ordered_files: List[str] = []
+        if self.old_input_path:
+            ordered_files.append(self.old_input_path)
+        elif old_candidates:
+            self.old_input_path = sorted(old_candidates)[0]
+            ordered_files.append(self.old_input_path)
+
+        if self.new_input_path:
+            ordered_files.append(self.new_input_path)
+        elif new_candidates:
+            self.new_input_path = sorted(new_candidates)[0]
+            ordered_files.append(self.new_input_path)
+
+        if len(ordered_files) < 2:
+            for file_path in sorted(fallback_files):
+                if file_path not in ordered_files:
+                    ordered_files.append(file_path)
+                if len(ordered_files) >= 2:
+                    break
+
+        if self.old_input_path is None and ordered_files:
+            self.old_input_path = ordered_files[0]
+        if self.new_input_path is None and len(ordered_files) >= 2:
+            self.new_input_path = ordered_files[1]
+
+        return ordered_files
 
     def _init_bot(self):
         self.user_agent = UserAgent(self.user_model)
@@ -87,7 +157,7 @@ class VulnAgent:
         self.IDAAgent = IdaToolkit()
         self.BindiffAgent = BindiffAgent(self.chat_id)
         self.PathReachAgent = PathReachAgent()
-        
+
         self.config_manager = ConfigManager(
             chat_id=self.chat_id,
             user_id=123456,
@@ -97,11 +167,27 @@ class VulnAgent:
             config_path=self.config_dir
         )
         self.plan_manager = None
-        #self.chat_id = None
         self.tasks = None
         self.results = None
         self.state = ProgressEnum.NOT_STARTED
-    
+
+    def _sync_task_metadata(self) -> None:
+        ensure_task(
+            chat_id=self.chat_id,
+            query=self.user_input,
+            cve_id=self.cve_id,
+            cwe_id=self.cwe_id,
+            binary_filename=self.binary_filename,
+            vendor=self.vendor,
+            work_mode=self.work_mode.value,
+            analysis_mode=self.analysis_mode_hint,
+            artifact_dir=os.path.join(self.config_dir, self.chat_id),
+            config={
+                "uploaded_files": self.files,
+                "old_input_path": self.old_input_path,
+                "new_input_path": self.new_input_path,
+            },
+        )
 
     def _determine_analysis_mode(self) -> AnalysisMode:
         if self.analysis_mode_hint != AnalysisMode.AUTO.value:
@@ -110,7 +196,9 @@ class VulnAgent:
             return mode
 
         mode = AnalysisMode.FIRMWARE
-        if len(self.files) == 2 and all(self._looks_like_executable(path) for path in self.files):
+        if self.old_input_path and self.new_input_path and all(
+            self._looks_like_executable(path) for path in [self.old_input_path, self.new_input_path]
+        ):
             mode = AnalysisMode.BINARY_PAIR
         self.resolved_mode = mode
         return mode
@@ -173,10 +261,11 @@ class VulnAgent:
         return False
 
     def _build_binary_pair_entries(self) -> List[dict]:
-        binaries = sorted(self.files)
-        if len(binaries) < 2:
-            raise ValueError("binary_pair 模式需要至少两个可执行文件")
-        first, second = binaries[:2]
+        if not self.old_input_path or not self.new_input_path:
+            raise ValueError("binary_pair 模式需要显式提供 old/new 两个可执行文件")
+
+        first = self.old_input_path
+        second = self.new_input_path
         if not (self._looks_like_executable(first) and self._looks_like_executable(second)):
             raise ValueError("提供的文件不是可执行二进制，无法跳过 Binwalk")
         display_name = self.binary_filename or Path(first).name
@@ -307,25 +396,33 @@ class VulnAgent:
         }
 
         try:
+            record_message(
+                chat_id=self.chat_id,
+                content=content,
+                message_type=message_type,
+                agent=agent,
+                tool=tool,
+                tool_status=tool_status,
+                is_last=self.is_last,
+            )
+        except Exception as exc:
+            logger.warning("记录消息事件失败: %s", exc)
+
+        try:
             await self.websocket.send_json(response)
             logger.info(f"发送消息: {response}")
         except Exception as e:
             logger.error(f"发送消息失败: {str(e)}")
 
     async def chat(self):
-        """
-        聊天接口
-        :param chat_id: 会话ID
-        :param query: 用户查询内容
-        :return: 聊天响应
-        """
-        # 根据工作模式检查必要参数
+        self._sync_task_metadata()
         if self.work_mode == WorkMode.REPRODUCTION:
             # 漏洞复现模式：需要CVE ID
             if not self.cve_id or not self.binary_filename:
                 error_msg = "漏洞复现模式需要提供CVE编号和目标二进制文件名称。"
                 await self.send_message(error_msg, message_type="message")
                 logger.error(error_msg)
+                mark_task_failed(self.chat_id, error_msg)
                 return error_msg
         else:
             # 漏洞挖掘模式：需要CWE ID
@@ -333,15 +430,17 @@ class VulnAgent:
                 error_msg = "漏洞挖掘模式需要提供CWE类型和目标二进制文件名称。"
                 await self.send_message(error_msg, message_type="message")
                 logger.error(error_msg)
+                mark_task_failed(self.chat_id, error_msg)
                 return error_msg
 
         resolved_mode = self._determine_analysis_mode()
         files = self.files
 
-        if resolved_mode == AnalysisMode.FIRMWARE and len(files) != 2:
-            error_msg = "固件模式需要上传两个固件镜像。"
+        if resolved_mode == AnalysisMode.FIRMWARE and (not self.old_input_path or not self.new_input_path):
+            error_msg = "固件模式需要显式上传 old/new 两个固件镜像。"
             await self.send_message(error_msg, message_type="message")
             logger.error(error_msg)
+            mark_task_failed(self.chat_id, error_msg)
             return error_msg
 
         def show_file_info(full_path: str):
@@ -384,25 +483,25 @@ class VulnAgent:
         self.agent = "Intelligence Agent"
         self.tool = None
         self.state = ProgressEnum.RUNNING
-        
+
         # 根据工作模式执行不同的情报收集策略
         cve_details = ""
         cwe = self.cwe_id or ""
         reference_cves = None
         discovery_context = {}
-        
+
         if self.work_mode == WorkMode.REPRODUCTION:
             # 漏洞复现模式：搜索特定CVE
             await self.send_message("情报收集智能体收集CVE相关信息",
                                      message_type="header1",
                                      agent=self.agent)
             search_result = self.online_search_agent.process(
-                task_id=self.chat_id, 
+                task_id=self.chat_id,
                 cve_id=self.cve_id,
                 work_mode="reproduction"
             )
             logger.info("Online search result: %s", search_result)
-            
+
             if search_result.get('status') == 'success':
                 with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
                     tool_content = [{"type": "text", "content": f.read()}]
@@ -428,7 +527,7 @@ class VulnAgent:
                 work_mode="discovery"
             )
             logger.info("Online search result (discovery mode): %s", search_result)
-            
+
             if search_result.get('status') == 'success':
                 with open(search_result['search_result_path'], 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -481,12 +580,13 @@ class VulnAgent:
                 error_msg = f"固件提取失败: {'; '.join([r.get('message', '未知错误') for r in failed_results])}"
                 await self.send_message(error_msg, message_type="message", agent=self.agent)
                 logger.error(error_msg)
+                mark_task_failed(self.chat_id, error_msg)
                 return error_msg
 
             self.config_manager.update_agent_status("Binwalk Agent", "Binary Filter Agent")
             self.config_manager.update_tool_status("Binwalk", "Binary Filter")
             self.agent = "Binary Filter Agent"
-            
+
             # 根据工作模式显示不同的提示信息
             if self.work_mode == WorkMode.DISCOVERY:
                 await self.send_message(f"Binary Filter Agent基于{self.cwe_id}特征筛选可疑文件",
@@ -497,7 +597,6 @@ class VulnAgent:
                                          message_type="header1",
                                          agent=self.agent)
 
-            # 调用 BinaryFilterAgent，传入工作模式和相关参数
             llm_result = self.BinaryFilterAgent.process(
                 binary_filename=self.binary_filename,
                 extracted_files_path=binwalk_results[0]['extracted_files_path'],
@@ -510,15 +609,13 @@ class VulnAgent:
                 enable_diff_filter=True
             )
             logger.info("BinaryFilter result: %s", llm_result)
-            
-            # 如果有差异统计信息，显示给用户
+
             if llm_result.get("diff_statistics"):
                 stats = llm_result["diff_statistics"]
-                diff_msg = (f"二进制差异统计: "
-                          f"修改={stats['modified_count']}, "
-                          f"新增={stats['added_count']}, "
-                          f"删除={stats['removed_count']}, "
-                          f"未变化={stats['unchanged_count']}")
+                diff_msg = (
+                    f"二进制差异统计: 修改={stats['modified_count']}, 新增={stats['added_count']}, "
+                    f"删除={stats['removed_count']}, 未变化={stats['unchanged_count']}"
+                )
                 await self.send_message(diff_msg, message_type="message", agent=self.agent)
                 logger.info(diff_msg)
 
@@ -526,6 +623,7 @@ class VulnAgent:
                 error_msg = llm_result.get("message", "BinaryFilter 未返回可疑二进制")
                 await self.send_message(error_msg, message_type="message", agent=self.agent)
                 logger.error(error_msg)
+                mark_task_failed(self.chat_id, error_msg)
                 return error_msg
 
             suspicious_files = [os.path.join(item['binary_path']) for item in llm_result["suspicious_binaries"]]
@@ -552,6 +650,7 @@ class VulnAgent:
                 error_msg = "Binary Filter 未能提供有效的二进制路径。"
                 await self.send_message(error_msg, message_type="message", agent=self.agent)
                 logger.error(error_msg)
+                mark_task_failed(self.chat_id, error_msg)
                 return error_msg
 
         else:
@@ -569,6 +668,7 @@ class VulnAgent:
             try:
                 analysis_pairs = self._build_binary_pair_entries()
             except ValueError as exc:
+                mark_task_failed(self.chat_id, str(exc))
                 await self.send_message(str(exc), message_type="message", agent=self.agent)
                 logger.error(str(exc))
                 return str(exc)
@@ -589,7 +689,7 @@ class VulnAgent:
         if not analysis_pairs:
             error_msg = "未找到可用于后续分析的二进制文件。"
             await self.send_message(error_msg, message_type="message")
-            logger.error(error_msg)
+            mark_task_failed(self.chat_id, error_msg)
             return error_msg
 
         for pair in analysis_pairs:
@@ -662,16 +762,20 @@ class VulnAgent:
                 cve_details=cve_details,
                 cwe=cwe,
                 send_message=self.send_message,
-                work_mode=self.work_mode.value  # 传递工作模式
+                work_mode=self.work_mode.value
             )
 
-            # ========== 路径可达性分析 ==========
-            # 从 Detection Agent 结果中提取认定的漏洞函数
-            # 注意：传入当前二进制名称，避免扫描到其他二进制的结果
             vulnerable_functions = await self._extract_vulnerable_functions_from_llm_diff(
                 chat_id=self.chat_id,
                 history_root=self.config_dir,
                 binary_name=os.path.basename(file1)
+            )
+            record_detection_findings(
+                chat_id=self.chat_id,
+                binary_name=os.path.basename(file1),
+                vulnerable_functions=vulnerable_functions,
+                cwe_id=cwe,
+                related_cve=self.cve_id,
             )
 
             if vulnerable_functions:
@@ -685,18 +789,14 @@ class VulnAgent:
                 )
 
                 try:
-                    # 调用路径可达性分析
-                    # 确保使用绝对路径（zero_day_agent 可能运行在不同目录）
                     absolute_binary_path = os.path.abspath(file1)
-
                     reach_results = await self.PathReachAgent.analyze_reachability(
-                        binary_path=absolute_binary_path,  # 使用补丁前版本的绝对路径
+                        binary_path=absolute_binary_path,
                         vulnerable_functions=vulnerable_functions,
                         cwe_type=cwe,
                         send_message=self.send_message
                     )
 
-                    # 格式化并发送结果
                     reach_summary = self.PathReachAgent.format_results_for_display(reach_results)
                     await self.send_message(
                         reach_summary,
@@ -704,11 +804,17 @@ class VulnAgent:
                         agent=self.agent
                     )
 
-                    # 保存路径可达性结果
                     reach_output_path = os.path.join(
                         self.config_dir, self.chat_id, "path_reach_results.json"
                     )
                     self.PathReachAgent.save_results(reach_results, reach_output_path)
+                    record_path_reach_findings(
+                        chat_id=self.chat_id,
+                        binary_name=os.path.basename(file1),
+                        results=reach_results,
+                        cwe_id=cwe,
+                        related_cve=self.cve_id,
+                    )
 
                 except Exception as e:
                     logger.error(f"路径可达性分析失败: {e}", exc_info=True)
@@ -719,7 +825,6 @@ class VulnAgent:
                     )
             else:
                 logger.info("Detection Agent 未认定漏洞函数，跳过路径可达性分析")
-            # ========== 路径可达性分析结束 ==========
 
         self.is_last = True
         self.state = ProgressEnum.COMPLETED
@@ -730,6 +835,7 @@ class VulnAgent:
         self.config_manager.update_tool_status(new_running_tool=None)
         await self.send_message("系统运行完成。感谢使用 VulnAgent！",
                                  message_type="message")
+        mark_task_completed(self.chat_id)
         logger.info("系统运行完成")
 
         return response
