@@ -15,6 +15,8 @@ from .parameter_agent import (
     CWE_SENSITIVE_BINARIES,
     CWE_DESCRIPTIONS
 )
+from .source_diff_agent import SourceDiffAgent
+from .source_diff_parameter_agent import SourceDiffParameterCollector
 from .hardcoded_string_audit import HardcodedStringAuditor
 from .vuln_react_agent import VulnReActAgent, VulnReActRefiner, react_analyze_function_pair
 from .vuln_tools import VulnToolContext, PseudoCodeIndex, create_vuln_tools
