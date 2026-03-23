@@ -4,6 +4,7 @@ import time
 import json
 from enum import Enum
 from fastapi import WebSocket
+from starlette.websockets import WebSocketState
 from pathlib import Path
 from typing import Optional, Set, List
 
@@ -62,6 +63,7 @@ class VulnAgent:
         self.chat_id = str(chat_id)
         self.user_input = user_input
         self.websocket = websocket
+        self._websocket_available = True
         self.cve_id = cve_id
         self.cwe_id = cwe_id
         self.binary_filename = binary_filename
@@ -358,15 +360,21 @@ class VulnAgent:
             return ""
         return CWE_DESCRIPTIONS.get(cwe_id.upper(), f"Vulnerability type: {cwe_id}")
 
-    def on_status_update(self, command=None, tool=None, tool_status=None, tool_result=None):
+    def _can_send_websocket(self) -> bool:
+        return self._websocket_available and self.websocket.client_state == WebSocketState.CONNECTED
+
+    def on_status_update(self, command=None, tool=None, tool_status=None):
         if command is not None:
             self.command = command
         if tool is not None:
             self.tool = tool
         if tool_status is not None:
             self.tool_status = tool_status
-        if tool_result is not None:
-            self.tool_result = tool_result
+            if self.config_manager:
+                if tool_status in {"completed", "stop"}:
+                    self.config_manager.update_tool_status(completed_tool=tool)
+                elif tool:
+                    self.config_manager.update_tool_status(new_running_tool=tool)
 
     async def send_message(self, content: str, message_type="message", tool_type=None, tool_content=None, agent=None, tool=None, tool_status=None):
         """
@@ -378,7 +386,6 @@ class VulnAgent:
             "tool": tool
         }
 
-        # tool_status = None
         if tool:
             tool_status = {
                 "type": tool_type,
@@ -408,11 +415,15 @@ class VulnAgent:
         except Exception as exc:
             logger.warning("记录消息事件失败: %s", exc)
 
+        if not self._can_send_websocket():
+            return
+
         try:
             await self.websocket.send_json(response)
             logger.info(f"发送消息: {response}")
         except Exception as e:
-            logger.error(f"发送消息失败: {str(e)}")
+            self._websocket_available = False
+            logger.info(f"WebSocket 已关闭，跳过发送消息: {str(e)}")
 
     async def chat(self):
         self._sync_task_metadata()

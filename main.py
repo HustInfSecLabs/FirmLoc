@@ -138,6 +138,16 @@ class WebSocketChatSession:
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._agent_task: Optional[asyncio.Task] = None
         self._closing = asyncio.Event()
+        self._websocket_available = True
+
+    def _can_send(self, payload: Optional[Dict[str, Any]] = None) -> bool:
+        if not self._websocket_available:
+            return False
+        if self.websocket.client_state != WebSocketState.CONNECTED:
+            return False
+        if self._closing.is_set() and (payload or {}).get("type") != "close":
+            return False
+        return True
 
     async def run(self) -> None:
         await self.websocket.accept()
@@ -331,18 +341,30 @@ class WebSocketChatSession:
 
     async def _send_json(self, payload: Dict[str, Any]) -> None:
         async with self._send_lock:
-            if self.websocket.client_state == WebSocketState.CONNECTED:
+            if not self._can_send(payload):
+                return
+            try:
                 await self.websocket.send_json(payload)
-                msg_type = payload.get("type")
-                if msg_type in {"ping", "pong", "close"}:
-                    logger.debug("WebSocket send: %s", payload)
-                    return
-                logger.info("WebSocket send: %s", payload)
+            except RuntimeError as exc:
+                self._websocket_available = False
+                logger.info("Skip websocket send after close: %s", exc)
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                self._websocket_available = False
+                logger.warning("WebSocket send failed: %s", exc)
+                return
+
+            msg_type = payload.get("type")
+            if msg_type in {"ping", "pong", "close"}:
+                logger.debug("WebSocket send: %s", payload)
+                return
+            logger.info("WebSocket send: %s", payload)
 
     async def _shutdown(self) -> None:
         if self._closing.is_set():
             return
         self._closing.set()
+        self._websocket_available = self.websocket.client_state == WebSocketState.CONNECTED
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
@@ -357,10 +379,12 @@ class WebSocketChatSession:
         if self.chat_id is not None:
             parameter_collectors.pop(self.chat_id, None)
 
-        if self.websocket.client_state == WebSocketState.CONNECTED:
+        if self._can_send({"type": "close"}):
             with contextlib.suppress(Exception):
                 await self._send_json({"type": "close", "message": "Chat completed"})
                 await self.websocket.close()
+        else:
+            self._websocket_available = False
 
 
 def _normalize_upload_role(upload_role: Optional[str]) -> Optional[str]:
