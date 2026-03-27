@@ -1059,9 +1059,6 @@ class Refiner:
         self.react_max_iterations = react_max_iterations
         self.send_message = send_message
         self.history_dir = history_dir
-        
-        # 延迟初始化 ReAct Agent（在需要时创建）
-        self._react_refiner = None
 
     async def _get_lock_for_binary(self, binary_name):
         async with self._lock_access_lock:
@@ -1427,40 +1424,38 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
         # 缓存结果
         self._task_cache[cache_key] = final_result
         return final_result
-    
+
     async def async_react_query(self, fa, fb, cve_details=None, cwe=None, work_mode: str = "reproduction") -> str:
         """使用 ReAct Agent 进行二次分析
-        
+
         Args:
             fa: 补丁前的伪C文件路径
             fb: 补丁后的伪C文件路径
             cve_details: CVE详情
             cwe: CWE信息
             work_mode: 工作模式
-        
+
         Returns:
             分析结果字符串
         """
         # 延迟导入，避免循环依赖
         from agent.vuln_react_agent import VulnReActRefiner
-        
-        # 懒初始化 ReAct Refiner
-        if self._react_refiner is None:
-            logger.info("初始化 ReAct Agent...")
-            self._react_refiner = VulnReActRefiner(
-                log_file=self.log,
-                pre_binary_name=self.pre_binary_name,
-                post_binary_name=self.post_binary_name,
-                pre_pseudo_file=self.pre_pseudo_file,
-                post_pseudo_file=self.post_pseudo_file,
-                model_name=self.react_model_name,
-                max_iterations=self.react_max_iterations,
-                send_message=self.send_message,
-                history_dir=self.history_dir
-            )
-        
+
+        logger.info("初始化当前函数对的 ReAct Agent...")
+        react_refiner = VulnReActRefiner(
+            log_file=self.log,
+            pre_binary_name=self.pre_binary_name,
+            post_binary_name=self.post_binary_name,
+            pre_pseudo_file=self.pre_pseudo_file,
+            post_pseudo_file=self.post_pseudo_file,
+            model_name=self.react_model_name,
+            max_iterations=self.react_max_iterations,
+            send_message=self.send_message,
+            history_dir=self.history_dir
+        )
+
         try:
-            result = await self._react_refiner.refine(
+            result = await react_refiner.refine(
                 fa=fa,
                 fb=fb,
                 cve_details=cve_details or "",

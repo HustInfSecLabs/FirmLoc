@@ -353,7 +353,9 @@ Thought: {agent_scratchpad}"""
         code_after: str,
         vulnerability_type: str,
         cve_details: str = "",
-        cwe_id: str = ""
+        cwe_id: str = "",
+        pre_function_name: Optional[str] = None,
+        post_function_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         执行漏洞分析
@@ -376,11 +378,16 @@ Thought: {agent_scratchpad}"""
         
         # 加载并格式化 CWE 正反修复样例
         repair_samples_text = format_cwe_repair_samples(cwe_id)
-        
+
+        target_pre_function = pre_function_name or function_name
+        target_post_function = post_function_name or function_name
+
         # 构建输入提示词，使用正反修复样例而不是 scenario/property
         input_prompt = VULN_REACT_HUMAN_PROMPT.format(
             vulnerability_type=vulnerability_type,
             cwe_id=cwe_id or "Unknown",
+            pre_function_name=target_pre_function,
+            post_function_name=target_post_function,
             cve_details=cve_details or "No CVE details provided.",
             repair_samples=repair_samples_text,
             code_before=code_before,
@@ -569,7 +576,9 @@ class VulnReActRefiner:
             return f"读取函数文件失败: {str(e)}"
         
         # 提取函数名
-        function_name = os.path.basename(fa).split('.')[0]
+        pre_function_name = os.path.basename(fa).split('.')[0]
+        post_function_name = os.path.basename(fb).split('.')[0]
+        function_name = pre_function_name
         
         # 发送开始消息
         if self.send_message:
@@ -586,7 +595,9 @@ class VulnReActRefiner:
             code_after=code_after,
             vulnerability_type=cwe or "Unknown",
             cve_details=cve_details,
-            cwe_id=cwe
+            cwe_id=cwe,
+            pre_function_name=pre_function_name,
+            post_function_name=post_function_name
         )
         
         # 格式化结果

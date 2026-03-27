@@ -55,6 +55,10 @@ VULN_REACT_HUMAN_PROMPT = """## Vulnerability Analysis Task
 **Vulnerability Type**: {vulnerability_type}
 **CWE ID**: {cwe_id}
 
+### Current Target Function Pair
+- BEFORE function: {pre_function_name}
+- AFTER function: {post_function_name}
+
 ### CVE/CWE Description
 {cve_details}
 
@@ -66,7 +70,7 @@ VULN_REACT_HUMAN_PROMPT = """## Vulnerability Analysis Task
 {code_before}
 ```
 
-### Function Code - AFTER Patch  
+### Function Code - AFTER Patch
 ```c
 {code_after}
 ```
@@ -82,7 +86,12 @@ You may use the available tools to gather more context about:
 - Called functions (to understand behavior)
 - Data flow (to trace variable origins)
 
-**IMPORTANT**: 
+**IMPORTANT**:
+- Keep the analysis centered on the current target function pair: `{pre_function_name}` and `{post_function_name}`
+- Your first tool call MUST target either `{pre_function_name}` or `{post_function_name}`
+- Only inspect other functions if they are directly related callers/callees of the target pair, or are required to trace a specific variable discovered from the target pair
+- Do NOT analyze unrelated functions or jump to arbitrary suspicious functions without a direct relationship to the target pair
+- If you call a tool on another function, the function must come from a prior observation about the target pair
 - Avoid repeatedly calling the same tool with identical parameters
 - Once you have gathered sufficient evidence (typically 5-8 tool calls), use `submit_analysis` to provide your conclusion
 - If you're unsure after gathering context, it's better to submit your analysis with lower confidence than to keep searching indefinitely
