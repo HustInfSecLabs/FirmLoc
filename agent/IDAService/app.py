@@ -122,7 +122,12 @@ def take_screenshot(filename: str, stage="disassembly"):
 
 @app.route('/reversing_analyze_screenshot', methods=['POST'])
 def analyze_with_screenshot():
-    """分析二进制文件并返回IDA屏幕截图"""
+    """分析二进制文件并返回IDA屏幕截图。
+
+    请求参数:
+    - ida_version: ida 或 ida64
+    - return_screenshots: 是否捕获截图，false/0/no 则仅进行分析并返回结果
+    """
     # 检查文件大小
     if request.content_length > MAX_FILE_SIZE:
         abort(413, "File too large (max 100MB)")
@@ -134,6 +139,9 @@ def analyze_with_screenshot():
         IDA_PATH = IDA64_PATH
     else:
         IDA_PATH = IDA32_PATH
+
+    return_screenshots = request.form.get('return_screenshots', 'true').lower() not in ('0', 'false', 'no')
+    logger.info(f"return_screenshots={return_screenshots}")
     
     # 创建基于日期的目录
     date_str = datetime.now().strftime('%Y%m%d')
@@ -192,48 +200,62 @@ def analyze_with_screenshot():
                 time.sleep(1)
             
             if not analysis_completed:
-                logger.warning("Analysis timeout or failed, proceeding with screenshots anyway")
+                if return_screenshots:
+                    logger.warning("Analysis timeout or failed, proceeding with screenshots anyway")
+                else:
+                    logger.warning("Analysis timeout or failed, proceeding without screenshots")
             else:
                 logger.info(f"Analysis completed in {time.time() - start_wait:.2f} seconds")
-            
-            # 获取反汇编的截图
-            screenshot_path_1 = take_screenshot(filename=uploaded_file.filename, stage="disassembly")
-            if not screenshot_path_1:
-                abort(500, "Failed to capture first screenshot")
 
-            # 模拟Tab键输入，进行反编译
-            pyautogui.press('tab')
-            time.sleep(1)
-            
-            # 获取反编译的截图
-            screenshot_path_2 = take_screenshot(filename=uploaded_file.filename, stage="decompilation")
-            if not screenshot_path_2:
-                abort(500, "Failed to capture second screenshot")
-            
+            screenshot_path_1 = None
+            screenshot_path_2 = None
+            if return_screenshots:
+                # 获取反汇编的截图
+                screenshot_path_1 = take_screenshot(filename=uploaded_file.filename, stage="disassembly")
+                if not screenshot_path_1:
+                    abort(500, "Failed to capture first screenshot")
+
+                # 模拟Tab键输入，进行反编译
+                pyautogui.press('tab')
+                time.sleep(1)
+                
+                # 获取反编译的截图
+                screenshot_path_2 = take_screenshot(filename=uploaded_file.filename, stage="decompilation")
+                if not screenshot_path_2:
+                    abort(500, "Failed to capture second screenshot")
+
             # 终止IDA进程，否则终端会卡住
             ida_process.terminate()
             try:
                 ida_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 ida_process.kill()
-            
-            # 检查截图是否存在
-            if not (os.path.exists(screenshot_path_1) or not os.path.exists(screenshot_path_2)):
-                abort(500, "Screenshot files not generated")
-            
-            # 创建zip文件
-            zip_filename = os.path.join(analysis_dir, f"ida_screenshots_{uploaded_file.filename}.zip")
-            with zipfile.ZipFile(zip_filename, 'w') as zipf:
-                zipf.write(screenshot_path_1, os.path.basename(screenshot_path_1))
-                zipf.write(screenshot_path_2, os.path.basename(screenshot_path_2))
-            
-            # 返回zip文件
-            return send_file(
-                zip_filename,
-                as_attachment=True,
-                download_name=f"ida_screenshots_{uploaded_file.filename}.zip",
-                mimetype='application/zip'
-            )
+
+            if return_screenshots:
+                if not os.path.exists(screenshot_path_1) or not os.path.exists(screenshot_path_2):
+                    abort(500, "Screenshot files not generated")
+
+                # 创建zip文件
+                zip_filename = os.path.join(analysis_dir, f"ida_screenshots_{uploaded_file.filename}.zip")
+                with zipfile.ZipFile(zip_filename, 'w') as zipf:
+                    zipf.write(screenshot_path_1, os.path.basename(screenshot_path_1))
+                    zipf.write(screenshot_path_2, os.path.basename(screenshot_path_2))
+                
+                # 返回zip文件
+                return send_file(
+                    zip_filename,
+                    as_attachment=True,
+                    download_name=f"ida_screenshots_{uploaded_file.filename}.zip",
+                    mimetype='application/zip'
+                )
+            else:
+                return jsonify({
+                    "status": "success",
+                    "message": "Analysis completed without screenshots",
+                    "analysis_dir": analysis_dir,
+                    "binary_name": uploaded_file.filename,
+                    "screenshots": []
+                })
             
         except subprocess.TimeoutExpired:
             abort(408, "Analysis timeout")
