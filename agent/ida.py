@@ -10,8 +10,7 @@ async def ida_process(input_file_path: str, output_dir: str = None,
         ida_version: str = "ida32",
         config: ConfigManager = None,
         send_message=None,
-        on_status_update=None,
-        return_screenshots: bool = False) -> dict:
+        on_status_update=None) -> dict:
     """
     Analyze a binary file using IDA and return the results.
     Args:
@@ -21,9 +20,8 @@ async def ida_process(input_file_path: str, output_dir: str = None,
         config (ConfigManager, optional): Configuration manager instance. Defaults to None.
         send_message (function, optional): Function to send messages. Defaults to None.
         on_status_update (function, optional): Function to update status. Defaults to None.
-        return_screenshots (bool, optional): Whether to request and return screenshots. Defaults to False.
     Returns:
-        dict: A dictionary containing the results of the analysis, including optional screenshot paths, BinExport paths, and pseudo C file path.
+        dict: A dictionary containing the results of the analysis, including paths to screenshots, BinExport, and pseudo C code.
     """
     agent = "IDA Agent"
     tool = "IDA Decompiler"
@@ -35,31 +33,31 @@ async def ida_process(input_file_path: str, output_dir: str = None,
     config.update_tool_status("Binwalk", "IDA Decompiler")
     if on_status_update:
         on_status_update(None, tool, tool_status)
-
+    result_list = await IDAAgent.get_screenshots(input_file_path ,os.path.join(output_dir, "screenshots") if output_dir else None, ida_version=ida_version, screenshot_url=ida_service_url + "/reversing_analyze_screenshot")
+    # result_dict = {
+    #     "screenshots": ["12343.png", "12344.png"],
+    #     "binexport": ["binfilename.BinExport", "binfilename.idb"],
+    #     "pseudo_c": "binfilename_pseudo.c",
+    #     "state": True,
+    #     "error": None
+    # }
     screenshots = []
-    if return_screenshots:
-        result_list = await IDAAgent.get_screenshots(
-            input_file_path,
-            os.path.join(output_dir, "screenshots") if output_dir else None,
-            ida_version=ida_version,
-            screenshot_url=ida_service_url + "/reversing_analyze_screenshot",
-            return_screenshots=return_screenshots
-        )
-        for screenshot in result_list:
-            file = copy_file(screenshot, "images")
-            rename_file = os.path.join("/static", rename_file_with_b64_timestamp(file))
-            screenshots.append(rename_file)
+    for screenshot in result_list:
+        file = copy_file(screenshot, "images")
+        rename_file = os.path.join("/static", rename_file_with_b64_timestamp(file))
+        screenshots.append(rename_file)
 
-    filename = input_file_path.split("./", 1)[-1]
+    filename = input_file_path.split("./", 1)[-1]    
     tool_content = [
         {
             "type": "text",
             "content": f"IDA反编译文件{filename}",
-        }
-    ]
-    if screenshots:
-        tool_content += [{"type": "picture", "link": screenshot} for screenshot in screenshots]
 
+        }
+    ] + [
+
+        {"type": "picture", "link": screenshot} for screenshot in screenshots
+    ]
     if send_message:
         await send_message(
             f"正在执行: IDA反编译文件{filename}",
@@ -72,27 +70,11 @@ async def ida_process(input_file_path: str, output_dir: str = None,
         )
         await asyncio.sleep(1)
 
-    files = await IDAAgent.get_binexport(
-        input_file_path,
-        output_dir,
-        ida_version=ida_version,
-        bin_export_url=ida_service_url + "/export_binexport"
-    )
+    files = await IDAAgent.get_binexport(input_file_path, output_dir, ida_version=ida_version, bin_export_url=ida_service_url + "/export_binexport")
 
-    # 复制binexport文件到test目录
+     # 复制binexport文件到test目录
     copy_file(os.path.join(output_dir, os.path.basename(input_file_path) + ".BinExport"), os.path.join("test"))
 
-    c_file = await IDAAgent.get_pseudo_c(
-        input_file_path,
-        output_dir,
-        ida_version=ida_version,
-        pseudo_c_url=ida_service_url + "/export_pseudo_c"
-    )
+    c_file = await IDAAgent.get_pseudo_c(input_file_path, output_dir, ida_version=ida_version, pseudo_c_url=ida_service_url + "/export_pseudo_c")
 
-    return {
-        "screenshots": screenshots,
-        "binexport": files,
-        "pseudo_c": c_file,
-        "state": True,
-        "error": None
-    }
+    return files

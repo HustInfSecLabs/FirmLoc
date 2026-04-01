@@ -16,23 +16,17 @@ class IdaToolkit(BaseToolkit):
     r"""A class representing a toolkit for Ida binary analysis."""
     
     async def get_screenshots(self, input_file_path: str, output_dir: str, ida_version: str = "ida32",
-                        screenshot_url: str = "http://localhost:5000/reversing_analyze_screenshot",
-                        return_screenshots: bool = False) -> List[str]:
+                        screenshot_url: str = "http://localhost:5000/reversing_analyze_screenshot") -> List[str]:
         r"""Get screenshots from the screenshot service.
         
         Args:
             input_file_path (str): Path to the binary file.
             output_dir (str): Directory to save screenshots.
-            ida_version (str): IDA version to use for the service.
             screenshot_url (str): URL of the screenshot service.
-            return_screenshots (bool): If False, skip screenshot retrieval and return an empty list.
             
         Returns:
             list: List containing screenshot paths.
         """
-        if not return_screenshots:
-            return []
-
         if not os.path.exists(input_file_path):
             logger.error(f"Input file does not exist: {input_file_path}")
             return []
