@@ -5,9 +5,14 @@ from model import ChatModel
 from log import logger
 import os
 import requests
+from requests import RequestException
 import json
 import configparser
 import time
+
+
+class NVDConnectivityError(Exception):
+    pass
 
 
 # CWE 类型关键词映射，用于搜索相关CVE
@@ -47,14 +52,34 @@ class OnlineSearchAgent(Agent):
     2. 漏洞挖掘（设备）：根据厂商(vendor)、型号(model)、版本(version)搜索相关CVE
     3. 漏洞挖掘（CWE）：根据CWE类型和厂商搜索历史同类型CVE作为参考
     """
-    
+
     def __init__(self, chat_model: ChatModel) -> None:
         super().__init__(chat_model)
         self.api_base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
         self.request_delay = 6  # 秒
         # 默认搜索最近5年的CVE，可配置
         self.default_years_back = 5
-    
+
+    def _empty_search_results(self) -> dict:
+        return {
+            "totalResults": 0,
+            "vulnerabilities": []
+        }
+
+    def _request_nvd(self, params: dict, request_name: str) -> dict:
+        try:
+            response = requests.get(self.api_base_url, params=params, timeout=30)
+        except RequestException as exc:
+            raise NVDConnectivityError(f"{request_name} 无法连接 NVD API: {exc}") from exc
+
+        if response.status_code != 200:
+            raise Exception(f"NVD API请求失败，状态码: {response.status_code}, 响应: {response.text}")
+
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise Exception(f"NVD API返回了无法解析的JSON: {exc}") from exc
+
     def _get_date_range(self, years_back: int = None) -> tuple:
         """获取时间范围（ISO 8601格式）
         
@@ -163,11 +188,11 @@ class OnlineSearchAgent(Agent):
             'message': '缺少必要参数: 需要提供 cve_id（漏洞复现）或 cwe_id（漏洞挖掘）'
         }
     
-    def _process_cwe_discovery_search(self, task_id: str, cwe_id: str, 
+    def _process_cwe_discovery_search(self, task_id: str, cwe_id: str,
                                        vendor: str = None, model: str = None) -> dict:
         """
         漏洞挖掘模式：根据CWE类型搜索历史同类型CVE作为参考
-        
+
         搜索策略（优先搜索最近的CVE）：
         1. 使用CWE ID + 时间范围搜索（最近5年）
         2. 如果提供了厂商，结合厂商名称搜索
@@ -176,13 +201,15 @@ class OnlineSearchAgent(Agent):
         """
         work_dir = Path(f'./history/{task_id}/online_search')
         os.makedirs(work_dir, exist_ok=True)
-        
+
         logger.info(f"漏洞挖掘搜索: CWE={cwe_id}, vendor={vendor}, model={model}")
-        
+
         try:
             # 获取CWE相关的搜索关键词
             cwe_keywords = CWE_SEARCH_KEYWORDS.get(cwe_id.upper(), [])
-            
+            connectivity_failed = False
+            connectivity_error_message = None
+
             all_results = {
                 "totalResults": 0,
                 "vulnerabilities": [],
@@ -195,27 +222,27 @@ class OnlineSearchAgent(Agent):
                     "time_ranges": []
                 }
             }
-            
+
             # 策略1: 使用CWE ID + 时间范围搜索（优先最近的CVE）
             # 先搜索最近5年，如果不足再扩展到10年、15年
             time_ranges = [5, 10, 15]
             target_count = 20
-            
+
             for years_back in time_ranges:
-                if len(all_results["vulnerabilities"]) >= target_count:
+                if len(all_results["vulnerabilities"]) >= target_count or connectivity_failed:
                     break
-                
+
                 try:
                     pub_start, pub_end = self._get_date_range(years_back)
                     logger.info(f"搜索最近 {years_back} 年的CVE: {pub_start} 到 {pub_end}")
-                    
+
                     cwe_results = self._search_by_cwe_id(
-                        cwe_id, 
+                        cwe_id,
                         max_results=target_count,
                         pub_start_date=pub_start,
                         pub_end_date=pub_end
                     )
-                    
+
                     if cwe_results.get("vulnerabilities"):
                         # 按发布时间排序（最新的在前）
                         sorted_vulns = self._sort_by_published_date(cwe_results["vulnerabilities"])
@@ -224,19 +251,23 @@ class OnlineSearchAgent(Agent):
                         all_results["search_info"]["time_ranges"].append(f"最近{years_back}年")
                         logger.info(f"CWE ID搜索（最近{years_back}年）找到 {len(sorted_vulns)} 个CVE")
                         break  # 找到足够的结果就停止
-                    
+
+                except NVDConnectivityError as e:
+                    connectivity_failed = True
+                    connectivity_error_message = str(e)
+                    logger.warning(f"CWE ID搜索因NVD连通性问题终止: {e}")
                 except Exception as e:
                     logger.warning(f"CWE ID搜索（最近{years_back}年）失败: {e}")
-            
+
             # 策略2: 如果提供了厂商，结合厂商和CWE关键词搜索
-            if vendor and cwe_keywords and len(all_results["vulnerabilities"]) < 15:
+            if vendor and cwe_keywords and len(all_results["vulnerabilities"]) < 15 and not connectivity_failed:
                 for keyword in cwe_keywords[:2]:  # 限制关键词数量避免过多API调用
                     try:
                         time.sleep(self.request_delay)
                         pub_start, pub_end = self._get_date_range(5)  # 搜索最近5年
-                        
+
                         keyword_results = self._search_cve_by_keywords(
-                            vendor, 
+                            vendor,
                             keyword,  # 使用CWE关键词作为model参数
                             None,
                             max_results=10,
@@ -248,17 +279,22 @@ class OnlineSearchAgent(Agent):
                             all_results["vulnerabilities"].extend(sorted_vulns)
                             all_results["search_info"]["keywords_used"].append(f"{vendor} {keyword}")
                             logger.info(f"关键词'{vendor} {keyword}'搜索找到 {len(sorted_vulns)} 个CVE")
+                    except NVDConnectivityError as e:
+                        connectivity_failed = True
+                        connectivity_error_message = str(e)
+                        logger.warning(f"关键词搜索因NVD连通性问题终止: {e}")
+                        break
                     except Exception as e:
                         logger.warning(f"关键词搜索失败 ({vendor} {keyword}): {e}")
-            
+
             # 策略3: 只用厂商搜索（如果没有CWE关键词或上述搜索结果太少）
-            if vendor and len(all_results["vulnerabilities"]) < 5:
+            if vendor and len(all_results["vulnerabilities"]) < 5 and not connectivity_failed:
                 try:
                     time.sleep(self.request_delay)
                     pub_start, pub_end = self._get_date_range(5)  # 搜索最近5年
-                    
+
                     vendor_results = self._search_cve_by_keywords(
-                        vendor, model, None, 
+                        vendor, model, None,
                         max_results=20,
                         pub_start_date=pub_start,
                         pub_end_date=pub_end
@@ -268,9 +304,13 @@ class OnlineSearchAgent(Agent):
                         all_results["vulnerabilities"].extend(sorted_vulns)
                         all_results["search_info"]["keywords_used"].append(f"vendor={vendor}")
                         logger.info(f"厂商搜索找到 {len(sorted_vulns)} 个CVE")
+                except NVDConnectivityError as e:
+                    connectivity_failed = True
+                    connectivity_error_message = str(e)
+                    logger.warning(f"厂商搜索因NVD连通性问题终止: {e}")
                 except Exception as e:
                     logger.warning(f"厂商搜索失败: {e}")
-            
+
             # 去重（根据CVE ID）
             seen_cve_ids = set()
             unique_vulnerabilities = []
@@ -279,18 +319,22 @@ class OnlineSearchAgent(Agent):
                 if cve_id_found and cve_id_found not in seen_cve_ids:
                     seen_cve_ids.add(cve_id_found)
                     unique_vulnerabilities.append(vuln)
-            
+
             all_results["vulnerabilities"] = unique_vulnerabilities[:30]  # 限制最多30个结果
             all_results["totalResults"] = len(all_results["vulnerabilities"])
-            
+
+            if connectivity_failed:
+                all_results["search_info"]["connectivity_error"] = connectivity_error_message
+                logger.warning("NVD 连通性异常，返回空的在线搜索结果并继续后续流程")
+
             # 处理并保存结果
             processed_results = self._process_search_results(all_results)
             processed_results["search_info"] = all_results["search_info"]
-            
+
             result_file = work_dir / 'search_result.json'
             with open(result_file, 'w', encoding='utf-8') as f:
                 json.dump(processed_results, f, ensure_ascii=False, indent=2)
-            
+
             result = {
                 'status': 'success',
                 'search_result_path': str(result_file),
@@ -299,12 +343,15 @@ class OnlineSearchAgent(Agent):
                 'cwe_id': cwe_id,
                 'vendor': vendor
             }
-            
+
+            if connectivity_failed:
+                result['message'] = 'NVD 在线搜索暂时不可用，已返回空结果并继续后续流程'
+
             self._update_status_ini(work_dir, vendor, model, None, result, cwe_id=cwe_id)
-            
+
             logger.info(f"漏洞挖掘搜索完成: 找到 {result['total_cves']} 个相关CVE")
             return result
-            
+
         except Exception as e:
             logger.error(f"漏洞挖掘搜索失败: {e}")
             error_result = {
@@ -313,71 +360,67 @@ class OnlineSearchAgent(Agent):
             }
             self._update_status_ini(work_dir, vendor, model, None, error_result, cwe_id=cwe_id)
             return error_result
+
     
-    def _search_by_cwe_id(self, cwe_id: str, max_results: int = 20, 
+    def _search_by_cwe_id(self, cwe_id: str, max_results: int = 20,
                           pub_start_date: str = None, pub_end_date: str = None) -> dict:
         """根据CWE ID搜索相关CVE
-        
+
         Args:
             cwe_id: CWE编号
             max_results: 最大结果数
             pub_start_date: 发布开始时间（ISO 8601格式，Z结尾）
             pub_end_date: 发布结束时间（ISO 8601格式，Z结尾）
         """
-        all_results = {
-            "totalResults": 0,
-            "vulnerabilities": []
-        }
-        
+        all_results = self._empty_search_results()
+
         # 如果提供了时间范围，需要拆分为不超过120天的多个请求
         if pub_start_date and pub_end_date:
             date_ranges = self._split_date_range_to_120_days(pub_start_date, pub_end_date)
             logger.info(f"时间范围被拆分为 {len(date_ranges)} 个请求（每个不超过120天）")
-            
+
             for i, (start, end) in enumerate(date_ranges, 1):
                 if len(all_results["vulnerabilities"]) >= max_results:
                     break
-                
+
                 try:
                     logger.debug(f"请求 {i}/{len(date_ranges)}: {start} 到 {end}")
-                    
+
                     params = {
                         'cweId': cwe_id,
                         'pubStartDate': start,
                         'pubEndDate': end,
                         'resultsPerPage': min(max_results - len(all_results["vulnerabilities"]), 100)
                     }
-                    
-                    response = requests.get(self.api_base_url, params=params, timeout=30)
-                    if response.status_code != 200:
-                        logger.warning(f"请求失败（状态码{response.status_code}），跳过此时间段")
-                        continue
-                    
-                    result = response.json()
+
+                    result = self._request_nvd(
+                        params,
+                        f"CWE={cwe_id} 时间段 {start} 到 {end}"
+                    )
                     if result.get("vulnerabilities"):
                         all_results["vulnerabilities"].extend(result["vulnerabilities"])
                         all_results["totalResults"] += result.get("totalResults", 0)
-                    
+
                     # API速率限制：请求间隔
                     if i < len(date_ranges):
                         time.sleep(self.request_delay)
-                        
+
+                except NVDConnectivityError:
+                    raise
                 except Exception as e:
                     logger.warning(f"请求时间段 {start} 到 {end} 失败: {e}")
                     continue
-            
+
             return all_results
-        
+
         # 没有时间范围限制，直接搜索
         params = {
             'cweId': cwe_id,
             'resultsPerPage': min(max_results, 100)
         }
-        
-        response = requests.get(self.api_base_url, params=params, timeout=30)
-        if response.status_code != 200:
-            raise Exception(f"NVD API请求失败，状态码: {response.status_code}")
-        return response.json()
+
+        return self._request_nvd(params, f"CWE={cwe_id}")
+
     
     # 直接搜索特定CVE-ID的详细信息
     def _process_cve_search(self, task_id: str, cve_id: str):
@@ -419,29 +462,29 @@ class OnlineSearchAgent(Agent):
     def _process_device_search(self, task_id: str, vendor: str, model: str = None, version: str = None):
         work_dir = Path(f'./history/{task_id}/online_search')
         os.makedirs(work_dir, exist_ok=True)
-        
+
         try:
             # 默认搜索最近5年的CVE
             pub_start, pub_end = self._get_date_range(5)
             logger.info(f"设备搜索使用时间范围: {pub_start} 到 {pub_end}")
-            
+
             search_results = self._search_cve_by_keywords(
                 vendor, model, version,
                 pub_start_date=pub_start,
                 pub_end_date=pub_end
             )
-            
+
             # 按发布时间排序
             if search_results.get("vulnerabilities"):
                 search_results["vulnerabilities"] = self._sort_by_published_date(
                     search_results["vulnerabilities"]
                 )
-            
+
             processed_results = self._process_search_results(search_results)
             result_file = work_dir / 'search_result.json'
             with open(result_file, 'w', encoding='utf-8') as f:
                 json.dump(processed_results, f, ensure_ascii=False, indent=2)
-            
+
             # agent状态数据
             result = {
                 'status': 'success',
@@ -452,35 +495,53 @@ class OnlineSearchAgent(Agent):
                 'model': model,
                 'version': version
             }
-            
+
             self._update_status_ini(work_dir, vendor, model, version, result)
-            
+
             return json.dumps(result)
-            
+
+        except NVDConnectivityError as e:
+            logger.warning(f"设备搜索因NVD连通性问题降级: {e}")
+            processed_results = self._process_search_results(self._empty_search_results())
+            result_file = work_dir / 'search_result.json'
+            with open(result_file, 'w', encoding='utf-8') as f:
+                json.dump(processed_results, f, ensure_ascii=False, indent=2)
+
+            result = {
+                'status': 'success',
+                'search_result_path': str(result_file),
+                'total_cves': 0,
+                'search_mode': 'device',
+                'vendor': vendor,
+                'model': model,
+                'version': version,
+                'message': 'NVD 在线搜索暂时不可用，已返回空结果并继续后续流程'
+            }
+
+            self._update_status_ini(work_dir, vendor, model, version, result)
+            return json.dumps(result)
+
         except Exception as e:
             error_result = {
                 'status': 'error',
                 'message': f'执行过程中发生错误: {str(e)}'
             }
-            
+
             self._update_status_ini(work_dir, vendor, model, version, error_result)
-            
+
             return json.dumps(error_result)
     
     def _search_cve_by_id(self, cve_id: str):
         params = {
             'cveId': cve_id
         }
-        response = requests.get(self.api_base_url, params=params, timeout=30)
-        if response.status_code != 200:
-            raise Exception(f"NVD API请求失败，状态码: {response.status_code}, 响应: {response.text}")
-        return response.json()
-    
-    def _search_cve_by_keywords(self, vendor: str, model: str = None, version: str = None, 
-                                max_results: int = None, pub_start_date: str = None, 
+        return self._request_nvd(params, f"CVE={cve_id}")
+
+    def _search_cve_by_keywords(self, vendor: str, model: str = None, version: str = None,
+                                max_results: int = None, pub_start_date: str = None,
                                 pub_end_date: str = None):
         """根据关键词搜索CVE
-        
+
         Args:
             vendor: 厂商名称
             model: 型号（也可用于传递其他搜索关键词）
@@ -497,70 +558,67 @@ class OnlineSearchAgent(Agent):
             keywords.append(model)
         if version:
             keywords.append(version)
-        
+
         search_query = ' '.join(keywords)
         all_results = {
             "totalResults": 0,
             "vulnerabilities": []
         }
-        
+
         # 如果提供了时间范围，需要拆分为不超过120天的多个请求
         if pub_start_date and pub_end_date:
             date_ranges = self._split_date_range_to_120_days(pub_start_date, pub_end_date)
             logger.info(f"时间范围被拆分为 {len(date_ranges)} 个请求（每个不超过120天）")
-            
+
             for i, (start, end) in enumerate(date_ranges, 1):
                 if max_results and len(all_results["vulnerabilities"]) >= max_results:
                     break
-                
+
                 try:
                     logger.debug(f"关键词搜索请求 {i}/{len(date_ranges)}: {start} 到 {end}")
-                    
+
                     params = {
                         'keywordSearch': search_query,
                         'pubStartDate': start,
                         'pubEndDate': end,
                         'resultsPerPage': min(100, max_results - len(all_results["vulnerabilities"]) if max_results else 100)
                     }
-                    
-                    response = requests.get(self.api_base_url, params=params, timeout=30)
-                    if response.status_code != 200:
-                        logger.warning(f"关键词搜索请求失败（状态码{response.status_code}），跳过此时间段")
-                        continue
-                    
-                    result = response.json()
+
+                    result = self._request_nvd(
+                        params,
+                        f"关键词搜索 '{search_query}' 时间段 {start} 到 {end}"
+                    )
                     if result.get("vulnerabilities"):
                         all_results["vulnerabilities"].extend(result["vulnerabilities"])
                         all_results["totalResults"] += result.get("totalResults", 0)
-                    
+
                     # API速率限制：请求间隔
                     if i < len(date_ranges):
                         time.sleep(self.request_delay)
-                        
+
+                except NVDConnectivityError:
+                    raise
                 except Exception as e:
                     logger.warning(f"关键词搜索时间段 {start} 到 {end} 失败: {e}")
                     continue
-            
+
             if max_results:
                 all_results["vulnerabilities"] = all_results["vulnerabilities"][:max_results]
-            
+
             return all_results
-        
+
         # 没有时间范围限制，使用原有逻辑（分页）
         start_index = 0
         results_per_page = min(100, max_results) if max_results else 100
-        
+
         while True:
             params = {
                 'keywordSearch': search_query,
                 'resultsPerPage': results_per_page,
                 'startIndex': start_index
             }
-            
-            response = requests.get(self.api_base_url, params=params, timeout=30)
-            if response.status_code != 200:
-                raise Exception(f"NVD API请求失败，状态码: {response.status_code}, 响应: {response.text}")
-            result = response.json()
+
+            result = self._request_nvd(params, f"关键词搜索 '{search_query}' 第 {start_index} 条")
             all_results["totalResults"] = result.get("totalResults", 0)
             if "vulnerabilities" in result:
                 all_results["vulnerabilities"].extend(result["vulnerabilities"])
@@ -569,14 +627,14 @@ class OnlineSearchAgent(Agent):
             if max_results and len(all_results["vulnerabilities"]) >= max_results:
                 all_results["vulnerabilities"] = all_results["vulnerabilities"][:max_results]
                 break
-            
+
             # 检查是否需要获取下一页，是则获取
             received_count = len(result.get("vulnerabilities", []))
             if received_count == 0 or start_index + received_count >= result.get("totalResults", 0):
                 break
             start_index += received_count
             time.sleep(self.request_delay)
-        
+
         return all_results
     
     def _process_search_results(self, search_results):
