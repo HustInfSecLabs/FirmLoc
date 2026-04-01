@@ -63,6 +63,9 @@ class VulnTask(Base):
         Index("ix_vuln_tasks_status_phase_created_at", "status", "current_phase", "created_at"),
         Index("ix_vuln_tasks_cve_id", "cve_id"),
         Index("ix_vuln_tasks_cwe_id", "cwe_id"),
+        Index("ix_vuln_tasks_owner_created_at", "owner_id", "created_at"),
+        Index("ix_vuln_tasks_external_task_id", "external_task_id"),
+        UniqueConstraint("source", "owner_id", "external_task_id", name="uq_vuln_tasks_source_owner_external"),
     )
 
     id = Column(String(64), primary_key=True)
@@ -74,6 +77,9 @@ class VulnTask(Base):
     vendor = Column(String(255), nullable=True)
     work_mode = Column(String(50), nullable=True)
     analysis_mode = Column(String(50), nullable=True)
+    owner_id = Column(String(64), nullable=True)
+    external_task_id = Column(String(64), nullable=True)
+    source = Column(String(64), nullable=True)
 
     old_input_path = Column(String(1024), nullable=True)
     new_input_path = Column(String(1024), nullable=True)

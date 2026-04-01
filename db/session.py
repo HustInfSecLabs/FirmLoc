@@ -22,6 +22,9 @@ _POSTGRES_SCHEMES = (
 
 _SQLITE_COMPAT_COLUMNS = {
     "vuln_tasks": {
+        "owner_id": "VARCHAR(64)",
+        "external_task_id": "VARCHAR(64)",
+        "source": "VARCHAR(64)",
         "old_input_path": "TEXT",
         "new_input_path": "TEXT",
         "old_input_name": "VARCHAR(255)",
@@ -47,6 +50,9 @@ _SQLITE_COMPAT_INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_vuln_tasks_status_phase_created_at ON vuln_tasks (status, current_phase, created_at)",
     "CREATE INDEX IF NOT EXISTS ix_vuln_tasks_cve_id ON vuln_tasks (cve_id)",
     "CREATE INDEX IF NOT EXISTS ix_vuln_tasks_cwe_id ON vuln_tasks (cwe_id)",
+    "CREATE INDEX IF NOT EXISTS ix_vuln_tasks_owner_created_at ON vuln_tasks (owner_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_vuln_tasks_external_task_id ON vuln_tasks (external_task_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_vuln_tasks_source_owner_external ON vuln_tasks (source, owner_id, external_task_id)",
     "CREATE INDEX IF NOT EXISTS ix_vuln_events_task_sequence ON vuln_events (task_id, sequence)",
     "CREATE INDEX IF NOT EXISTS ix_vuln_events_task_phase_timestamp ON vuln_events (task_id, phase, timestamp)",
     "CREATE INDEX IF NOT EXISTS ix_vuln_events_event_type ON vuln_events (event_type)",

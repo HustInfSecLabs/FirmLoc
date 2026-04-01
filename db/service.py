@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from .models import (
     VulnEvent,
@@ -123,12 +123,53 @@ def _apply_task_stats(task: VulnTask) -> None:
     task.low_count = sum(1 for item in findings if item.severity == VulnFindingSeverity.LOW.value)
 
 
+def _build_task_query(
+    *,
+    task_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
+):
+    stmt = select(VulnTask)
+    if task_id is not None:
+        stmt = stmt.where(VulnTask.id == task_id)
+    if owner_id is not None:
+        stmt = stmt.where(VulnTask.owner_id == owner_id)
+    if external_task_id is not None:
+        stmt = stmt.where(VulnTask.external_task_id == external_task_id)
+    if source is not None:
+        stmt = stmt.where(VulnTask.source == source)
+    return stmt
+
+
+def _get_task(
+    session,
+    *,
+    task_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
+) -> Optional[VulnTask]:
+    if task_id is None and external_task_id is None:
+        return None
+    stmt = _build_task_query(
+        task_id=task_id,
+        owner_id=owner_id,
+        external_task_id=external_task_id,
+        source=source,
+    ).limit(1)
+    return session.scalar(stmt)
+
+
 def _ensure_task_row(
     session,
     chat_id: str,
     query: Optional[str] = None,
     binary_filename: Optional[str] = None,
     artifact_dir: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> VulnTask:
     task = session.get(VulnTask, chat_id)
     if task is None:
@@ -138,6 +179,9 @@ def _ensure_task_row(
             query=query,
             binary_filename=binary_filename,
             artifact_dir=artifact_dir,
+            owner_id=owner_id,
+            external_task_id=external_task_id,
+            source=source,
         )
         session.add(task)
         session.flush()
@@ -149,6 +193,12 @@ def _ensure_task_row(
         task.binary_filename = binary_filename
     if artifact_dir:
         task.artifact_dir = artifact_dir
+    if owner_id and not task.owner_id:
+        task.owner_id = owner_id
+    if external_task_id and not task.external_task_id:
+        task.external_task_id = external_task_id
+    if source and not task.source:
+        task.source = source
     if not task.name or task.name == chat_id:
         task.name = _task_name(chat_id, task.query, task.binary_filename)
     return task
@@ -195,9 +245,21 @@ def ensure_task(
     analysis_mode: Optional[str] = None,
     artifact_dir: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> None:
     with session_scope() as session:
-        task = _ensure_task_row(session, chat_id, query=query, binary_filename=binary_filename, artifact_dir=artifact_dir)
+        task = _ensure_task_row(
+            session,
+            chat_id,
+            query=query,
+            binary_filename=binary_filename,
+            artifact_dir=artifact_dir,
+            owner_id=owner_id,
+            external_task_id=external_task_id,
+            source=source,
+        )
         if query:
             task.query = query
         if cve_id:
@@ -212,6 +274,12 @@ def ensure_task(
             task.work_mode = work_mode
         if analysis_mode:
             task.analysis_mode = analysis_mode
+        if owner_id:
+            task.owner_id = owner_id
+        if external_task_id:
+            task.external_task_id = external_task_id
+        if source:
+            task.source = source
         if config:
             task.config = _merge_dict(task.config, config)
         task.name = _task_name(chat_id, task.query, task.binary_filename)
@@ -228,9 +296,21 @@ def start_task(
     analysis_mode: Optional[str] = None,
     artifact_dir: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> None:
     with session_scope() as session:
-        task = _ensure_task_row(session, chat_id, query=query, binary_filename=binary_filename, artifact_dir=artifact_dir)
+        task = _ensure_task_row(
+            session,
+            chat_id,
+            query=query,
+            binary_filename=binary_filename,
+            artifact_dir=artifact_dir,
+            owner_id=owner_id,
+            external_task_id=external_task_id,
+            source=source,
+        )
         if query:
             task.query = query
         if cve_id:
@@ -247,9 +327,24 @@ def start_task(
             task.analysis_mode = analysis_mode
         if artifact_dir:
             task.artifact_dir = artifact_dir
+        if owner_id:
+            task.owner_id = owner_id
+        if external_task_id:
+            task.external_task_id = external_task_id
+        if source:
+            task.source = source
         if config:
             task.config = _merge_dict(task.config, config)
         task.name = _task_name(chat_id, task.query, task.binary_filename)
+
+        session.execute(delete(VulnEvent).where(VulnEvent.task_id == chat_id))
+        session.execute(delete(VulnFinding).where(VulnFinding.task_id == chat_id))
+        task.findings_count = 0
+        task.critical_count = 0
+        task.high_count = 0
+        task.medium_count = 0
+        task.low_count = 0
+        task.report_path = None
         # Allow restarting completed/failed tasks — reset terminal state cleanly
         task.status = VulnTaskStatus.RUNNING.value
         task.current_phase = VulnTaskPhase.INIT.value
@@ -257,8 +352,7 @@ def start_task(
         task.progress_percentage = _PHASE_PROGRESS_MAP[VulnTaskPhase.INIT.value]
         task.error_message = None
         task.completed_at = None
-        if task.started_at is None:
-            task.started_at = datetime.utcnow()
+        task.started_at = datetime.utcnow()
         event = VulnEvent(
             id=str(uuid.uuid4()),
             task_id=chat_id,
@@ -273,6 +367,9 @@ def start_task(
                 "vendor": vendor,
                 "work_mode": work_mode,
                 "analysis_mode": analysis_mode,
+                "owner_id": owner_id,
+                "external_task_id": external_task_id,
+                "source": source,
             },
             sequence=_next_sequence(session, chat_id),
         )
@@ -287,6 +384,9 @@ def record_upload(
     content_type: Optional[str] = None,
     upload_role: Optional[str] = None,
     artifact_dir: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> None:
     with session_scope() as session:
         task = _ensure_task_row(
@@ -294,6 +394,9 @@ def record_upload(
             chat_id,
             binary_filename=filename,
             artifact_dir=artifact_dir or str(Path(saved_path).parent),
+            owner_id=owner_id,
+            external_task_id=external_task_id,
+            source=source,
         )
         uploaded = list(task.uploaded_files or [])
         payload = {
@@ -345,9 +448,21 @@ def create_task(
     analysis_mode: Optional[str] = None,
     artifact_dir: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> dict[str, Any]:
     with session_scope() as session:
-        task = _ensure_task_row(session, chat_id, query=query, binary_filename=binary_filename, artifact_dir=artifact_dir)
+        task = _ensure_task_row(
+            session,
+            chat_id,
+            query=query,
+            binary_filename=binary_filename,
+            artifact_dir=artifact_dir,
+            owner_id=owner_id,
+            external_task_id=external_task_id,
+            source=source,
+        )
         if query is not None:
             task.query = query
         if cve_id is not None:
@@ -364,15 +479,38 @@ def create_task(
             task.analysis_mode = analysis_mode
         if artifact_dir is not None:
             task.artifact_dir = artifact_dir
+        if owner_id is not None:
+            task.owner_id = owner_id
+        if external_task_id is not None:
+            task.external_task_id = external_task_id
+        if source is not None:
+            task.source = source
         if config:
             task.config = _merge_dict(task.config, config)
         task.name = _task_name(chat_id, task.query, task.binary_filename)
-        task.status = task.status or VulnTaskStatus.PENDING.value
-        task.current_phase = task.current_phase or VulnTaskPhase.INIT.value
-        if task.progress_percentage is None:
-            task.progress_percentage = _PHASE_PROGRESS_MAP[VulnTaskPhase.INIT.value]
-        if not task.current_step:
-            task.current_step = "任务已创建"
+        task.status = VulnTaskStatus.PENDING.value
+        task.current_phase = VulnTaskPhase.INIT.value
+        task.current_step = "任务已创建"
+        task.progress_percentage = _PHASE_PROGRESS_MAP[VulnTaskPhase.INIT.value]
+        task.error_message = None
+        task.report_path = None
+        task.started_at = None
+        task.completed_at = None
+        task.total_files = 0
+        task.uploaded_files = []
+        task.old_input_path = None
+        task.new_input_path = None
+        task.old_input_name = None
+        task.new_input_name = None
+        task.old_input_size = None
+        task.new_input_size = None
+        task.findings_count = 0
+        task.critical_count = 0
+        task.high_count = 0
+        task.medium_count = 0
+        task.low_count = 0
+        session.execute(delete(VulnEvent).where(VulnEvent.task_id == chat_id))
+        session.execute(delete(VulnFinding).where(VulnFinding.task_id == chat_id))
         session.flush()
         payload = _serialize_task(task)
         payload["events_count"] = session.scalar(select(func.count()).select_from(VulnEvent).where(VulnEvent.task_id == chat_id)) or 0
@@ -625,6 +763,26 @@ def mark_task_failed(chat_id: str, error_message: str) -> None:
         session.add(event)
 
 
+def mark_task_cancelled(chat_id: str, message: str = "任务已取消") -> None:
+    with session_scope() as session:
+        task = _ensure_task_row(session, chat_id)
+        task.status = VulnTaskStatus.CANCELLED.value
+        task.error_message = None
+        task.completed_at = datetime.utcnow()
+        task.current_step = message[:255]
+        event = VulnEvent(
+            id=str(uuid.uuid4()),
+            task_id=chat_id,
+            event_type=VulnEventType.LOG_MESSAGE.value,
+            phase=task.current_phase,
+            title="任务取消",
+            content=message,
+            data={"status": VulnTaskStatus.CANCELLED.value},
+            sequence=_next_sequence(session, chat_id),
+        )
+        session.add(event)
+
+
 def mark_task_completed(chat_id: str) -> None:
     with session_scope() as session:
         task = _ensure_task_row(session, chat_id)
@@ -650,6 +808,10 @@ def mark_task_completed(chat_id: str) -> None:
 def _serialize_task(task: VulnTask) -> dict[str, Any]:
     return {
         "chat_id": task.id,
+        "task_id": task.id,
+        "owner_id": task.owner_id,
+        "external_task_id": task.external_task_id,
+        "source": task.source,
         "name": task.name,
         "query": task.query,
         "cve_id": task.cve_id,
@@ -687,7 +849,6 @@ def _serialize_task(task: VulnTask) -> dict[str, Any]:
         "started_at": task.started_at.isoformat() if task.started_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
     }
-
 
 
 def _serialize_event(event: VulnEvent) -> dict[str, Any]:
@@ -761,6 +922,28 @@ def get_task_detail(chat_id: str) -> Optional[dict[str, Any]]:
         return payload
 
 
+def get_platform_task(
+    *,
+    task_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    with session_scope() as session:
+        task = _get_task(
+            session,
+            task_id=task_id,
+            owner_id=owner_id,
+            external_task_id=external_task_id,
+            source=source,
+        )
+        if task is None:
+            return None
+        payload = _serialize_task(task)
+        payload["events_count"] = session.scalar(select(func.count()).select_from(VulnEvent).where(VulnEvent.task_id == task.id)) or 0
+        payload["findings_count"] = session.scalar(select(func.count()).select_from(VulnFinding).where(VulnFinding.task_id == task.id)) or 0
+        return payload
+
 
 def list_task_events(chat_id: str, limit: int = 100, offset: int = 0) -> dict[str, Any]:
     with session_scope() as session:
@@ -782,6 +965,48 @@ def list_task_events(chat_id: str, limit: int = 100, offset: int = 0) -> dict[st
         }
 
 
+def list_platform_task_events(
+    *,
+    task_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    after_sequence: Optional[int] = None,
+) -> Optional[dict[str, Any]]:
+    with session_scope() as session:
+        task = _get_task(
+            session,
+            task_id=task_id,
+            owner_id=owner_id,
+            external_task_id=external_task_id,
+            source=source,
+        )
+        if task is None:
+            return None
+
+        total_stmt = select(func.count()).select_from(VulnEvent).where(VulnEvent.task_id == task.id)
+        stmt = select(VulnEvent).where(VulnEvent.task_id == task.id)
+        if after_sequence is not None:
+            total_stmt = total_stmt.where(VulnEvent.sequence > after_sequence)
+            stmt = stmt.where(VulnEvent.sequence > after_sequence)
+
+        total = session.scalar(total_stmt) or 0
+        events = session.scalars(
+            stmt.order_by(VulnEvent.sequence.asc(), VulnEvent.timestamp.asc()).offset(offset).limit(limit)
+        ).all()
+        return {
+            "task_id": task.id,
+            "owner_id": task.owner_id,
+            "external_task_id": task.external_task_id,
+            "source": task.source,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "items": [_serialize_event(event) for event in events],
+        }
+
 
 def list_task_findings(chat_id: str, limit: int = 100, offset: int = 0) -> dict[str, Any]:
     with session_scope() as session:
@@ -802,6 +1027,45 @@ def list_task_findings(chat_id: str, limit: int = 100, offset: int = 0) -> dict[
             "items": [_serialize_finding(finding) for finding in findings],
         }
 
+
+def list_platform_task_findings(
+    *,
+    task_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    source: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> Optional[dict[str, Any]]:
+    with session_scope() as session:
+        task = _get_task(
+            session,
+            task_id=task_id,
+            owner_id=owner_id,
+            external_task_id=external_task_id,
+            source=source,
+        )
+        if task is None:
+            return None
+
+        total = session.scalar(select(func.count()).select_from(VulnFinding).where(VulnFinding.task_id == task.id)) or 0
+        findings = session.scalars(
+            select(VulnFinding)
+            .where(VulnFinding.task_id == task.id)
+            .order_by(VulnFinding.updated_at.desc(), VulnFinding.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        ).all()
+        return {
+            "task_id": task.id,
+            "owner_id": task.owner_id,
+            "external_task_id": task.external_task_id,
+            "source": task.source,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "items": [_serialize_finding(finding) for finding in findings],
+        }
 
 
 def list_tasks() -> list[dict[str, Any]]:
@@ -828,3 +1092,10 @@ def list_tasks() -> list[dict[str, Any]]:
             }
             for task in tasks
         ]
+
+
+def list_platform_tasks(owner_id: Optional[str] = None, source: Optional[str] = None) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        stmt = _build_task_query(owner_id=owner_id, source=source).order_by(VulnTask.created_at.desc())
+        tasks = session.scalars(stmt).all()
+        return [_serialize_task(task) for task in tasks]
