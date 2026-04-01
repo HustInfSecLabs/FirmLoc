@@ -2,16 +2,14 @@
 
 import os
 import json
-import random
 import asyncio
 from datetime import datetime
 
 from utils import ConfigManager
 from tools.bindiff_tool import run_bindiff
-from tools.bindiff_visual import bindiff_ui
-from utils.utils import copy_file, cleanup_dir, rename_file_with_b64_timestamp
+from utils.utils import copy_file, cleanup_dir
 from log import logger
-from state import ProgressEnum, TaskStatusEnum
+from state import TaskStatusEnum
 
 
 class BindiffAgent:
@@ -51,24 +49,15 @@ class BindiffAgent:
         }
         self._save_state()
 
-        result = run_bindiff(primary_export, secondary_export, self.output_dir)
+        result = await asyncio.to_thread(run_bindiff, primary_export, secondary_export, self.output_dir)
         file1 = os.path.basename(primary_export)
         file2 = os.path.basename(secondary_export)
         src_name = f"{os.path.splitext(file1)[0]}_vs_{os.path.splitext(file2)[0]}.BinDiff"
-        # 目标路径为当前目录下的test文件夹
         copy_file(os.path.join(self.output_dir, src_name), os.path.join("test"))
-        # bindiff截图
-        screenshots = bindiff_ui(os.path.splitext(os.path.basename(primary_export))[0] + f"{str(random.randint(100000, 999999))}", os.path.join(self.output_dir, "images"))
         cleanup_dir(os.path.join("test"))
 
         links = []
-        for screenshot in screenshots:
-            file = copy_file(screenshot, "images")
-            rename_file = os.path.join("/static", rename_file_with_b64_timestamp(file))
-            links.append(rename_file)
 
-
-        # 更新状态
         config.update_tool_status("IDA Decompiler", "Bindiff")
         if on_status_update:
             on_status_update(None, self.tool_name, self.tool_status)

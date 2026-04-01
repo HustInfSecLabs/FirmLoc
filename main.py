@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, status, Request, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from starlette.websockets import WebSocketState
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -10,6 +11,7 @@ import uuid
 import asyncio
 import json
 import contextlib
+import shutil
 from pathlib import Path
 from enum import Enum
 from datetime import datetime, timezone, timedelta
@@ -28,11 +30,16 @@ from model import AgentModel
 from config import config_manager
 from db import (
     create_task,
+    get_platform_task,
     get_task_detail,
     init_db,
+    list_platform_task_events,
+    list_platform_task_findings,
+    list_platform_tasks,
     list_task_events,
     list_task_findings,
     list_tasks,
+    mark_task_cancelled,
     mark_task_failed,
     record_upload,
     start_task,
@@ -113,6 +120,23 @@ SOURCE_DIFF_EXTENSIONS = {
 
 VALID_UPLOAD_ROLES = {"old", "new"}
 VALID_ANALYSIS_MODES = {"auto", "firmware", "binary_pair"}
+PLATFORM_SOURCE = "deepaudit_extension"
+PLATFORM_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+platform_task_runners: Dict[str, asyncio.Task] = {}
+
+
+class PlatformTaskCreateRequest(BaseModel):
+    external_task_id: str
+    owner_id: str
+    name: str
+    description: Optional[str] = None
+    cve_id: Optional[str] = None
+    cwe_id: Optional[str] = None
+    binary_filename: Optional[str] = None
+    vendor: Optional[str] = None
+    work_mode: Optional[str] = None
+    analysis_mode: str = "auto"
+    source: str = PLATFORM_SOURCE
 
 
 # 消息类型枚举
@@ -387,6 +411,67 @@ class WebSocketChatSession:
             self._websocket_available = False
 
 
+def _normalize_platform_source(source: Optional[str]) -> str:
+    normalized_source = (source or PLATFORM_SOURCE).strip().lower() or PLATFORM_SOURCE
+    return normalized_source
+
+
+def _get_platform_task_dir(task_id: str) -> str:
+    return os.path.join(path, str(task_id))
+
+
+class _OfflineWebSocket:
+    client_state = WebSocketState.DISCONNECTED
+
+    async def send_json(self, payload: Dict[str, Any]) -> None:  # pragma: no cover - defensive
+        return None
+
+
+async def _run_platform_task(task_id: str, query: str, payload: PlatformTaskCreateRequest) -> None:
+    try:
+        start_task(
+            chat_id=task_id,
+            query=query,
+            cve_id=payload.cve_id,
+            cwe_id=payload.cwe_id,
+            binary_filename=payload.binary_filename,
+            vendor=payload.vendor,
+            work_mode=payload.work_mode or DEFAULT_WORK_MODE.value,
+            analysis_mode=payload.analysis_mode,
+            artifact_dir=_get_platform_task_dir(task_id),
+            config={
+                "platform": {
+                    "name": payload.name,
+                    "description": payload.description,
+                }
+            },
+            owner_id=payload.owner_id,
+            external_task_id=payload.external_task_id,
+            source=_normalize_platform_source(payload.source),
+        )
+        agent = VulnAgent(
+            task_id,
+            query,
+            _OfflineWebSocket(),
+            cve_id=payload.cve_id,
+            cwe_id=payload.cwe_id,
+            binary_filename=payload.binary_filename,
+            vendor=payload.vendor,
+            work_mode=payload.work_mode or DEFAULT_WORK_MODE.value,
+            analysis_mode=payload.analysis_mode,
+        )
+        await agent.chat()
+    except asyncio.CancelledError:
+        logger.info("Platform task cancelled: %s", task_id)
+        mark_task_cancelled(task_id)
+        raise
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("Platform task execution failed: %s", exc, exc_info=True)
+        mark_task_failed(task_id, str(exc))
+    finally:
+        platform_task_runners.pop(task_id, None)
+
+
 def _normalize_upload_role(upload_role: Optional[str]) -> Optional[str]:
     normalized_role = (upload_role or "").strip().lower() or None
     if normalized_role not in {None, *VALID_UPLOAD_ROLES}:
@@ -468,11 +553,29 @@ def _create_source_diff_sender(websocket: WebSocket, chat_id: str):
     async def _send(
         content: str,
         message_type: str = "message",
+        *args,
         status: str = "running",
         phase: str = "analysis",
         is_last: bool = False,
         tool_status: Optional[Dict[str, Any]] = None,
+        agent: Optional[str] = None,
+        tool: Optional[str] = None,
+        **kwargs,
     ) -> None:
+        derived_tool_status = tool_status
+        if len(args) >= 2 and isinstance(args[1], list):
+            derived_tool_status = {
+                "type": args[0] if isinstance(args[0], str) else None,
+                "content": args[1],
+            }
+        elif isinstance(kwargs.get("tool_content"), list):
+            derived_tool_status = {
+                "type": kwargs.get("tool_type") if isinstance(kwargs.get("tool_type"), str) else None,
+                "content": kwargs.get("tool_content"),
+            }
+        elif isinstance(kwargs.get("tool_status"), dict):
+            derived_tool_status = kwargs.get("tool_status")
+
         await websocket.send_json(
             _build_source_diff_runtime_message(
                 chat_id,
@@ -480,8 +583,10 @@ def _create_source_diff_sender(websocket: WebSocket, chat_id: str):
                 message_type=message_type,
                 status_value=status,
                 phase=phase,
+                agent=agent or "Source Diff Agent",
+                tool=tool,
                 is_last=is_last,
-                tool_status=tool_status,
+                tool_status=derived_tool_status,
             )
         )
 
@@ -504,9 +609,13 @@ async def _save_uploaded_file(chat_id: str, file: UploadFile, upload_role: Optio
 
     try:
         content = await file.read()
+        if len(content) > PLATFORM_MAX_UPLOAD_BYTES:
+            raise ValueError(f"文件大小超过限制 ({PLATFORM_MAX_UPLOAD_BYTES // (1024 * 1024)}MB)")
         with open(save_path, "wb") as output:
             output.write(content)
     except Exception as exc:  # pylint: disable=broad-except
+        if isinstance(exc, ValueError):
+            raise
         raise OSError(f"文件保存失败: {str(exc)}") from exc
 
     file_stat = os.stat(save_path)
@@ -528,7 +637,7 @@ async def _save_uploaded_file(chat_id: str, file: UploadFile, upload_role: Optio
     }
 
 
-async def _save_source_diff_file(chat_id: str, file: UploadFile) -> Dict[str, Any]:
+async def _save_source_diff_file(chat_id: str, file: UploadFile, upload_role: Optional[str] = None) -> Dict[str, Any]:
     filename = Path(file.filename).name
     ext = Path(filename).suffix.lower()
     if ext not in SOURCE_DIFF_EXTENSIONS:
@@ -536,7 +645,8 @@ async def _save_source_diff_file(chat_id: str, file: UploadFile) -> Dict[str, An
 
     session_dir = _get_source_diff_session_dir(chat_id)
     os.makedirs(session_dir, exist_ok=True)
-    save_path = os.path.join(session_dir, filename)
+    stored_name = f"{upload_role}_{filename}" if upload_role else filename
+    save_path = os.path.join(session_dir, stored_name)
     if os.path.exists(save_path):
         raise FileExistsError("文件已存在")
 
@@ -549,29 +659,83 @@ async def _save_source_diff_file(chat_id: str, file: UploadFile) -> Dict[str, An
 
     file_stat = os.stat(save_path)
     return {
-        "id": filename,
+        "id": stored_name,
         "name": filename,
         "created_at": int(time.time()),
         "bytes": file_stat.st_size,
+        "upload_role": upload_role,
     }
+
+
+
+
+
+
+def _platform_query_value(value: Optional[str]) -> Optional[str]:
+    normalized = (value or "").strip()
+    return normalized or None
+
+
+def _delete_source_diff_file(chat_id: str, filename: str) -> None:
+    folder = _get_source_diff_session_dir(chat_id)
+    if not os.path.exists(folder):
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+
+    target_name = Path(filename).name
+    if not target_name:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    file_path = os.path.join(folder, target_name)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=400, detail="目标不是文件")
+
+    os.remove(file_path)
+
+
+async def _create_legacy_task(
+    chat_id: Optional[str],
+    query: Optional[str],
+    cve_id: Optional[str],
+    cwe_id: Optional[str],
+    binary_filename: Optional[str],
+    vendor: Optional[str],
+    work_mode: Optional[str],
+    analysis_mode: Optional[str],
+) -> dict[str, Any]:
+    normalized_chat_id = (chat_id or "").strip() or str(uuid.uuid4())
+    normalized_analysis_mode = _normalize_analysis_mode(analysis_mode)
+    task_dir = _get_platform_task_dir(normalized_chat_id)
+    os.makedirs(task_dir, exist_ok=True)
+    return await asyncio.to_thread(
+        create_task,
+        chat_id=normalized_chat_id,
+        query=(query or "").strip() or None,
+        cve_id=(cve_id or "").strip() or None,
+        cwe_id=(cwe_id or "").strip() or None,
+        binary_filename=(binary_filename or "").strip() or None,
+        vendor=(vendor or "").strip() or None,
+        work_mode=(work_mode or "").strip() or DEFAULT_WORK_MODE.value,
+        analysis_mode=normalized_analysis_mode,
+        artifact_dir=task_dir,
+    )
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    for error in exc.errors():
-        if error.get("type") == "value_error.file.size":
-            return JSONResponse(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                content={"code": 413, "msg": "超过单文件10MB限制", "data": None},
-            )
     return JSONResponse(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        content={"code": 400, "msg": "请求参数错误", "data": None},
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "code": 422,
+            "msg": "请求参数校验失败",
+            "data": exc.errors(),
+        },
     )
 
 
 @app.post("/v1/tasks")
-async def create_task_endpoint(
+async def create_legacy_task(
     chat_id: Optional[str] = Form(default=None),
     query: Optional[str] = Form(default=None),
     cve_id: Optional[str] = Form(default=None),
@@ -581,139 +745,74 @@ async def create_task_endpoint(
     work_mode: Optional[str] = Form(default=None),
     analysis_mode: Optional[str] = Form(default="auto"),
 ):
-    normalized_chat_id = (chat_id or f"task_{uuid.uuid4().hex[:12]}").strip()
     try:
-        normalized_analysis_mode = _normalize_analysis_mode(analysis_mode)
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": str(exc), "data": None},
+        task = await _create_legacy_task(
+            chat_id,
+            query,
+            cve_id,
+            cwe_id,
+            binary_filename,
+            vendor,
+            work_mode,
+            analysis_mode,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"code": 0, "msg": "创建成功", "data": task}
 
-    artifact_dir = os.path.join(path, normalized_chat_id)
-    os.makedirs(artifact_dir, exist_ok=True)
-    task = create_task(
-        chat_id=normalized_chat_id,
-        query=(query or None),
-        cve_id=(cve_id or None),
-        cwe_id=(cwe_id or None),
-        binary_filename=(binary_filename or None),
-        vendor=(vendor or None),
-        work_mode=(work_mode or None),
-        analysis_mode=normalized_analysis_mode,
-        artifact_dir=artifact_dir,
-    )
-    return {
-        "code": 0,
-        "msg": "创建成功",
-        "data": task,
-    }
+
+@app.post("/v1/tasks/{chat_id}/files/{upload_role}")
+async def upload_task_file(
+    chat_id: str,
+    upload_role: str,
+    file: UploadFile = File(...),
+):
+    normalized_role = _normalize_upload_role(upload_role)
+    try:
+        payload = await _save_uploaded_file(chat_id, file, normalized_role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"code": 0, "msg": " 上传成功", "data": payload}
 
 
 @app.post("/v1/files")
 async def upload_file(
-    file: UploadFile = File(..., max_size=10 * 1024 * 1024),
+    file: UploadFile = File(...),
     chat_id: str = Form(...),
     upload_role: Optional[str] = Form(default=None),
 ):
+    normalized_role = _normalize_upload_role(upload_role)
     try:
-        normalized_role = _normalize_upload_role(upload_role)
         payload = await _save_uploaded_file(chat_id, file, normalized_role)
     except ValueError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": str(exc), "data": None},
-        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileExistsError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": str(exc), "data": None},
-        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"code": 500, "msg": str(exc), "data": None},
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("记录上传任务失败: %s", exc)
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"code": 500, "msg": f"文件上传失败: {str(exc)}", "data": None},
-        )
-
-    return {
-        "code": 0,
-        "msg": "上传成功",
-        "data": payload,
-    }
-
-
-@app.post("/v1/tasks/{chat_id}/files/{upload_role}")
-async def upload_task_role_file(
-    chat_id: str,
-    upload_role: str,
-    file: UploadFile = File(..., max_size=10 * 1024 * 1024),
-):
-    try:
-        normalized_role = _normalize_upload_role(upload_role)
-        payload = await _save_uploaded_file(chat_id, file, normalized_role)
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": str(exc), "data": None},
-        )
-    except FileExistsError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": str(exc), "data": None},
-        )
-    except OSError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"code": 500, "msg": str(exc), "data": None},
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("记录上传任务失败: %s", exc)
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"code": 500, "msg": f"文件上传失败: {str(exc)}", "data": None},
-        )
-
-    return {
-        "code": 0,
-        "msg": "上传成功",
-        "data": payload,
-    }
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"code": 0, "msg": "上传成功", "data": payload}
 
 
 @app.post("/v1/sourceDiff/files")
 async def upload_source_diff_file(
-    file: UploadFile = File(..., max_size=10 * 1024 * 1024),
+    file: UploadFile = File(...),
     chat_id: str = Form(...),
+    upload_role: Optional[str] = Form(default=None),
 ):
+    normalized_role = _normalize_upload_role(upload_role)
     try:
-        payload = await _save_source_diff_file(chat_id, file)
+        payload = await _save_source_diff_file(chat_id, file, normalized_role)
     except ValueError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": str(exc), "data": None},
-        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileExistsError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": str(exc), "data": None},
-        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"code": 500, "msg": str(exc), "data": None},
-        )
-
-    return {
-        "code": 0,
-        "msg": "上传成功",
-        "data": payload,
-    }
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"code": 0, "msg": "上传成功", "data": payload}
 
 
 @app.get("/v1/sourceDiff/files")
@@ -723,97 +822,172 @@ async def list_source_diff_files(chat_id: str = Query(...)):
 
 @app.delete("/v1/sourceDiff/file")
 async def delete_source_diff_file(chat_id: str = Query(...), filename: str = Query(...)):
-    safe_name = Path(filename).name
-    file_path = os.path.join(_get_source_diff_session_dir(chat_id), safe_name)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="文件不存在")
-    os.remove(file_path)
+    _delete_source_diff_file(chat_id, filename)
     return {"code": 0, "msg": "删除成功"}
 
 
-@app.post("/v1/hardcode_audit")
-async def hardcode_audit(
-    file: UploadFile = File(None, max_size=10 * 1024 * 1024),
-    chat_id: str = Form(default=None),
-    file_path: str = Form(default=None),
+
+
+@app.post("/api/platform/tasks")
+async def create_platform_task(payload: PlatformTaskCreateRequest):
+    analysis_mode = _normalize_analysis_mode(payload.analysis_mode)
+    normalized_source = _normalize_platform_source(payload.source)
+
+    existing_task = await asyncio.to_thread(
+        get_platform_task,
+        owner_id=payload.owner_id,
+        external_task_id=payload.external_task_id,
+        source=normalized_source,
+    )
+
+    task_id = existing_task.get("task_id") if existing_task else f"platform_{uuid.uuid4().hex[:20]}"
+    task_dir = _get_platform_task_dir(task_id)
+    if existing_task and os.path.isdir(task_dir):
+        shutil.rmtree(task_dir)
+    os.makedirs(task_dir, exist_ok=True)
+
+    task = await asyncio.to_thread(
+        create_task,
+        chat_id=task_id,
+        query=(payload.description or payload.name),
+        cve_id=payload.cve_id,
+        cwe_id=payload.cwe_id,
+        binary_filename=payload.binary_filename,
+        vendor=payload.vendor,
+        work_mode=payload.work_mode or DEFAULT_WORK_MODE.value,
+        analysis_mode=analysis_mode,
+        artifact_dir=task_dir,
+        config={"platform": {"name": payload.name, "description": payload.description}},
+        owner_id=payload.owner_id,
+        external_task_id=payload.external_task_id,
+        source=normalized_source,
+    )
+    return {"code": 0, "msg": "创建成功", "data": task}
+
+
+@app.post("/api/platform/tasks/{task_id}/files/{upload_role}")
+async def upload_platform_task_file(
+    task_id: str,
+    upload_role: str,
+    owner_id: str = Form(...),
+    file: UploadFile = File(...),
 ):
-    """对单个二进制进行硬编码字符串审计。"""
+    task = await asyncio.to_thread(get_platform_task, task_id=task_id, owner_id=owner_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
 
-    if not file and not file_path:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": "缺少文件或文件路径", "data": None},
-        )
-
-    audit_chat_id = chat_id or f"stringaudit_{int(time.time())}"
-    target_path: Optional[str] = None
-
-    if file_path:
-        candidate = Path(file_path)
-        if not candidate.is_absolute():
-            candidate = Path(path) / file_path
-        if not candidate.exists():
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"code": 400, "msg": "file_path 不存在", "data": None},
-            )
-        target_path = str(candidate.resolve())
-    else:
-        filename = Path(file.filename).name
-        ext = Path(filename).suffix.lower()
-        if file.content_type not in ALLOWED_CONTENT_TYPES and ext not in FIRMWARE_EXTENSIONS:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"code": 400, "msg": "文件类型不在白名单中", "data": None},
-            )
-
-        file_dir = os.path.join(path, str(audit_chat_id))
-        os.makedirs(file_dir, exist_ok=True)
-        save_path = os.path.join(file_dir, filename)
-
-        try:
-            content = await file.read()
-            with open(save_path, "wb") as output:
-                output.write(content)
-        except Exception as exc:  # pylint: disable=broad-except
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"code": 500, "msg": f"文件保存失败: {str(exc)}", "data": None},
-            )
-        target_path = save_path
-
-    is_jar = target_path and target_path.lower().endswith('.jar')
-    if not target_path or (not is_jar and not is_binary_file(target_path)):
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"code": 400, "msg": "文件不是可识别的二进制/可执行文件或JAR文件", "data": None},
-        )
-
+    normalized_role = _normalize_upload_role(upload_role)
     try:
-        auditor = HardcodedStringAuditor()
-        result = await auditor.audit(
-            target_path,
-            chat_id=audit_chat_id,
-            ida_version=None if is_jar else get_binary_architecture(target_path),
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("硬编码字符串审计失败: %s", exc)
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"code": 500, "msg": f"字符串审计失败: {str(exc)}", "data": None},
-        )
+        payload = await _save_uploaded_file(task_id, file, normalized_role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {
-        "code": 0,
-        "msg": "字符串审计完成",
-        "data": result,
-    }
+    return {"code": 0, "msg": "上传成功", "data": payload}
 
 
-@app.websocket("/v1/chat")
-async def chat(websocket: WebSocket):
-    session = WebSocketChatSession(websocket)
-    await session.run()
+@app.post("/api/platform/tasks/{task_id}/start")
+async def start_platform_task(task_id: str, owner_id: str = Form(...)):
+    task = await asyncio.to_thread(get_platform_task, task_id=task_id, owner_id=owner_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task_id in platform_task_runners and not platform_task_runners[task_id].done():
+        raise HTTPException(status_code=409, detail="任务已在运行中")
+
+    payload = PlatformTaskCreateRequest(
+        external_task_id=task.get("external_task_id") or "",
+        owner_id=task.get("owner_id") or owner_id,
+        name=task.get("name") or task_id,
+        description=((task.get("config") or {}).get("platform") or {}).get("description") or task.get("query"),
+        cve_id=task.get("cve_id"),
+        cwe_id=task.get("cwe_id"),
+        binary_filename=task.get("binary_filename"),
+        vendor=task.get("vendor"),
+        work_mode=task.get("work_mode"),
+        analysis_mode=task.get("analysis_mode") or "auto",
+        source=task.get("source") or PLATFORM_SOURCE,
+    )
+    runner = asyncio.create_task(_run_platform_task(task_id, task.get("query") or payload.name, payload))
+    platform_task_runners[task_id] = runner
+    return {"code": 0, "msg": "启动成功", "data": {"task_id": task_id}}
+
+
+@app.post("/api/platform/tasks/{task_id}/cancel")
+async def cancel_platform_task(task_id: str, owner_id: str = Form(...)):
+    task = await asyncio.to_thread(get_platform_task, task_id=task_id, owner_id=owner_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    runner = platform_task_runners.get(task_id)
+    if runner and not runner.done():
+        runner.cancel()
+    else:
+        await asyncio.to_thread(mark_task_cancelled, task_id)
+    return {"code": 0, "msg": "取消成功", "data": {"task_id": task_id}}
+
+
+@app.get("/api/platform/tasks")
+async def list_platform_tasks_endpoint(
+    owner_id: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=None),
+):
+    tasks = await asyncio.to_thread(
+        list_platform_tasks,
+        _platform_query_value(owner_id),
+        _platform_query_value(source),
+    )
+    return {"code": 0, "msg": "获取成功", "data": tasks}
+
+
+@app.get("/api/platform/tasks/{task_id}")
+async def get_platform_task_endpoint(task_id: str, owner_id: str = Query(...)):
+    task = await asyncio.to_thread(get_platform_task, task_id=task_id, owner_id=owner_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"code": 0, "msg": "获取成功", "data": task}
+
+
+@app.get("/api/platform/tasks/{task_id}/events")
+async def get_platform_task_events_endpoint(
+    task_id: str,
+    owner_id: str = Query(...),
+    after_sequence: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    events = await asyncio.to_thread(
+        list_platform_task_events,
+        task_id=task_id,
+        owner_id=owner_id,
+        limit=limit,
+        offset=offset,
+        after_sequence=after_sequence,
+    )
+    if events is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"code": 0, "msg": "获取成功", "data": events}
+
+
+@app.get("/api/platform/tasks/{task_id}/findings")
+async def get_platform_task_findings_endpoint(
+    task_id: str,
+    owner_id: str = Query(...),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    findings = await asyncio.to_thread(
+        list_platform_task_findings,
+        task_id=task_id,
+        owner_id=owner_id,
+        limit=limit,
+        offset=offset,
+    )
+    if findings is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"code": 0, "msg": "获取成功", "data": findings}
 
 
 @app.websocket("/v1/sourceDiff/analyze")
@@ -942,11 +1116,11 @@ async def source_diff_ws(websocket: WebSocket):
             )
 
             try:
-                agent = SourceDiffAgent(chat_id=chat_id, workspace_dir=session_dir)
+                agent = SourceDiffAgent(chat_id=chat_id)
                 await agent.execute(
                     file1_path=file1_path,
                     file2_path=file2_path,
-                    cve_id=params.get("cve_id"),
+                    output_dir=_get_source_diff_output_dir(chat_id),
                     cwe=params.get("cwe"),
                     cve_details=params.get("cve_details"),
                     send_message=sender,
@@ -999,10 +1173,17 @@ async def source_diff_ws(websocket: WebSocket):
 
 
 
+
+
+@app.websocket("/v1/chat")
+async def websocket_endpoint(websocket: WebSocket):
+    session = WebSocketChatSession(websocket)
+    await session.run()
+
 @app.get("/v1/chat_list")
 async def get_chat_list():
     try:
-        chat_list = list_tasks()
+        chat_list = await asyncio.to_thread(list_tasks)
         if chat_list is not None:
             return {
                 "code": 0,
@@ -1012,21 +1193,24 @@ async def get_chat_list():
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("从数据库读取聊天列表失败，回退到目录扫描: %s", exc)
 
-    chat_list = []
-    for chat_id in os.listdir(path):
-        if chat_id == "source_diff_sessions":
-            continue
-        chat_dir = os.path.join(path, chat_id)
-        if os.path.isdir(chat_dir):
-            creation_timestamp = os.path.getctime(chat_dir)
-            chat_list.append(
-                {
-                    "chat_id": chat_id,
-                    "chat_title": chat_id,
-                    "create_time": datetime.fromtimestamp(creation_timestamp, tz=jst).isoformat(),
-                }
-            )
+    def _scan_chat_dirs():
+        chat_list = []
+        for chat_id in os.listdir(path):
+            if chat_id == "source_diff_sessions":
+                continue
+            chat_dir = os.path.join(path, chat_id)
+            if os.path.isdir(chat_dir):
+                creation_timestamp = os.path.getctime(chat_dir)
+                chat_list.append(
+                    {
+                        "chat_id": chat_id,
+                        "chat_title": chat_id,
+                        "create_time": datetime.fromtimestamp(creation_timestamp, tz=jst).isoformat(),
+                    }
+                )
+        return chat_list
 
+    chat_list = await asyncio.to_thread(_scan_chat_dirs)
     return {
         "code": 0,
         "msg": "获取成功",
@@ -1036,7 +1220,7 @@ async def get_chat_list():
 
 @app.get("/v1/tasks/{chat_id}")
 async def get_task(chat_id: str):
-    task = get_task_detail(chat_id)
+    task = await asyncio.to_thread(get_task_detail, chat_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     return {
@@ -1048,31 +1232,33 @@ async def get_task(chat_id: str):
 
 @app.get("/v1/tasks/{chat_id}/events")
 async def get_task_events(chat_id: str, limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0)):
-    task = get_task_detail(chat_id)
+    task = await asyncio.to_thread(get_task_detail, chat_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
+    events = await asyncio.to_thread(list_task_events, chat_id, limit, offset)
     return {
         "code": 0,
         "msg": "获取成功",
-        "data": list_task_events(chat_id, limit=limit, offset=offset),
+        "data": events,
     }
 
 
 @app.get("/v1/tasks/{chat_id}/findings")
 async def get_task_findings(chat_id: str, limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0)):
-    task = get_task_detail(chat_id)
+    task = await asyncio.to_thread(get_task_detail, chat_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
+    findings = await asyncio.to_thread(list_task_findings, chat_id, limit, offset)
     return {
         "code": 0,
         "msg": "获取成功",
-        "data": list_task_findings(chat_id, limit=limit, offset=offset),
+        "data": findings,
     }
 
 
 @app.post("/v1/codeRepair/files")
 async def upload_code_repair_file(
-    file: UploadFile = File(..., max_size=10 * 1024 * 1024),
+    file: UploadFile = File(...),
     chat_id: str = Form(...),
 ):
     filename = Path(file.filename).name
@@ -1255,4 +1441,4 @@ async def code_repair_ws(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001)

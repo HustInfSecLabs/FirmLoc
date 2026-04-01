@@ -506,10 +506,11 @@ class VulnAgent:
             await self.send_message("情报收集智能体收集CVE相关信息",
                                      message_type="header1",
                                      agent=self.agent)
-            search_result = self.online_search_agent.process(
+            search_result = await asyncio.to_thread(
+                self.online_search_agent.process,
                 task_id=self.chat_id,
                 cve_id=self.cve_id,
-                work_mode="reproduction"
+                work_mode="reproduction",
             )
             logger.info("Online search result: %s", search_result)
 
@@ -530,12 +531,13 @@ class VulnAgent:
             await self.send_message(f"情报收集智能体搜索历史{self.cwe_id}类型CVE作为参考\n类型描述: {cwe_desc}",
                                      message_type="header1",
                                      agent=self.agent)
-            search_result = self.online_search_agent.process(
+            search_result = await asyncio.to_thread(
+                self.online_search_agent.process,
                 task_id=self.chat_id,
                 cwe_id=self.cwe_id,
                 vendor=self.vendor,
                 model=self.binary_filename,
-                work_mode="discovery"
+                work_mode="discovery",
             )
             logger.info("Online search result (discovery mode): %s", search_result)
 
@@ -608,7 +610,8 @@ class VulnAgent:
                                          message_type="header1",
                                          agent=self.agent)
 
-            llm_result = self.BinaryFilterAgent.process(
+            llm_result = await asyncio.to_thread(
+                self.BinaryFilterAgent.process,
                 binary_filename=self.binary_filename,
                 extracted_files_path=binwalk_results[0]['extracted_files_path'],
                 cve_details=cve_details,
@@ -617,7 +620,7 @@ class VulnAgent:
                 reference_cves=reference_cves,
                 old_firmware_path=binwalk_results[0]['extracted_files_path'],
                 new_firmware_path=binwalk_results[1]['extracted_files_path'],
-                enable_diff_filter=True
+                enable_diff_filter=True,
             )
             logger.info("BinaryFilter result: %s", llm_result)
 
