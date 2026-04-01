@@ -67,8 +67,9 @@ PyRect==0.2.0
 PyScreeze==1.0.1
 python-dotenv==1.2.1
 python-multipart==0.0.20
+psycopg[binary]==3.2.12
 pytweening==1.2.0
-pywin32==311
+pywin32==311; platform_system == "Windows"
 PyYAML==6.0.3
 referencing==0.37.0
 regex==2025.10.23

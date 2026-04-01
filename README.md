@@ -95,6 +95,7 @@ VulnAgent/
 - Python 3.10+
 - 可访问配置的大模型服务
 - 可访问 Windows 侧 IDAService（如启用固件/二进制逆向流程）
+- 如使用 PostgreSQL：需安装 `psycopg[binary]` 并执行 Alembic 迁移
 
 ### Windows IDAService（可远程）
 
@@ -143,11 +144,7 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-如果需要 PostgreSQL 驱动，建议额外安装：
-
-```bash
-pip install psycopg[binary]
-```
+如果需要 PostgreSQL，`requirements.txt` 已包含 `psycopg[binary]`，无需单独安装。
 
 ---
 
@@ -300,17 +297,18 @@ use_sqlite_fallback = false
 python main.py
 ```
 
+默认会监听：
+
+- HTTP: `http://0.0.0.0:8001`
+- WebSocket: `ws://0.0.0.0:8001`
+
 ### 使用 uvicorn
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-启动后默认监听：
-
-- HTTP: `http://127.0.0.1:8000`
-- WebSocket: `ws://127.0.0.1:8000`
-
+如果你希望与现有文档示例保持一致，也可以显式指定 `--port 8000`。
 静态资源路径：
 
 - `/static/images/...`
@@ -540,6 +538,30 @@ curl -X POST 'http://127.0.0.1:8000/v1/hardcode_audit' \
 - `GET /v1/tasks/{chat_id}/events`
 - `GET /v1/tasks/{chat_id}/findings`
 
+### 平台集成接口（供 DeepauditExtension / HustAgent 等平台调用）
+
+当前后端还提供一组 owner-aware 的平台接口，用于由上层平台创建任务、上传文件并查询结果：
+
+- `POST /api/platform/tasks`
+- `POST /api/platform/tasks/{task_id}/files/{upload_role}`
+- `POST /api/platform/tasks/{task_id}/start`
+- `POST /api/platform/tasks/{task_id}/cancel`
+- `GET /api/platform/tasks`
+- `GET /api/platform/tasks/{task_id}`
+- `GET /api/platform/tasks/{task_id}/events`
+- `GET /api/platform/tasks/{task_id}/findings`
+
+这些接口与旧的 `/v1/*` WebSocket 聊天流不同，适合平台侧以任务镜像的方式接入。典型请求会带：
+
+- `owner_id`
+- `external_task_id`
+- `source`
+- `old` / `new` 两个上传角色
+
+如果你是给上层平台部署 VulnAgent，这组接口应作为主要接入面。
+
+---
+
 ### Source Diff
 
 - `POST /v1/sourceDiff/files`
@@ -614,9 +636,41 @@ history/
 - 是否安装了 `psycopg` 驱动
 - 是否已执行 `alembic upgrade head`
 
+### 7.6 跨域或反向代理后前端无法访问
+
+请检查：
+
+- `CORS_ALLOW_ORIGINS` 是否已按实际前端地址配置
+- 反向代理是否正确转发 WebSocket
+- 前端访问端口是否与你实际启动端口一致（`python main.py` 默认 8001，手动 `uvicorn` 示例为 8000）
+
+### 7.7 平台接口调用失败
+
+如果你通过 DeepauditExtension / HustAgent 等平台调用 `/api/platform/*` 接口，请优先确认：
+
+- PostgreSQL 已按需执行 `alembic upgrade head`
+- `owner_id` / `external_task_id` / `source` 传值正确
+- 上传阶段已分别提交 `old` 和 `new` 文件
+- Linux 主服务与 Windows IDAService 网络连通
+
 ---
 
-## 8. 开发说明
+## 8. 部署前检查清单
+
+在新主机部署前，建议至少逐项确认：
+
+1. 已准备 Python 3.10+ 环境并安装 `requirements.txt`
+2. 已复制并配置 `config/config.ini`
+3. 已配置可用的 LLM `api_key` / `base_url` / `model_name`
+4. `[IDA_SERVICE].service_url` 指向可达的 Windows IDAService
+5. 如使用 PostgreSQL，已设置 `VULNAGENT_DATABASE_URL` 并执行 `alembic upgrade head`
+6. 如使用 SQLite，确认 `history/` 目录可写
+7. 如有前端或反向代理，已配置 `CORS_ALLOW_ORIGINS`
+8. 如使用平台集成，已验证 `/api/platform/*` 接口可访问
+
+---
+
+## 9. 开发说明
 
 - 后端入口为 [main.py](main.py)
 - Source Diff 执行逻辑位于 [agent/source_diff_agent.py](agent/source_diff_agent.py)
@@ -633,6 +687,6 @@ history/
 
 ---
 
-## 9. 许可证
+## 10. 许可证
 
 请遵守本仓库以及第三方工具（如 IDA Pro、BinDiff）的许可证要求。
