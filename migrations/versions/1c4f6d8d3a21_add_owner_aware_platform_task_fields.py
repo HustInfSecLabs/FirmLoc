@@ -31,6 +31,7 @@ def _has_unique_constraint(inspector, table_name: str, constraint_name: str) -> 
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
+    dialect_name = bind.dialect.name
 
     if not _has_column(inspector, "vuln_tasks", "owner_id"):
         op.add_column("vuln_tasks", sa.Column("owner_id", sa.String(length=64), nullable=True))
@@ -44,7 +45,16 @@ def upgrade() -> None:
         op.create_index("ix_vuln_tasks_owner_created_at", "vuln_tasks", ["owner_id", "created_at"])
     if not _has_index(inspector, "vuln_tasks", "ix_vuln_tasks_external_task_id"):
         op.create_index("ix_vuln_tasks_external_task_id", "vuln_tasks", ["external_task_id"])
-    if not _has_unique_constraint(inspector, "vuln_tasks", "uq_vuln_tasks_source_owner_external"):
+
+    if dialect_name == "sqlite":
+        if not _has_index(inspector, "vuln_tasks", "uq_vuln_tasks_source_owner_external"):
+            op.create_index(
+                "uq_vuln_tasks_source_owner_external",
+                "vuln_tasks",
+                ["source", "owner_id", "external_task_id"],
+                unique=True,
+            )
+    elif not _has_unique_constraint(inspector, "vuln_tasks", "uq_vuln_tasks_source_owner_external"):
         op.create_unique_constraint(
             "uq_vuln_tasks_source_owner_external",
             "vuln_tasks",
@@ -55,8 +65,12 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
+    dialect_name = bind.dialect.name
 
-    if _has_unique_constraint(inspector, "vuln_tasks", "uq_vuln_tasks_source_owner_external"):
+    if dialect_name == "sqlite":
+        if _has_index(inspector, "vuln_tasks", "uq_vuln_tasks_source_owner_external"):
+            op.drop_index("uq_vuln_tasks_source_owner_external", table_name="vuln_tasks")
+    elif _has_unique_constraint(inspector, "vuln_tasks", "uq_vuln_tasks_source_owner_external"):
         op.drop_constraint("uq_vuln_tasks_source_owner_external", "vuln_tasks", type_="unique")
     if _has_index(inspector, "vuln_tasks", "ix_vuln_tasks_external_task_id"):
         op.drop_index("ix_vuln_tasks_external_task_id", table_name="vuln_tasks")
