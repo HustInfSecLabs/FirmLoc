@@ -63,7 +63,8 @@ if not os.path.exists("images"):
 app.mount("/static/images", StaticFiles(directory="images"), name="static")
 
 path = config_manager.config["result.path"]["savedir"]
-SOURCE_DIFF_ROOT = os.path.join(path, "source_diff_sessions")
+SHARED_DATA_DIRNAME = "HustAgentData"
+VULNAGENT_AGENT_ID = "vulnagent"
 init_db()
 
 jst = timezone(timedelta(hours=9))
@@ -263,6 +264,7 @@ class WebSocketChatSession:
         try:
             mode = work_mode or DEFAULT_WORK_MODE.value
 
+            anonymous_owner_id = _normalize_owner_id(None)
             start_task(
                 chat_id=chat_id,
                 query=query,
@@ -272,7 +274,7 @@ class WebSocketChatSession:
                 vendor=params.get("vendor"),
                 work_mode=mode,
                 analysis_mode=analysis_mode,
-                artifact_dir=os.path.join(path, str(chat_id)),
+                artifact_dir=_get_platform_task_dir_for_owner(anonymous_owner_id, chat_id),
                 config={"parameters": params},
             )
             agent = VulnAgent(
@@ -284,6 +286,7 @@ class WebSocketChatSession:
                 binary_filename=params.get("binary_filename"),
                 vendor=params.get("vendor"),
                 work_mode=mode,
+                config_dir=str(_task_artifact_dir(anonymous_owner_id, chat_id).parent),
                 analysis_mode=analysis_mode,
             )
             await agent.chat()
@@ -416,8 +419,74 @@ def _normalize_platform_source(source: Optional[str]) -> str:
     return normalized_source
 
 
+def _shared_data_root() -> Path:
+    shared_root_override = os.getenv("HUSTAGENT_DATA_ROOT")
+    if shared_root_override:
+        return Path(shared_root_override).expanduser().resolve()
+
+    configured_root = config_manager.config.get("result.path", "savedir", fallback="").strip()
+    if configured_root:
+        configured_path = Path(configured_root).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = (Path(__file__).resolve().parent / configured_path).resolve()
+        return configured_path
+
+    return Path.home() / SHARED_DATA_DIRNAME
+
+
+
+
+def _normalize_owner_id(owner_id: Optional[str]) -> str:
+    normalized_owner_id = (owner_id or "").strip()
+    return normalized_owner_id or "anonymous"
+
+
+def _user_storage_root(owner_id: str) -> Path:
+    return _shared_data_root() / _normalize_owner_id(owner_id)
+
+
+def _task_upload_dir(owner_id: str, task_id: str) -> Path:
+    return _user_storage_root(owner_id) / "uploads" / VULNAGENT_AGENT_ID / str(task_id)
+
+
+def _task_artifact_dir(owner_id: str, task_id: str) -> Path:
+    return _user_storage_root(owner_id) / VULNAGENT_AGENT_ID / str(task_id)
+
+
+def _task_input_dir(owner_id: str, task_id: str) -> Path:
+    return _task_artifact_dir(owner_id, task_id) / "input"
+
+
+def _task_output_dir(owner_id: str, task_id: str) -> Path:
+    return _task_artifact_dir(owner_id, task_id) / "output"
+
+
+def _source_diff_session_dir(owner_id: Optional[str], chat_id: str) -> Path:
+    return _task_artifact_dir(_normalize_owner_id(owner_id), chat_id) / "source_diff"
+
+
+def _source_diff_output_dir(owner_id: Optional[str], chat_id: str) -> Path:
+    return _source_diff_session_dir(owner_id, chat_id) / "output"
+
+
+def _initialize_platform_task_layout(owner_id: str, task_id: str, config: Dict[str, Any]) -> str:
+    task_root = _task_artifact_dir(owner_id, task_id)
+    input_dir = _task_input_dir(owner_id, task_id)
+    output_dir = _task_output_dir(owner_id, task_id)
+
+    task_root.mkdir(parents=True, exist_ok=True)
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / "config.json").write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    return str(task_root)
+
+
 def _get_platform_task_dir(task_id: str) -> str:
     return os.path.join(path, str(task_id))
+
+
+def _get_platform_task_dir_for_owner(owner_id: str, task_id: str) -> str:
+    return str(_task_artifact_dir(owner_id, task_id))
 
 
 class _OfflineWebSocket:
@@ -438,7 +507,7 @@ async def _run_platform_task(task_id: str, query: str, payload: PlatformTaskCrea
             vendor=payload.vendor,
             work_mode=payload.work_mode or DEFAULT_WORK_MODE.value,
             analysis_mode=payload.analysis_mode,
-            artifact_dir=_get_platform_task_dir(task_id),
+            artifact_dir=_get_platform_task_dir_for_owner(payload.owner_id, task_id),
             config={
                 "platform": {
                     "name": payload.name,
@@ -458,6 +527,7 @@ async def _run_platform_task(task_id: str, query: str, payload: PlatformTaskCrea
             binary_filename=payload.binary_filename,
             vendor=payload.vendor,
             work_mode=payload.work_mode or DEFAULT_WORK_MODE.value,
+            config_dir=str(_task_artifact_dir(payload.owner_id, task_id).parent),
             analysis_mode=payload.analysis_mode,
         )
         await agent.chat()
@@ -489,11 +559,11 @@ def _normalize_analysis_mode(analysis_mode: Optional[str]) -> str:
 
 
 def _get_source_diff_session_dir(chat_id: str) -> str:
-    return os.path.join(SOURCE_DIFF_ROOT, str(chat_id))
+    return str(_source_diff_session_dir(None, chat_id))
 
 
 def _get_source_diff_output_dir(chat_id: str) -> str:
-    return os.path.join(_get_source_diff_session_dir(chat_id), "source_diff")
+    return str(_source_diff_output_dir(None, chat_id))
 
 
 def _list_source_diff_files(chat_id: str) -> List[Dict[str, Any]]:
@@ -593,18 +663,26 @@ def _create_source_diff_sender(websocket: WebSocket, chat_id: str):
     return _send
 
 
-async def _save_uploaded_file(chat_id: str, file: UploadFile, upload_role: Optional[str] = None) -> dict[str, Any]:
+async def _save_uploaded_file(
+    chat_id: str,
+    file: UploadFile,
+    upload_role: Optional[str] = None,
+    owner_id: Optional[str] = None,
+) -> dict[str, Any]:
     filename = Path(file.filename).name
     ext = Path(filename).suffix.lower()
     if file.content_type not in ALLOWED_CONTENT_TYPES and ext not in FIRMWARE_EXTENSIONS:
         raise ValueError("文件类型不在白名单中")
 
-    file_dir = os.path.join(path, str(chat_id))
-    os.makedirs(file_dir, exist_ok=True)
+    if owner_id:
+        file_dir = _task_upload_dir(owner_id, chat_id)
+    else:
+        file_dir = Path(path) / str(chat_id)
+    file_dir.mkdir(parents=True, exist_ok=True)
 
     stored_name = f"{upload_role}_{filename}" if upload_role else filename
-    save_path = os.path.join(file_dir, stored_name)
-    if os.path.exists(save_path):
+    save_path = file_dir / stored_name
+    if save_path.exists():
         raise FileExistsError("文件已存在")
 
     try:
@@ -622,11 +700,11 @@ async def _save_uploaded_file(chat_id: str, file: UploadFile, upload_role: Optio
     record_upload(
         chat_id=str(chat_id),
         filename=filename,
-        saved_path=save_path,
+        saved_path=str(save_path),
         size_bytes=file_stat.st_size,
         content_type=file.content_type,
         upload_role=upload_role,
-        artifact_dir=file_dir,
+        artifact_dir=str(file_dir),
     )
     return {
         "id": stored_name,
@@ -637,17 +715,22 @@ async def _save_uploaded_file(chat_id: str, file: UploadFile, upload_role: Optio
     }
 
 
-async def _save_source_diff_file(chat_id: str, file: UploadFile, upload_role: Optional[str] = None) -> Dict[str, Any]:
+async def _save_source_diff_file(
+    chat_id: str,
+    file: UploadFile,
+    upload_role: Optional[str] = None,
+    owner_id: Optional[str] = None,
+) -> Dict[str, Any]:
     filename = Path(file.filename).name
     ext = Path(filename).suffix.lower()
     if ext not in SOURCE_DIFF_EXTENSIONS:
         raise ValueError("文件类型不在白名单中")
 
-    session_dir = _get_source_diff_session_dir(chat_id)
-    os.makedirs(session_dir, exist_ok=True)
+    session_dir = _source_diff_session_dir(owner_id, chat_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
     stored_name = f"{upload_role}_{filename}" if upload_role else filename
-    save_path = os.path.join(session_dir, stored_name)
-    if os.path.exists(save_path):
+    save_path = session_dir / stored_name
+    if save_path.exists():
         raise FileExistsError("文件已存在")
 
     try:
@@ -841,10 +924,11 @@ async def create_platform_task(payload: PlatformTaskCreateRequest):
     )
 
     task_id = existing_task.get("task_id") if existing_task else f"platform_{uuid.uuid4().hex[:20]}"
-    task_dir = _get_platform_task_dir(task_id)
+    platform_config = {"platform": {"name": payload.name, "description": payload.description}}
+    task_dir = _initialize_platform_task_layout(payload.owner_id, task_id, platform_config)
     if existing_task and os.path.isdir(task_dir):
         shutil.rmtree(task_dir)
-    os.makedirs(task_dir, exist_ok=True)
+        task_dir = _initialize_platform_task_layout(payload.owner_id, task_id, platform_config)
 
     task = await asyncio.to_thread(
         create_task,
@@ -857,7 +941,7 @@ async def create_platform_task(payload: PlatformTaskCreateRequest):
         work_mode=payload.work_mode or DEFAULT_WORK_MODE.value,
         analysis_mode=analysis_mode,
         artifact_dir=task_dir,
-        config={"platform": {"name": payload.name, "description": payload.description}},
+        config=platform_config,
         owner_id=payload.owner_id,
         external_task_id=payload.external_task_id,
         source=normalized_source,
@@ -878,7 +962,7 @@ async def upload_platform_task_file(
 
     normalized_role = _normalize_upload_role(upload_role)
     try:
-        payload = await _save_uploaded_file(task_id, file, normalized_role)
+        payload = await _save_uploaded_file(task_id, file, normalized_role, owner_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileExistsError as exc:
@@ -1196,8 +1280,6 @@ async def get_chat_list():
     def _scan_chat_dirs():
         chat_list = []
         for chat_id in os.listdir(path):
-            if chat_id == "source_diff_sessions":
-                continue
             chat_dir = os.path.join(path, chat_id)
             if os.path.isdir(chat_dir):
                 creation_timestamp = os.path.getctime(chat_dir)

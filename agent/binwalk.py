@@ -4,6 +4,7 @@ import json
 import configparser
 import traceback
 from pathlib import Path
+from typing import Optional
 from .base import Agent
 from model import ChatModel
 import glob
@@ -26,6 +27,15 @@ class BinwalkAgent(Agent):
         self.tool_result = None
         self.tool_type = "terminal"
 
+    def _task_root_from_config(self, task_id: str, config: ConfigManager) -> Path:
+        config_file = Path(config.config_path).expanduser().resolve()
+        if config_file.parent.name != task_id:
+            raise ValueError(f"配置路径与任务ID不匹配: {config_file}")
+        return config_file.parent
+
+    def _binwalk_work_dir(self, task_root: Path) -> Path:
+        return task_root / 'binwalk'
+
     async def process(self, task_id: str, firmware_path: str, config: ConfigManager, send_message=None, on_status_update=None) -> str:
         if not task_id or not firmware_path:
             return json.dumps({
@@ -41,7 +51,8 @@ class BinwalkAgent(Agent):
             })
 
         firmware_name = os.path.basename(firmware_path)
-        work_dir = Path(f'./history/{task_id}/binwalk')
+        task_root = self._task_root_from_config(task_id, config)
+        work_dir = self._binwalk_work_dir(task_root)
         os.makedirs(work_dir, exist_ok=True)
 
         firmware_dir = work_dir / firmware_name
@@ -165,23 +176,30 @@ class BinwalkAgent(Agent):
         """更新状态"""
         status_file = work_dir / 'status.ini'
 
-        config = configparser.ConfigParser()
+        status_config = configparser.ConfigParser()
         if os.path.exists(status_file):
-            config.read(status_file)
+            status_config.read(status_file)
 
-        if config.has_section(firmware_name):
-            config.remove_section(firmware_name)
+        if status_config.has_section(firmware_name):
+            status_config.remove_section(firmware_name)
 
-        config.add_section(firmware_name)
+        status_config.add_section(firmware_name)
 
         for key, value in result.items():
-            config.set(firmware_name, key, str(value))
+            status_config.set(firmware_name, key, str(value))
 
         with open(status_file, 'w') as f:
-            config.write(f)
+            status_config.write(f)
 
-    def get_result(self, task_id: str, firmware_name=None) -> dict:
-        work_dir = Path(f'./history/{task_id}/binwalk')
+    def get_result(self, task_id: str, firmware_name=None, config: Optional[ConfigManager] = None) -> dict:
+        if config is None:
+            return {
+                'status': 'unknown',
+                'message': '未提供配置，无法定位任务目录'
+            }
+
+        task_root = self._task_root_from_config(task_id, config)
+        work_dir = self._binwalk_work_dir(task_root)
         status_file = work_dir / 'status.ini'
 
         if not os.path.exists(status_file):
@@ -190,19 +208,20 @@ class BinwalkAgent(Agent):
                 'message': f'未找到任务 {task_id} 的处理结果'
             }
 
-        config = configparser.ConfigParser()
-        config.read(status_file)
+        status_parser = configparser.ConfigParser()
+        status_parser.read(status_file)
 
         if firmware_name is not None:
-            if firmware_name in config.sections():
-                return {key: value for key, value in config[firmware_name].items()}
+            if firmware_name in status_parser.sections():
+                return {key: value for key, value in status_parser[firmware_name].items()}
             return {
                 'status': 'unknown',
                 'message': f'未找到固件 {firmware_name} 的处理结果'
             }
 
         results = {}
-        for section in config.sections():
-            results[section] = {key: value for key, value in config[section].items()}
+        for section in status_parser.sections():
+            results[section] = {key: value for key, value in status_parser[section].items()}
 
         return results
+

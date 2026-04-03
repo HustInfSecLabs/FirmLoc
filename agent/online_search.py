@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from .base import Agent
 from model import ChatModel
 from log import logger
@@ -9,6 +10,7 @@ from requests import RequestException
 import json
 import configparser
 import time
+from utils import ConfigManager
 
 
 class NVDConnectivityError(Exception):
@@ -59,6 +61,15 @@ class OnlineSearchAgent(Agent):
         self.request_delay = 6  # 秒
         # 默认搜索最近5年的CVE，可配置
         self.default_years_back = 5
+
+    def _task_root_from_config(self, task_id: str, config: ConfigManager) -> Path:
+        config_file = Path(config.config_path).expanduser().resolve()
+        if config_file.parent.name != task_id:
+            raise ValueError(f"配置路径与任务ID不匹配: {config_file}")
+        return config_file.parent
+
+    def _online_search_work_dir(self, task_root: Path) -> Path:
+        return task_root / 'online_search'
 
     def _empty_search_results(self) -> dict:
         return {
@@ -146,8 +157,6 @@ class OnlineSearchAgent(Agent):
             try:
                 date_str = vuln.get("cve", {}).get("published", "")
                 if date_str:
-                    # 解析ISO 8601格式的日期
-                    from datetime import datetime
                     return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                 return datetime.min
             except Exception:
@@ -156,12 +165,12 @@ class OnlineSearchAgent(Agent):
         sorted_vulns = sorted(vulnerabilities, key=get_published_date, reverse=True)
         return sorted_vulns
         
-    def process(self, task_id: str, vendor: str = None, model: str = None, 
+    def process(self, task_id: str, vendor: str = None, model: str = None,
                 version: str = None, cve_id: str = None, cwe_id: str = None,
-                work_mode: str = "reproduction") -> dict:
+                work_mode: str = "reproduction", config: Optional[ConfigManager] = None) -> dict:
         """
         处理搜索请求
-        
+
         Args:
             task_id: 任务ID
             vendor: 厂商名称
@@ -171,25 +180,31 @@ class OnlineSearchAgent(Agent):
             cwe_id: CWE编号（漏洞挖掘模式）
             work_mode: 工作模式 - "reproduction" 或 "discovery"
         """
+        if config is None:
+            return {
+                'status': 'error',
+                'message': '未提供配置，无法定位任务目录'
+            }
+
         # 漏洞复现模式：直接根据cve_id搜索CVE
         if work_mode == "reproduction" and cve_id:
-            return self._process_cve_search(task_id, cve_id)
-        
+            return self._process_cve_search(task_id, cve_id, config)
+
         # 漏洞挖掘模式：根据CWE类型和厂商搜索历史同类型CVE
         if work_mode == "discovery" and cwe_id:
-            return self._process_cwe_discovery_search(task_id, cwe_id, vendor, model)
-        
+            return self._process_cwe_discovery_search(task_id, cwe_id, config, vendor, model)
+
         # 兼容旧逻辑：根据设备厂商、型号、版本搜索相关的CVE
         if vendor:
-            return self._process_device_search(task_id, vendor, model, version)
-        
+            return self._process_device_search(task_id, vendor, config, model, version)
+
         return {
             'status': 'error',
             'message': '缺少必要参数: 需要提供 cve_id（漏洞复现）或 cwe_id（漏洞挖掘）'
         }
     
     def _process_cwe_discovery_search(self, task_id: str, cwe_id: str,
-                                       vendor: str = None, model: str = None) -> dict:
+                                       config: ConfigManager, vendor: str = None, model: str = None) -> dict:
         """
         漏洞挖掘模式：根据CWE类型搜索历史同类型CVE作为参考
 
@@ -199,7 +214,8 @@ class OnlineSearchAgent(Agent):
         3. 如果结果不足，逐步扩展时间范围
         4. 返回相关的CVE作为漏洞挖掘参考
         """
-        work_dir = Path(f'./history/{task_id}/online_search')
+        task_root = self._task_root_from_config(task_id, config)
+        work_dir = self._online_search_work_dir(task_root)
         os.makedirs(work_dir, exist_ok=True)
 
         logger.info(f"漏洞挖掘搜索: CWE={cwe_id}, vendor={vendor}, model={model}")
@@ -416,15 +432,16 @@ class OnlineSearchAgent(Agent):
         # 没有时间范围限制，直接搜索
         params = {
             'cweId': cwe_id,
-            'resultsPerPage': min(max_results, 100)
+            'resultsPerPage': min(max_results or 100, 100)
         }
 
         return self._request_nvd(params, f"CWE={cwe_id}")
 
     
     # 直接搜索特定CVE-ID的详细信息
-    def _process_cve_search(self, task_id: str, cve_id: str):
-        work_dir = Path(f'./history/{task_id}/online_search')
+    def _process_cve_search(self, task_id: str, cve_id: str, config: ConfigManager):
+        task_root = self._task_root_from_config(task_id, config)
+        work_dir = self._online_search_work_dir(task_root)
         os.makedirs(work_dir, exist_ok=True)
         
         try:
@@ -459,8 +476,9 @@ class OnlineSearchAgent(Agent):
             return error_result
     
     # 根据厂商、型号、版本搜索相关CVE
-    def _process_device_search(self, task_id: str, vendor: str, model: str = None, version: str = None):
-        work_dir = Path(f'./history/{task_id}/online_search')
+    def _process_device_search(self, task_id: str, vendor: str, config: ConfigManager, model: str = None, version: str = None):
+        task_root = self._task_root_from_config(task_id, config)
+        work_dir = self._online_search_work_dir(task_root)
         os.makedirs(work_dir, exist_ok=True)
 
         try:
@@ -761,7 +779,7 @@ class OnlineSearchAgent(Agent):
     
     def _update_status_ini(self, work_dir, vendor=None, model=None, version=None, result=None, cve_id=None, cwe_id=None):
         """更新状态文件
-        
+
         Args:
             work_dir: 工作目录
             vendor: 厂商
@@ -772,7 +790,8 @@ class OnlineSearchAgent(Agent):
             cwe_id: CWE编号（漏洞挖掘模式）
         """
         status_file = work_dir / 'status.ini'
-        
+        result = result or {}
+
         config = configparser.ConfigParser()
         if os.path.exists(status_file):
             config.read(status_file)
@@ -821,8 +840,15 @@ class OnlineSearchAgent(Agent):
         with open(status_file, 'w') as f:
             config.write(f)
     
-    def get_result(self, task_id: str, vendor=None, model=None, version=None, cve_id=None) -> dict:
-        work_dir = Path(f'./result/{task_id}/online_search')
+    def get_result(self, task_id: str, vendor=None, model=None, version=None, cve_id=None, config: Optional[ConfigManager] = None) -> dict:
+        if config is None:
+            return {
+                'status': 'unknown',
+                'message': '未提供配置，无法定位任务目录'
+            }
+
+        task_root = self._task_root_from_config(task_id, config)
+        work_dir = self._online_search_work_dir(task_root)
         status_file = work_dir / 'status.ini'
         
         if not os.path.exists(status_file):
@@ -831,42 +857,42 @@ class OnlineSearchAgent(Agent):
                 'message': f'未找到任务 {task_id} 的处理结果'
             }
         
-        config = configparser.ConfigParser()
-        config.read(status_file)
-        
-        if config.has_section('input'):
-            search_mode = config.get('input', 'search_mode', fallback='device')
-            
+        status_parser = configparser.ConfigParser()
+        status_parser.read(status_file)
+
+        if status_parser.has_section('input'):
+            search_mode = status_parser.get('input', 'search_mode', fallback='device')
+
             # CVE-ID
-            if search_mode == 'cve_id' and cve_id and config.get('input', 'cve_id', fallback='') == cve_id:
+            if search_mode == 'cve_id' and cve_id and status_parser.get('input', 'cve_id', fallback='') == cve_id:
                 specific_result = {}
-                if config.has_section('output'):
-                    specific_result.update({key: value for key, value in config['output'].items()})
+                if status_parser.has_section('output'):
+                    specific_result.update({key: value for key, value in status_parser['output'].items()})
                 specific_result.update({'cve_id': cve_id})
                 return specific_result
-            
+
             # 设备-厂商-型号-版本号
             if search_mode == 'device' and vendor and model and version:
                 section_name = f"{vendor}_{model}_{version}"
-                if config.has_section(section_name):
-                    return {key: value for key, value in config[section_name].items()}
-        
+                if status_parser.has_section(section_name):
+                    return {key: value for key, value in status_parser[section_name].items()}
+
         result = {}
-        
+
         # [agent]
-        if config.has_section('agent'):
-            result['agent'] = {key: value for key, value in config['agent'].items()}
-        
+        if status_parser.has_section('agent'):
+            result['agent'] = {key: value for key, value in status_parser['agent'].items()}
+
         # [input]
-        if config.has_section('input'):
-            result['input'] = {key: value for key, value in config['input'].items()}
-        
+        if status_parser.has_section('input'):
+            result['input'] = {key: value for key, value in status_parser['input'].items()}
+
         # [output]
-        if config.has_section('output'):
-            result['output'] = {key: value for key, value in config['output'].items()}
-            
-            if config.has_option('output', 'search_result_path'):
-                search_result_path = config.get('output', 'search_result_path')
+        if status_parser.has_section('output'):
+            result['output'] = {key: value for key, value in status_parser['output'].items()}
+
+            if status_parser.has_option('output', 'search_result_path'):
+                search_result_path = status_parser.get('output', 'search_result_path')
                 if os.path.exists(search_result_path):
                     with open(search_result_path, 'r', encoding='utf-8') as f:
                         result['search_result'] = json.load(f)

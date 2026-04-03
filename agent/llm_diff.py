@@ -627,16 +627,15 @@ async def batch_summarize(high_priority: List[Dict], low_priority: List[Dict],
     return final_summary + stats
 
 # ———— 配置区 ————
-def locate_paths(chat_id: str, history_root: str | Path, binary_filename: str) -> dict:
+def locate_paths(task_root: str | Path, binary_filename: str) -> dict:
 
-    history_root = Path(history_root).expanduser().resolve()
+    task_root = Path(task_root).expanduser().resolve()
     """
-    根据 chat_id 自动拼出相关目录 / 文件路径。
+    根据任务根目录自动拼出相关目录 / 文件路径。
     返回 dict 用来替换原先的全局常量。
     """
-    root     = history_root / chat_id
-    ida_dir  = root / "ida"
-    bd_dir   = root / "bindiff" /binary_filename
+    ida_dir = task_root / "ida"
+    bd_dir = task_root / "bindiff" / binary_filename
 
     logger.debug("DEBUG  bd_dir =")
     # print("DEBUG  items  =", [p.name for p in bd_dir.iterdir()])
@@ -1505,28 +1504,22 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
                 logger.info(f"使用传入的二进制文件名: pre={pre_binary_name}, post={post_binary_name}")
             else:
                 # 否则从文件路径推断（旧逻辑，兼容没有传入参数的情况）
-                # 约定结构：history/<chat_id>/bindiff/<binary_filename>/diff_xxx/folder_a|folder_b/<func>.c
+                # 约定结构：<task_root>/bindiff/<binary_filename>/diff_xxx/folder_a|folder_b/<func>.c
                 fa_dir = os.path.dirname(fa)
-                fb_dir = os.path.dirname(fb)
-    
-                # 提取 chat_id 与 pre 二进制名
-                # 结构：folder_a -> diff_xxx -> <binary_filename> -> bindiff -> <chat_id>
-                binary_filename = os.path.basename(os.path.dirname(os.path.dirname(fa_dir)))
-                chat_id = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(fa_dir)))))
-                history_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(fa_dir)))))
-    
+
                 # 使用 bindiff 目录名作为补丁前二进制名
+                binary_filename = os.path.basename(os.path.dirname(os.path.dirname(fa_dir)))
                 pre_binary_name = binary_filename
-    
+
                 # 根据“在文件名后缀之前插入 1”的规则生成补丁后二进制名
                 # 规则示例：
                 #  - libsal.so.0.0 -> libsal.so.01.0 （在最后一段 .数字 段之前对前一段数字追加 1）
                 #  - setup.cgi      -> setup1.cgi   （在扩展名前插入 1）
                 basename = os.path.basename(binary_filename)
                 name_part, ext = os.path.splitext(basename)
-    
+
                 post_binary_name = f"{name_part}1{ext}"
-    
+
 
                 logger.info(f"从路径推断的二进制文件名: pre={pre_binary_name}, post={post_binary_name}")
 
@@ -1626,7 +1619,7 @@ Remember: Quality over quantity. It's better to correctly identify one genuine v
 
 # 主函数
 async def main(chat_id: str,
-         history_root: str | Path,
+         task_root: str | Path,
          binary_filename: str,
          post_binary_filename: str = None,  # 新增参数：实际的补丁后文件名
          pre_c: str = None, post_c: str = None, cve_details: str = None, cwe: str = None, send_message=None,
@@ -1643,7 +1636,7 @@ async def main(chat_id: str,
     
     Args:
         chat_id: 会话ID
-        history_root: 历史记录根目录
+        task_root: 任务根目录
         binary_filename: 二进制文件名
         post_binary_filename: 补丁后二进制文件名
         pre_c: 补丁前伪C文件路径
@@ -1661,7 +1654,7 @@ async def main(chat_id: str,
     react_max_iterations: ReAct Agent 最大迭代次数
     """
     # ---------- 动态定位 ----------
-    paths = locate_paths(chat_id, history_root, binary_filename)
+    paths = locate_paths(task_root, binary_filename)
     WORK_DIR     = Path(paths["WORK_DIR"])     
     OUTPUT_DIR   = Path(paths["OUTPUT_DIR"])
     RESULTS_FILE = paths["RESULTS_FILE"]
@@ -1806,21 +1799,22 @@ async def main(chat_id: str,
     logger.info("全部分析完成！")
 
 # 包装函数，保持向后兼容性
-async def llm_diff(chat_id: str, history_root: str, binary_filename: str, 
+async def llm_diff(chat_id: str, task_root: str, binary_filename: str,
                  post_binary_filename: str = None,
-                 pre_c: str = None, post_c: str = None, cve_details: str = None, 
+                 pre_c: str = None, post_c: str = None, cve_details: str = None,
                  cwe: str = None, send_message=None,
                  include_call_chain_code: bool = True,
                  slice_before: int = DEFAULT_SLICE_BEFORE,
                  slice_after: int = DEFAULT_SLICE_AFTER,
                  danger_api_list: Optional[List[str]] = None,
                  full_func_line_threshold: int = 300,
+                 work_mode: str = "reproduction",
                  react_model_name: str = "DeepSeek",
                  react_max_iterations: int = 50):
     """包装函数，保持与原代码的兼容性"""
     return await main(
         chat_id,
-        history_root,
+        task_root,
         binary_filename,
         post_binary_filename=post_binary_filename,
         pre_c=pre_c,
@@ -1833,18 +1827,20 @@ async def llm_diff(chat_id: str, history_root: str, binary_filename: str,
         slice_after=slice_after,
         danger_api_list=danger_api_list,
         full_func_line_threshold=full_func_line_threshold,
+        work_mode=work_mode,
         react_model_name=react_model_name,
         react_max_iterations=react_max_iterations,
     )
 
 if __name__ == "__main__":
     # 运行示例
+    example_task_root = Path.home() / "HustAgentData" / "anonymous" / "vulnagent" / "2025-11-25-9465-1"
     asyncio.run(main(
-        chat_id="2025-11-25-9465-1",  
-        history_root=r"/home/wzh/Desktop/Project/VulnAgent/history",
+        chat_id="2025-11-25-9465-1",
+        task_root=example_task_root,
         binary_filename="rumpusd.exe",
-        pre_c=r"/home/wzh/Desktop/Project/VulnAgent/history/2025-11-25-9465-1/ida/rumpusd.exe/rumpusd.exe_pseudo.c",
-        post_c=r"/home/wzh/Desktop/Project/VulnAgent/history/2025-11-25-9465-1/ida/rumpusd10.exe1/rumpusd101.exe_pseudo.c",
+        pre_c=str(example_task_root / "ida" / "rumpusd.exe" / "rumpusd.exe_pseudo.c"),
+        post_c=str(example_task_root / "ida" / "rumpusd10.exe1" / "rumpusd101.exe_pseudo.c"),
         cve_details="CWE-78 Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')",
         cwe="CWE-78",
     ))

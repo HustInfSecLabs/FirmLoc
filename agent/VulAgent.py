@@ -61,6 +61,7 @@ class VulnAgent:
         self.planner_model = planner_model
         self.config_dir = config_dir
         self.chat_id = str(chat_id)
+        self.task_root = os.path.join(self.config_dir, self.chat_id)
         self.user_input = user_input
         self.websocket = websocket
         self._websocket_available = True
@@ -92,7 +93,7 @@ class VulnAgent:
         self._init_bot()
 
     def _load_input_files(self) -> List[str]:
-        task_dir = f"{self.config_dir}/{self.chat_id}"
+        task_dir = self.task_root
 
         # 1) Consult DB upload slots first (authoritative source)
         try:
@@ -183,7 +184,7 @@ class VulnAgent:
             vendor=self.vendor,
             work_mode=self.work_mode.value,
             analysis_mode=self.analysis_mode_hint,
-            artifact_dir=os.path.join(self.config_dir, self.chat_id),
+            artifact_dir=self.task_root,
             config={
                 "uploaded_files": self.files,
                 "old_input_path": self.old_input_path,
@@ -511,6 +512,7 @@ class VulnAgent:
                 task_id=self.chat_id,
                 cve_id=self.cve_id,
                 work_mode="reproduction",
+                config=self.config_manager,
             )
             logger.info("Online search result: %s", search_result)
 
@@ -538,6 +540,7 @@ class VulnAgent:
                 vendor=self.vendor,
                 model=self.binary_filename,
                 work_mode="discovery",
+                config=self.config_manager,
             )
             logger.info("Online search result (discovery mode): %s", search_result)
 
@@ -698,8 +701,8 @@ class VulnAgent:
         self.config_manager.update_agent_status("Binary Filter Agent", "IDA Agent")
         self.config_manager.update_tool_status("Binary Filter", "IDA Decompiler")
 
-        idadir = os.path.join(self.config_dir, self.chat_id, "ida")
-        bindiffdir = os.path.join(self.config_dir, self.chat_id, "bindiff")
+        idadir = os.path.join(self.task_root, "ida")
+        bindiffdir = os.path.join(self.task_root, "bindiff")
         if not analysis_pairs:
             error_msg = "未找到可用于后续分析的二进制文件。"
             await self.send_message(error_msg, message_type="message")
@@ -768,7 +771,7 @@ class VulnAgent:
                                     agent=self.agent)
             await llm_diff(
                 chat_id=self.chat_id,
-                history_root=self.config_dir,
+                task_root=self.task_root,
                 pre_c=os.path.join(output_path1, f"{os.path.basename(file1)}_pseudo.c"),
                 post_c=os.path.join(output_path2, f"{os.path.basename(file2)}_pseudo.c"),
                 binary_filename=os.path.basename(file1),
@@ -781,7 +784,7 @@ class VulnAgent:
 
             vulnerable_functions = await self._extract_vulnerable_functions_from_llm_diff(
                 chat_id=self.chat_id,
-                history_root=self.config_dir,
+                task_root=self.task_root,
                 binary_name=os.path.basename(file1)
             )
             record_detection_findings(
@@ -819,7 +822,7 @@ class VulnAgent:
                     )
 
                     reach_output_path = os.path.join(
-                        self.config_dir, self.chat_id, "path_reach_results.json"
+                        self.task_root, "path_reach_results.json"
                     )
                     self.PathReachAgent.save_results(reach_results, reach_output_path)
                     record_path_reach_findings(
@@ -857,7 +860,7 @@ class VulnAgent:
     async def _extract_vulnerable_functions_from_llm_diff(
         self,
         chat_id: str,
-        history_root: str,
+        task_root: str,
         binary_name: Optional[str] = None
     ) -> List[str]:
         """
@@ -865,7 +868,7 @@ class VulnAgent:
 
         Args:
             chat_id: 会话 ID
-            history_root: 历史记录根目录
+            task_root: 当前任务根目录
             binary_name: 当前分析的二进制文件名（不含路径），用于限制扫描范围，
                          避免把其他二进制的分析结果混入。为 None 时扫描所有目录（不推荐）。
 
@@ -876,11 +879,10 @@ class VulnAgent:
         import glob
 
         vulnerable_funcs = []
-        results_dir = os.path.join(history_root, chat_id)
+        bindiff_dir = os.path.join(task_root, "bindiff")
 
         # 查找 bindiff 目录下的 vuln_analysis_results.json 文件
-        # 路径格式: {history_root}/{chat_id}/bindiff/{binary_name}/diff_*/vuln_analysis_results.json
-        bindiff_dir = os.path.join(results_dir, "bindiff")
+        # 路径格式: {task_root}/bindiff/{binary_name}/diff_*/vuln_analysis_results.json
         if os.path.isdir(bindiff_dir):
             if binary_name:
                 # 只扫描当前二进制对应的子目录，避免跨二进制污染

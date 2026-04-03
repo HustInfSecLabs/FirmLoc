@@ -44,10 +44,8 @@ class SourceDiffAgent:
         self.tool_status = "stop"
         self.status = TaskStatusEnum.NOT_STARTED
 
-        self.output_dir = os.path.join("history", self.chat_id, "source_diff")
-        os.makedirs(self.output_dir, exist_ok=True)
-
-        self.state_file = os.path.join(self.output_dir, f"{self.task_name}_state.json")
+        self.output_dir = ""
+        self.state_file = ""
         self.state = {
             "chat_id": self.chat_id,
             "tool": self.tool_name,
@@ -69,15 +67,15 @@ class SourceDiffAgent:
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == 'equal':
                 continue
-            
+
             start1 = max(0, i1 - context)
             end1 = min(len(lines1), i2 + context)
             start2 = max(0, j1 - context)
             end2 = min(len(lines2), j2 + context)
-            
+
             before = "".join(lines1[start1:end1])
             after = "".join(lines2[start2:end2])
-            
+
             hunks.append({
                 "type": tag,
                 "before": before,
@@ -110,17 +108,17 @@ class SourceDiffAgent:
 
             # 1. Generate HTML Diff
             diff = difflib.HtmlDiff().make_file(f1_lines, f2_lines, os.path.basename(file1_path), os.path.basename(file2_path))
-            
+
             output_filename = f"{os.path.basename(file1_path)}_vs_{os.path.basename(file2_path)}.html"
             output_path = os.path.join(self.output_dir, output_filename)
-            
+
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(diff)
 
             # 2. Extract Hunks and Analyze
             hunks = self._extract_hunks(f1_lines, f2_lines)
             analysis_results = []
-            
+
             if not hunks:
                 logger.info("No differences found.")
             else:
@@ -143,7 +141,7 @@ class SourceDiffAgent:
                         cve_details=cve_details or "Unknown",
                         cwe=cwe or "Unknown"
                     )
-                    
+
                     try:
                         result_str = await async_gpt_inference(prompt, temperature=0)
                         # Try to parse JSON
@@ -154,7 +152,7 @@ class SourceDiffAgent:
                                 json_str = json_str.split("```json")[1].split("```")[0]
                             elif "```" in json_str:
                                 json_str = json_str.split("```")[1].split("```")[0]
-                                
+
                             result_json = json.loads(json_str)
                             # Add location info to result
                             result_json["location"] = {
@@ -174,7 +172,7 @@ class SourceDiffAgent:
                                     "line_range_after": hunk['line_range_after']
                                 }
                             })
-                            
+
                     except Exception as e:
                         logger.error(f"LLM analysis failed for hunk {i}: {e}")
 
@@ -183,7 +181,7 @@ class SourceDiffAgent:
                 "html_diff": output_path,
                 "analysis": analysis_results
             }
-            
+
             if on_status_update:
                 on_status_update(None, self.tool_name, self.tool_status)
 
@@ -197,10 +195,10 @@ class SourceDiffAgent:
                     "link": f"/static/{os.path.relpath(output_path, start=os.path.dirname(output_dir))}" # Assuming static mapping
                 }
             ]
-            
+
             # Add analysis summary to content
             relevant_changes = [r for r in analysis_results if isinstance(r, dict) and r.get("is_security_relevant", "").lower() == "yes"]
-            
+
             # Construct a more structured response for the frontend
             if relevant_changes:
                 summary_text = "**安全相关变更:**\n\n"
@@ -213,7 +211,7 @@ class SourceDiffAgent:
                     summary_text += f"- **漏洞类型:** {r.get('vulnerability_type', 'Unknown')}\n"
                     summary_text += f"- **置信度:** {r.get('confidence', 'Unknown')}\n"
                     summary_text += f"- **分析:** {r.get('analysis')}\n\n"
-                
+
                 tool_content.append({
                     "type": "text",
                     "content": summary_text
@@ -229,18 +227,18 @@ class SourceDiffAgent:
             # If main.py mounts /static/images to "images", we need to see where output_dir is relative to that.
             # output_dir is history/{chat_id}/source_diff
             # We might need to mount history folder in main.py or copy file to images/temp
-            
+
             # For now, let's assume we copy the html to images/temp for easy access if history is not mounted
             temp_html_dir = os.path.join("images", "temp_diffs")
             os.makedirs(temp_html_dir, exist_ok=True)
             import shutil
             temp_html_path = os.path.join(temp_html_dir, output_filename)
             shutil.copy(output_path, temp_html_path)
-            
+
             # Update link to point to the static mount
             # main.py: app.mount("/static/images", StaticFiles(directory="images"), name="static")
             web_link = f"/static/images/temp_diffs/{output_filename}"
-            
+
             # Update the file item in tool_content
             tool_content[1] = {
                 "type": "file", # Frontend might expect 'file' or 'link' or 'html'
@@ -255,7 +253,7 @@ class SourceDiffAgent:
                     logger.info(f"[{self.agent}] Sending command message: {cmd}")
                     logger.info(f"[{self.agent}] Tool content: {len(tool_content)} items")
                     logger.debug(f"[{self.agent}] Tool content detail: {json.dumps(tool_content, ensure_ascii=False, indent=2)}")
-                    
+
                     await send_message(
                         cmd,
                         "command",
