@@ -15,13 +15,12 @@ import shutil
 from pathlib import Path
 from enum import Enum
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from agent import (
     VulnAgent,
     run_repair_agent,
     ParameterCollector,
-    HardcodedStringAuditor,
     WorkMode,
     SourceDiffAgent,
     SourceDiffParameterCollector,
@@ -45,7 +44,6 @@ from db import (
     start_task,
 )
 from log import logger
-from utils.utils import get_binary_architecture, is_binary_file
 
 app = FastAPI()
 
@@ -258,7 +256,7 @@ class WebSocketChatSession:
         chat_id: str,
         query: str,
         params: Dict[str, Any],
-        work_mode: str = None,
+        work_mode: Optional[str] = None,
         analysis_mode: str = "auto",
     ) -> None:
         try:
@@ -481,6 +479,18 @@ def _initialize_platform_task_layout(owner_id: str, task_id: str, config: Dict[s
     return str(task_root)
 
 
+def _reset_platform_task_storage(owner_id: str, task_id: str, config: Dict[str, Any]) -> str:
+    task_root = _task_artifact_dir(owner_id, task_id)
+    upload_root = _task_upload_dir(owner_id, task_id)
+
+    if task_root.is_dir():
+        shutil.rmtree(task_root)
+    if upload_root.is_dir():
+        shutil.rmtree(upload_root)
+
+    return _initialize_platform_task_layout(owner_id, task_id, config)
+
+
 def _get_platform_task_dir(task_id: str) -> str:
     return os.path.join(path, str(task_id))
 
@@ -492,7 +502,7 @@ def _get_platform_task_dir_for_owner(owner_id: str, task_id: str) -> str:
 class _OfflineWebSocket:
     client_state = WebSocketState.DISCONNECTED
 
-    async def send_json(self, payload: Dict[str, Any]) -> None:  # pragma: no cover - defensive
+    async def send_json(self, _: Dict[str, Any]) -> None:  # pragma: no cover - defensive
         return None
 
 
@@ -521,7 +531,7 @@ async def _run_platform_task(task_id: str, query: str, payload: PlatformTaskCrea
         agent = VulnAgent(
             task_id,
             query,
-            _OfflineWebSocket(),
+            cast(WebSocket, _OfflineWebSocket()),
             cve_id=payload.cve_id,
             cwe_id=payload.cwe_id,
             binary_filename=payload.binary_filename,
@@ -669,7 +679,7 @@ async def _save_uploaded_file(
     upload_role: Optional[str] = None,
     owner_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    filename = Path(file.filename).name
+    filename = Path(file.filename or "uploaded_file").name
     ext = Path(filename).suffix.lower()
     if file.content_type not in ALLOWED_CONTENT_TYPES and ext not in FIRMWARE_EXTENSIONS:
         raise ValueError("文件类型不在白名单中")
@@ -721,7 +731,7 @@ async def _save_source_diff_file(
     upload_role: Optional[str] = None,
     owner_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    filename = Path(file.filename).name
+    filename = Path(file.filename or "uploaded_file").name
     ext = Path(filename).suffix.lower()
     if ext not in SOURCE_DIFF_EXTENSIONS:
         raise ValueError("文件类型不在白名单中")
@@ -806,7 +816,7 @@ async def _create_legacy_task(
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
+async def validation_exception_handler(_: Request, exc: RequestValidationError):
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
@@ -923,11 +933,12 @@ async def create_platform_task(payload: PlatformTaskCreateRequest):
         source=normalized_source,
     )
 
-    task_id = existing_task.get("task_id") if existing_task else f"platform_{uuid.uuid4().hex[:20]}"
+    existing_task_id = existing_task.get("task_id") if existing_task else None
+    task_id = str(existing_task_id) if existing_task_id else f"platform_{uuid.uuid4().hex[:20]}"
     platform_config = {"platform": {"name": payload.name, "description": payload.description}}
-    task_dir = _initialize_platform_task_layout(payload.owner_id, task_id, platform_config)
-    if existing_task and os.path.isdir(task_dir):
-        shutil.rmtree(task_dir)
+    if existing_task_id:
+        task_dir = _reset_platform_task_storage(payload.owner_id, task_id, platform_config)
+    else:
         task_dir = _initialize_platform_task_layout(payload.owner_id, task_id, platform_config)
 
     task = await asyncio.to_thread(
@@ -1343,7 +1354,7 @@ async def upload_code_repair_file(
     file: UploadFile = File(...),
     chat_id: str = Form(...),
 ):
-    filename = Path(file.filename).name
+    filename = Path(file.filename or "uploaded_file").name
     ext = Path(filename).suffix.lower()
 
     if ext not in CODE_REPAIR_EXTENSIONS:
@@ -1468,11 +1479,15 @@ async def code_repair_ws(websocket: WebSocket):
         loop = asyncio.get_event_loop()
 
         try:
+            def send_message_sync(**kwargs: Any) -> None:
+                future = asyncio.run_coroutine_threadsafe(send_message_async(**kwargs), loop)
+                future.result()
+
             future = loop.run_in_executor(
                 None,
                 lambda: run_repair_agent(
                     base_dir,
-                    lambda **kwargs: asyncio.run_coroutine_threadsafe(send_message_async(**kwargs), loop),
+                    send_message_sync,
                 ),
             )
             success, result_msg = await future

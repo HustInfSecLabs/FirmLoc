@@ -2,3 +2,23 @@ __pycache__
 *.log
 history/
 images/
+
+# 临时工作文件
+mouse.py
+test.py
+clicks.csv
+
+# IDA 分析结果文件
+ida_combined_analysis_*.json
+
+# VS Code 配置
+.vscode/
+
+# 运行时配置（含密钥，不提交）
+config/config.ini
+
+# 临时测试目录
+temp/
+
+# 文档
+docs/

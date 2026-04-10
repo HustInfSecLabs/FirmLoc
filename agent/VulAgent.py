@@ -787,6 +787,7 @@ class VulnAgent:
                 task_root=self.task_root,
                 binary_name=os.path.basename(file1)
             )
+            vulnerable_function_names = list(vulnerable_functions.keys())
             record_detection_findings(
                 chat_id=self.chat_id,
                 binary_name=os.path.basename(file1),
@@ -795,12 +796,12 @@ class VulnAgent:
                 related_cve=self.cve_id,
             )
 
-            if vulnerable_functions:
+            if vulnerable_function_names:
                 self.agent = "Path Reach Agent"
                 self.tool = None
                 self.config_manager.update_agent_status("Detection Agent", "Path Reach Agent")
                 await self.send_message(
-                    f"Path Reach Agent 分析 {len(vulnerable_functions)} 个漏洞函数的路径可达性",
+                    f"Path Reach Agent 分析 {len(vulnerable_function_names)} 个漏洞函数的路径可达性",
                     message_type="header1",
                     agent=self.agent
                 )
@@ -809,7 +810,7 @@ class VulnAgent:
                     absolute_binary_path = os.path.abspath(file1)
                     reach_results = await self.PathReachAgent.analyze_reachability(
                         binary_path=absolute_binary_path,
-                        vulnerable_functions=vulnerable_functions,
+                        vulnerable_functions=vulnerable_function_names,
                         cwe_type=cwe,
                         send_message=self.send_message
                     )
@@ -862,9 +863,9 @@ class VulnAgent:
         chat_id: str,
         task_root: str,
         binary_name: Optional[str] = None
-    ) -> List[str]:
+    ) -> dict[str, dict]:
         """
-        从 Detection Agent (llm_diff) 的结果中提取认定的漏洞函数
+        从 Detection Agent (llm_diff) 的结果中提取认定的漏洞函数及其详细判定信息
 
         Args:
             chat_id: 会话 ID
@@ -873,12 +874,11 @@ class VulnAgent:
                          避免把其他二进制的分析结果混入。为 None 时扫描所有目录（不推荐）。
 
         Returns:
-            认定存在漏洞的函数名列表
+            认定存在漏洞的函数及其分析结果
         """
-        import re
         import glob
 
-        vulnerable_funcs = []
+        vulnerable_results: dict[str, dict] = {}
         bindiff_dir = os.path.join(task_root, "bindiff")
 
         # 查找 bindiff 目录下的 vuln_analysis_results.json 文件
@@ -901,19 +901,19 @@ class VulnAgent:
                         content = f.read()
 
                     # 解析特殊格式: === function_name.c vs function_name.c === 后跟 JSON 块
-                    vulnerable_funcs.extend(self._parse_llm_diff_format(content))
+                    vulnerable_results.update(self._parse_llm_diff_format(content))
 
                 except Exception as e:
                     logger.warning(f"解析结果文件失败 {result_file}: {e}")
                     continue
 
-        # 去重
-        vulnerable_funcs = list(set(vulnerable_funcs))
-        logger.info(f"从 Detection Agent 结果中提取到 {len(vulnerable_funcs)} 个漏洞函数: {vulnerable_funcs}")
+        logger.info(
+            f"从 Detection Agent 结果中提取到 {len(vulnerable_results)} 个漏洞函数: {list(vulnerable_results.keys())}"
+        )
 
-        return vulnerable_funcs
+        return vulnerable_results
 
-    def _parse_llm_diff_format(self, content: str) -> List[str]:
+    def _parse_llm_diff_format(self, content: str) -> dict[str, dict]:
         """
         解析 LLM Diff 特殊格式的分析结果（优先使用 ReAct 分析结果）
 
@@ -933,13 +933,13 @@ class VulnAgent:
             content: 文件内容
 
         Returns:
-            认定存在漏洞的函数名列表
+            认定存在漏洞的函数及其分析结果
         """
         import re
-        vulnerable_funcs = []
+        vulnerable_results: dict[str, dict] = {}
 
         # 先收集所有函数的初次分析结果
-        initial_results = {}  # {func_name: is_vulnerable}
+        initial_results: dict[str, dict] = {}
 
         sections = re.split(r'===\s+(\w+)\.c\s+vs\s+\w+\.c\s+===', content)
         for i in range(1, len(sections), 2):
@@ -949,28 +949,23 @@ class VulnAgent:
             func_name = sections[i]
             section_content = sections[i + 1]
 
-            # 只提取初次分析部分（截取到下一个=== 或 (ReAct分析) 之前）
-            # 如果section_content包含下一个函数的分析，先截断
             next_section_match = re.search(r'\n===\s+\w+\.c\s+vs\s+\w+\.c', section_content)
             if next_section_match:
                 section_content = section_content[:next_section_match.start()]
 
-            # 移除 markdown 代码块标记
             cleaned_content = re.sub(r'```json\s*', '', section_content)
             cleaned_content = re.sub(r'```\s*', '', cleaned_content)
 
-            # 尝试提取 JSON 对象
             json_match = re.search(r'\{[\s\S]*?\}', cleaned_content)
             if not json_match:
                 continue
 
             try:
                 data = json.loads(json_match.group(0))
-                initial_results[func_name] = self._is_vulnerability_confirmed_in_dict(data)
+                initial_results[func_name] = data
             except json.JSONDecodeError:
                 continue
 
-        # 再查找 ReAct 分析结果
         react_pattern = r'===\s+(\w+)\.c\s+vs\s+\w+\.c\s+\(ReAct分析\)\s+===\s*([\s\S]*?)(?=\n===|\Z)'
         react_matches = re.finditer(react_pattern, content, re.MULTILINE)
 
@@ -979,11 +974,9 @@ class VulnAgent:
             func_name = match.group(1)
             react_content = match.group(2)
 
-            # 移除 markdown 代码块标记
             react_content = re.sub(r'```json\s*', '', react_content)
             react_content = re.sub(r'```\s*', '', react_content)
 
-            # 尝试提取 JSON 对象
             json_match = re.search(r'\{[\s\S]*\}', react_content)
             if not json_match:
                 logger.warning(f"未找到 JSON (ReAct 函数: {func_name})")
@@ -996,34 +989,31 @@ class VulnAgent:
                 react_analyzed_funcs.add(func_name)
 
                 if vuln_found == "yes":
-                    # ReAct 明确认定为漏洞
-                    vulnerable_funcs.append(func_name)
+                    vulnerable_results[func_name] = data
                     logger.info(f"[ReAct 分析] 发现漏洞函数: {func_name}")
                 elif vuln_found == "no":
-                    # ReAct 明确认定非漏洞，覆盖初次分析
                     logger.info(f"[ReAct 分析] 函数 {func_name} 非漏洞 (覆盖初次分析)")
                 else:
-                    # ReAct 未明确判断 (unknown/parse_error)，回退到初次分析
-                    if initial_results.get(func_name, False):
-                        vulnerable_funcs.append(func_name)
+                    initial_data = initial_results.get(func_name)
+                    if initial_data and self._is_vulnerability_confirmed_in_dict(initial_data):
+                        vulnerable_results[func_name] = initial_data
                         logger.info(f"[回退初次分析] 发现漏洞函数: {func_name} (ReAct 结果 unknown)")
                     else:
                         logger.info(f"[回退初次分析] 函数 {func_name} 非漏洞")
 
             except json.JSONDecodeError as e:
                 logger.warning(f"解析 ReAct JSON 失败 (函数: {func_name}): {e}")
-                # 解析失败，回退到初次分析
-                if initial_results.get(func_name, False):
-                    vulnerable_funcs.append(func_name)
+                initial_data = initial_results.get(func_name)
+                if initial_data and self._is_vulnerability_confirmed_in_dict(initial_data):
+                    vulnerable_results[func_name] = initial_data
                     logger.info(f"[回退初次分析] 发现漏洞函数: {func_name} (ReAct 解析失败)")
 
-        # 对于没有 ReAct 分析的函数，使用初次分析结果
-        for func_name, is_vulnerable in initial_results.items():
-            if func_name not in react_analyzed_funcs and is_vulnerable:
-                vulnerable_funcs.append(func_name)
+        for func_name, data in initial_results.items():
+            if func_name not in react_analyzed_funcs and self._is_vulnerability_confirmed_in_dict(data):
+                vulnerable_results[func_name] = data
                 logger.info(f"[初次分析] 发现漏洞函数: {func_name} (无 ReAct 分析)")
 
-        return vulnerable_funcs
+        return vulnerable_results
 
     def _parse_json_results(self, data: dict) -> List[str]:
         """解析 JSON 格式的分析结果"""

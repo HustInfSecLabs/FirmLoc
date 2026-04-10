@@ -585,28 +585,55 @@ def _get_or_create_finding(session, chat_id: str, binary_name: Optional[str], fu
 def record_detection_findings(
     chat_id: str,
     binary_name: Optional[str],
-    vulnerable_functions: Iterable[str],
+    vulnerable_functions: Iterable[str] | Dict[str, Dict[str, Any]],
     cwe_id: Optional[str] = None,
     related_cve: Optional[str] = None,
 ) -> None:
-    functions = sorted({item for item in vulnerable_functions if item})
+    if isinstance(vulnerable_functions, dict):
+        detection_payloads = {
+            function_name: payload
+            for function_name, payload in vulnerable_functions.items()
+            if function_name
+        }
+    else:
+        detection_payloads = {
+            function_name: {}
+            for function_name in vulnerable_functions
+            if function_name
+        }
+
+    functions = sorted(detection_payloads)
     if not functions:
         return
 
     with session_scope() as session:
         task = _ensure_task_row(session, chat_id, binary_filename=binary_name)
         for function_name in functions:
+            payload = detection_payloads.get(function_name) or {}
+            reason = payload.get("reason")
+            reasoning_chain = payload.get("reasoning_chain")
+            vulnerability_details = payload.get("vulnerability_details") or {}
+            fix_analysis = payload.get("fix_analysis") or {}
+            root_cause = vulnerability_details.get("root_cause")
+            attack_vector = vulnerability_details.get("attack_vector")
+            impact = vulnerability_details.get("impact")
+            fix_description = fix_analysis.get("fix_description")
+            summary = root_cause or payload.get("vulnerable_code_location") or "Detection Agent identified this function as potentially vulnerable."
+
             finding = _get_or_create_finding(session, chat_id, binary_name, function_name)
             finding.title = f"Potential vulnerability in {function_name}"
-            finding.description = "Detection Agent identified this function as potentially vulnerable."
+            finding.description = summary
+            finding.analysis = _json_text(reason) or root_cause or finding.analysis
+            finding.recommendation = fix_description or finding.recommendation
             finding.source_stage = VulnTaskPhase.LLM_ANALYSIS.value
             finding.severity = max(
                 finding.severity or VulnFindingSeverity.INFO.value,
+                str((payload.get("severity") or VulnFindingSeverity.MEDIUM.value)).lower(),
                 VulnFindingSeverity.MEDIUM.value,
                 key=lambda item: _SEVERITY_ORDER.get(item, 0),
             )
             finding.status = VulnFindingStatus.DETECTED.value
-            finding.cwe_id = cwe_id or finding.cwe_id
+            finding.cwe_id = cwe_id or payload.get("vulnerability_type") or finding.cwe_id
             finding.related_cve = related_cve or finding.related_cve
             finding.confidence = max(finding.confidence or 0.0, 0.6)
             finding.evidence = _merge_dict(
@@ -616,6 +643,10 @@ def record_detection_findings(
                         "binary_name": binary_name,
                         "function_name": function_name,
                         "detected_at": datetime.utcnow().isoformat(),
+                        "vulnerable_code_location": payload.get("vulnerable_code_location"),
+                        "vulnerability_details": vulnerability_details,
+                        "fix_analysis": fix_analysis,
+                        "reasoning_chain": reasoning_chain,
                     }
                 },
             )
@@ -625,6 +656,7 @@ def record_detection_findings(
                     "detection": {
                         "status": VulnFindingStatus.DETECTED.value,
                         "confidence": finding.confidence,
+                        "reason": reason,
                     }
                 },
             )
@@ -682,9 +714,13 @@ def record_path_reach_findings(
             existing_severity = finding.severity or VulnFindingSeverity.INFO.value
             finding.severity = max(existing_severity, severity, key=lambda item: _SEVERITY_ORDER.get(item, 0))
             finding.status = VulnFindingStatus.CONFIRMED.value if payload.get("is_vulnerable") else finding.status or VulnFindingStatus.DETECTED.value
-            finding.source_stage = VulnTaskPhase.PATH_REACH.value
-            finding.description = payload.get("analysis_summary") or finding.description
-            finding.analysis = payload.get("analysis_summary") or finding.analysis
+            has_detection_context = bool((finding.judgment or {}).get("detection")) or bool((finding.evidence or {}).get("detection"))
+            finding.source_stage = finding.source_stage or VulnTaskPhase.PATH_REACH.value if has_detection_context else VulnTaskPhase.PATH_REACH.value
+            path_summary = payload.get("analysis_summary")
+            if not has_detection_context or not finding.description:
+                finding.description = path_summary or finding.description
+            if not has_detection_context or not finding.analysis:
+                finding.analysis = path_summary or finding.analysis
             finding.recommendation = finding.recommendation or "Review the reachable path and confirm whether the vulnerable code path is externally controllable."
             finding.cwe_id = cwe_id or finding.cwe_id
             finding.related_cve = related_cve or finding.related_cve
