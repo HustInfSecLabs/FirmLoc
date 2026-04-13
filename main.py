@@ -86,15 +86,19 @@ ALLOWED_CONTENT_TYPES = {
 FIRMWARE_EXTENSIONS = {
     ".bin",
     ".img",
+    ".zip",
     ".hex",
     ".ihex", ".mcs",
     ".elf",
+    ".fw",
     ".dfu",
     ".uf2",
     ".srec", ".s19", ".s28", ".s37",
     ".pat",
     ".ipsw",
     ".tar",
+    ".tar.gz",
+    ".tgz",
     ".jar"
 }
 
@@ -566,6 +570,11 @@ def _normalize_analysis_mode(analysis_mode: Optional[str]) -> str:
     return normalized_mode
 
 
+def _has_allowed_firmware_extension(filename: str) -> bool:
+    normalized_name = filename.strip().lower()
+    return any(normalized_name.endswith(ext) for ext in FIRMWARE_EXTENSIONS)
+
+
 
 
 def _get_source_diff_session_dir(chat_id: str) -> str:
@@ -680,8 +689,7 @@ async def _save_uploaded_file(
     owner_id: Optional[str] = None,
 ) -> dict[str, Any]:
     filename = Path(file.filename or "uploaded_file").name
-    ext = Path(filename).suffix.lower()
-    if file.content_type not in ALLOWED_CONTENT_TYPES and ext not in FIRMWARE_EXTENSIONS:
+    if file.content_type not in ALLOWED_CONTENT_TYPES and not _has_allowed_firmware_extension(filename):
         raise ValueError("文件类型不在白名单中")
 
     if owner_id:
