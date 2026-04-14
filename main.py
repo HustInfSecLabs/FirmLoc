@@ -25,7 +25,6 @@ from agent import (
     SourceDiffAgent,
     SourceDiffParameterCollector,
 )
-from model import AgentModel
 from config import config_manager
 from db import (
     create_task,
@@ -329,7 +328,7 @@ class WebSocketChatSession:
             collector = ParameterCollector(
                 chat_id,
                 self._send_json,
-                AgentModel("DeepSeek"),
+                config_manager.build_agent_model("parameter_agent"),
                 work_mode=work_mode,
             )
 
@@ -1182,7 +1181,7 @@ async def source_diff_ws(websocket: WebSocket):
                     chat_id=chat_id,
                     base_dir=session_dir,
                     send_callback=lambda payload: websocket.send_json(payload),
-                    chat_model=AgentModel("DeepSeek"),
+                    chat_model=config_manager.build_agent_model("source_diff_parameter_agent"),
                     allowed_extensions=SOURCE_DIFF_EXTENSIONS,
                 )
                 source_diff_parameter_collectors[chat_id] = collector

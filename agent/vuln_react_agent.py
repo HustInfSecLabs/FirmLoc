@@ -201,7 +201,7 @@ Thought: {agent_scratchpad}"""
         post_pseudo_file: str,
         pre_binary_name: str,
         post_binary_name: str,
-        model_name: str = "GPT",
+        model_name: Optional[str] = None,
         temperature: float = 0,
         max_iterations: int = 50,
         ida_service_url: str = "http://10.12.189.21:5000",
@@ -210,7 +210,7 @@ Thought: {agent_scratchpad}"""
     ):
         """
         初始化 ReAct Agent
-        
+
         Args:
             pre_pseudo_file: 补丁前的伪代码文件路径
             post_pseudo_file: 补丁后的伪代码文件路径
@@ -227,16 +227,15 @@ Thought: {agent_scratchpad}"""
         self.post_pseudo_file = post_pseudo_file
         self.pre_binary_name = pre_binary_name
         self.post_binary_name = post_binary_name
-        self.model_config_name = model_name  # 配置名称，如 "GPT", "DeepSeek" 等
         self.temperature = temperature
         self.max_iterations = max_iterations
         self.ida_service_url = ida_service_url
         self.send_message = send_message
         self.history_dir = history_dir
-        
+
         # 从 config.ini 读取 LLM 配置
         self._load_llm_config(model_name)
-        
+
         # 初始化工具上下文
         self.tool_context = VulnToolContext(
             pre_pseudo_file=pre_pseudo_file,
@@ -259,26 +258,19 @@ Thought: {agent_scratchpad}"""
         
         logger.info(f"VulnReActAgent 初始化完成: model={self.model_name}, max_iter={max_iterations}")
     
-    def _load_llm_config(self, model_config_name: str):
+    def _load_llm_config(self, model_config_name: Optional[str]):
         """从 config.ini 加载 LLM 配置"""
-        config_section = f"LLM.{model_config_name}"
-        try:
-            self.api_key = config_manager.config[config_section]["api_key"]
-            self.base_url = config_manager.config[config_section]["base_url"]
-            self.model_name = config_manager.config[config_section]["model_name"]
-            logger.info(f"从配置加载 LLM: {config_section} -> {self.model_name}")
-        except KeyError as e:
-            logger.warning(f"配置 {config_section} 不存在，尝试使用默认 GPT 配置: {e}")
-            try:
-                self.api_key = config_manager.config["LLM.GPT"]["api_key"]
-                self.base_url = config_manager.config["LLM.GPT"]["base_url"]
-                self.model_name = config_manager.config["LLM.GPT"]["model_name"]
-            except KeyError:
-                # 最后尝试从环境变量获取
-                logger.warning("从配置文件获取失败，尝试使用环境变量")
-                self.api_key = os.environ.get("OPENAI_API_KEY", "")
-                self.base_url = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
-                self.model_name = model_config_name if model_config_name != "GPT" else "gpt-4o"
+        if model_config_name:
+            llm_config = config_manager.get_llm_config_by_alias(model_config_name)
+        else:
+            llm_config = config_manager.get_llm_config_for("vuln_react_agent")
+            model_config_name = llm_config["alias"]
+
+        self.api_key = llm_config["api_key"]
+        self.base_url = llm_config["base_url"]
+        self.model_name = llm_config["model_name"]
+        self.model_config_name = model_config_name
+        logger.info(f"从配置加载 LLM: LLM.{model_config_name} -> {self.model_name}")
     
     def _create_llm(self) -> ChatOpenAI:
         """创建 LLM 实例"""
@@ -491,7 +483,7 @@ class VulnReActRefiner:
         post_binary_name: str,
         pre_pseudo_file: str,
         post_pseudo_file: str,
-        model_name: str = "GPT",
+        model_name: Optional[str] = None,
         max_iterations: int = 50,
         send_message: Optional[Callable] = None,
         history_dir: Optional[str] = None
@@ -649,7 +641,7 @@ async def react_analyze_function_pair(
     cve_details: str = "",
     cwe: str = "",
     send_message: Optional[Callable] = None,
-    model_name: str = "GPT"
+    model_name: Optional[str] = None
 ) -> str:
     """
     使用 ReAct Agent 分析函数对

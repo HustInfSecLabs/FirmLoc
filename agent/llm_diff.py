@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Callable
 
 from model import AgentModel
+from config import config_manager
 from log import logger
 from agent.data_flow_utils import format_key_param_data_flow, format_vuln_context
 
@@ -207,7 +208,7 @@ async def async_gpt_inference(
 
 def gpt_inference(prompt: str = None, temperature: int = 0, default_system_prompt: str = None, history: list = None):
     try:
-        llm_diff_agent = AgentModel(model="DeepSeek")
+        llm_diff_agent = config_manager.build_agent_model("llm_diff")
         
         system_prompt = "You are a helpful security assistant." if default_system_prompt == None else default_system_prompt
         messages = [{"role": "system", "content": system_prompt}]
@@ -1020,7 +1021,7 @@ class Refiner:
         use_react_agent: bool = True,
         pre_pseudo_file: Optional[str] = None,
         post_pseudo_file: Optional[str] = None,
-        react_model_name: str = "DeepSeek",  # 对应 config.ini 中的 LLM.{model_name} 配置节
+        react_model_name: Optional[str] = None,  # 对应 config.ini 中的 LLM.{model_name} 配置节
         react_max_iterations: int = 50,
         send_message: Optional[Callable] = None,
         history_dir: Optional[str] = None,
@@ -1629,7 +1630,7 @@ async def main(chat_id: str,
          danger_api_list: Optional[List[str]] = None,
          full_func_line_threshold: int = 300,
          work_mode: str = "reproduction",
-         react_model_name: str = "DeepSeek",
+         react_model_name: Optional[str] = None,
          react_max_iterations: int = 50):
     """
     主函数：对比两个固件版本的二进制差异并分析漏洞
@@ -1809,7 +1810,7 @@ async def llm_diff(chat_id: str, task_root: str, binary_filename: str,
                  danger_api_list: Optional[List[str]] = None,
                  full_func_line_threshold: int = 300,
                  work_mode: str = "reproduction",
-                 react_model_name: str = "DeepSeek",
+                 react_model_name: Optional[str] = None,
                  react_max_iterations: int = 50):
     """包装函数，保持与原代码的兼容性"""
     return await main(

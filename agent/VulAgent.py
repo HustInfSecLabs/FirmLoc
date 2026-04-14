@@ -8,7 +8,7 @@ from starlette.websockets import WebSocketState
 from pathlib import Path
 from typing import Optional, Set, List
 
-from model import ChatModel, AgentModel
+from model import ChatModel
 from agent import UserAgent, PlannerAgent, ida
 from agent.parameter_agent import WorkMode, CWE_DESCRIPTIONS
 from state import ProgressEnum
@@ -52,13 +52,13 @@ class VulnAgent:
         binary_filename: Optional[str] = None,
         vendor: Optional[str] = None,
         work_mode: str = WorkMode.DISCOVERY.value,
-        user_model: ChatModel = AgentModel("DeepSeek"),
-        planner_model: ChatModel = AgentModel("DeepSeek"),
+        user_model: Optional[ChatModel] = None,
+        planner_model: Optional[ChatModel] = None,
         config_dir: str = './history',
         analysis_mode: str = AnalysisMode.AUTO.value
     ):
-        self.user_model = user_model
-        self.planner_model = planner_model
+        self.user_model = user_model or config.build_agent_model("vul_agent_user_model")
+        self.planner_model = planner_model or config.build_agent_model("vul_agent_planner_model")
         self.config_dir = config_dir
         self.chat_id = str(chat_id)
         self.task_root = os.path.join(self.config_dir, self.chat_id)

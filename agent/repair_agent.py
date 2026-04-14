@@ -667,8 +667,9 @@ def _parse_react_response(text: str) -> Tuple[str, str, Any, Optional[str]]:
     return thought.strip(), action.strip(), action_input, final_answer
 
 def call_llm(client: OpenAI, messages: List[Dict[str, str]], max_tokens: int) -> str:
+    llm_config = config_manager.get_llm_config_for("repair_agent")
     resp = client.chat.completions.create(
-        model=config_manager.config["LLM.DeepSeek"]["model_name"],
+        model=llm_config["model_name"],
         messages=messages,
         temperature=0,
         max_tokens=max_tokens,
@@ -952,8 +953,8 @@ def run_repair_agent(base_dir: str, websocket_sender: Callable[..., None]):
     成功返回 (True, "修复完成")，失败返回 (False, error_msg)。
     """
     try:
-        llm = OpenAI(api_key=config_manager.config["LLM.DeepSeek"]["api_key"], 
-                     base_url=config_manager.config["LLM.DeepSeek"]["base_url"])
+        llm_config = config_manager.get_llm_config_for("repair_agent")
+        llm = OpenAI(api_key=llm_config["api_key"], base_url=llm_config["base_url"])
 
         # build tools with websocket sender
         tools = build_tools(base_dir, websocket_sender)
@@ -1008,6 +1009,7 @@ def run_repair_agent(base_dir: str, websocket_sender: Callable[..., None]):
         return False, f"{str(e)}"
 
     return True, "修复完成"
+
 
 # ---- if run as script: provide fallback websocket_sender that prints to stdout ----
 if __name__ == "__main__":

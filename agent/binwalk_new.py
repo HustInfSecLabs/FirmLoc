@@ -307,21 +307,19 @@ Thought: {agent_scratchpad}"""
         """初始化 LangChain LLM"""
         from langchain_openai import ChatOpenAI
         from config import config_manager as global_config
-        
-        model_name = getattr(self.chat_model, 'model_name', None)
-        if not model_name:
-            model_name = global_config.config.get("LLM.DeepSeek", {}).get("model_name", "default")
-        
+
+        routed_llm_config = global_config.get_llm_config_for("binary_filter")
+        model_name = getattr(self.chat_model, 'model_name', None) or routed_llm_config["model_name"]
+
         # 获取 API 配置
         if hasattr(self.chat_model, 'client'):
             api_key = getattr(self.chat_model.client, 'api_key', None)
             base_url_obj = getattr(self.chat_model.client, 'base_url', None)
             base_url = str(base_url_obj) if base_url_obj else None
         else:
-            llm_config = global_config.config.get("LLM.DeepSeek", {})
-            api_key = llm_config.get("api_key", "")
-            base_url = llm_config.get("base_url", "")
-        
+            api_key = routed_llm_config["api_key"]
+            base_url = routed_llm_config["base_url"]
+
         return ChatOpenAI(
             model=model_name,
             api_key=api_key,

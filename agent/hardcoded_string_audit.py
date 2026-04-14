@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from log import logger
-from model import AgentModel, ChatModel
+from model import ChatModel
 from agent.ida_toolkits import IdaToolkit
 from agent.jar_string_extractor import JarStringExtractor
 from agent.context_aware_auditor import JarContextProvider, ReActStringAuditor
@@ -109,7 +109,7 @@ class HardcodedStringAuditor:
         ida_service_url: Optional[str] = None,
         output_root: Optional[str] = None,
     ) -> None:
-        self.model: ChatModel = model or AgentModel("DeepSeek")
+        self.model: ChatModel = model or config_manager.build_agent_model("hardcoded_string_audit")
         self.ida_toolkit = IdaToolkit()
         self.jar_extractor = JarStringExtractor()
         self.ida_service_url = (ida_service_url or config_manager.config["IDA_SERVICE"]["service_url"]).rstrip("/")
