@@ -2,6 +2,7 @@ __pycache__
 *.log
 history/
 images/
+.worktrees/
 
 # 临时工作文件
 mouse.py
