@@ -98,7 +98,8 @@ FIRMWARE_EXTENSIONS = {
     ".tar",
     ".tar.gz",
     ".tgz",
-    ".jar"
+    ".jar",
+    ".rar"
 }
 
 CODE_REPAIR_EXTENSIONS = {
@@ -123,7 +124,8 @@ SOURCE_DIFF_EXTENSIONS = {
 VALID_UPLOAD_ROLES = {"old", "new"}
 VALID_ANALYSIS_MODES = {"auto", "firmware", "binary_pair"}
 PLATFORM_SOURCE = "deepaudit_extension"
-PLATFORM_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+PLATFORM_MAX_UPLOAD_BYTES = 6000 * 1024 * 1024
+UPLOAD_STREAM_CHUNK_BYTES = 1024 * 1024
 platform_task_runners: Dict[str, asyncio.Task] = {}
 
 
@@ -703,15 +705,26 @@ async def _save_uploaded_file(
         raise FileExistsError("文件已存在")
 
     try:
-        content = await file.read()
-        if len(content) > PLATFORM_MAX_UPLOAD_BYTES:
-            raise ValueError(f"文件大小超过限制 ({PLATFORM_MAX_UPLOAD_BYTES // (1024 * 1024)}MB)")
         with open(save_path, "wb") as output:
-            output.write(content)
+            total_size = 0
+            while True:
+                chunk = await file.read(UPLOAD_STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > PLATFORM_MAX_UPLOAD_BYTES:
+                    raise ValueError(f"文件大小超过限制 ({PLATFORM_MAX_UPLOAD_BYTES // (1024 * 1024)}MB)")
+                output.write(chunk)
     except Exception as exc:  # pylint: disable=broad-except
+        with contextlib.suppress(Exception):
+            if save_path.exists():
+                save_path.unlink()
         if isinstance(exc, ValueError):
             raise
         raise OSError(f"文件保存失败: {str(exc)}") from exc
+    finally:
+        with contextlib.suppress(Exception):
+            await file.close()
 
     file_stat = os.stat(save_path)
     record_upload(
