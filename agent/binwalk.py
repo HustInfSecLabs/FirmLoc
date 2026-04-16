@@ -36,6 +36,17 @@ class BinwalkAgent(Agent):
     def _binwalk_work_dir(self, task_root: Path) -> Path:
         return task_root / 'binwalk'
 
+    def _is_archive_file(self, filename: str) -> bool:
+        normalized = filename.lower()
+        return normalized.endswith((
+            '.zip',
+            '.tar',
+            '.rar',
+            '.tar.gz',
+            '.tgz',
+            '.7z',
+        ))
+
     async def process(self, task_id: str, firmware_path: str, config: ConfigManager, send_message=None, on_status_update=None) -> str:
         if not task_id or not firmware_path:
             return json.dumps({
@@ -59,11 +70,18 @@ class BinwalkAgent(Agent):
         os.makedirs(firmware_dir, exist_ok=True)
         extract_path = firmware_dir
         binwalk_log_file = firmware_dir / 'binwalk_result.txt'
+        timeout_seconds = 1800
+        is_archive_file = self._is_archive_file(firmware_name)
+        tool_name = '7z' if is_archive_file else 'binwalk'
 
         try:
             # 使用绝对路径，避免 cwd 切换后相对路径失效
-            extract_cmd = ['binwalk', '-Me', firmware_path]
-            config.update_tool_status("Online Search", "Binwalk")
+            if is_archive_file:
+                extract_cmd = ['7z', 'x', firmware_path, f'-o{extract_path}', '-y']
+            else:
+                extract_cmd = ['binwalk', '-Me', firmware_path]
+
+            config.update_tool_status("Online Search", tool_name)
             self.tool_status = "running"
             if on_status_update:
                 on_status_update(' '.join(extract_cmd), self.tool, self.tool_status)
@@ -77,7 +95,7 @@ class BinwalkAgent(Agent):
             ]
             os.makedirs(extract_path, exist_ok=True)
 
-            def _run_binwalk() -> tuple[subprocess.CompletedProcess[str], str, str]:
+            def _run_extract() -> tuple[subprocess.CompletedProcess[str], str, str]:
                 with open(binwalk_log_file, 'w', encoding='utf-8') as log_f:
                     result_output = subprocess.run(
                         extract_cmd,
@@ -85,15 +103,30 @@ class BinwalkAgent(Agent):
                         stderr=subprocess.STDOUT,
                         text=True,
                         check=True,
-                        timeout=1800,
+                        timeout=timeout_seconds,
                         cwd=str(extract_path)
                     )
 
-                extracted_dirs = sorted(glob.glob(f"{extract_path}/_{firmware_name}*.extracted"), key=os.path.getmtime)
-                if not extracted_dirs:
-                    raise RuntimeError("binwalk 未提取出任何目录")
+                    if is_archive_file and firmware_name.lower().endswith(('.tar.gz', '.tgz')):
+                        tar_candidates = sorted(extract_path.glob('*.tar'))
+                        for tar_file in tar_candidates:
+                            subprocess.run(
+                                ['7z', 'x', str(tar_file), f'-o{extract_path}', '-y'],
+                                stdout=log_f,
+                                stderr=subprocess.STDOUT,
+                                text=True,
+                                check=True,
+                                timeout=timeout_seconds,
+                                cwd=str(extract_path)
+                            )
 
-                actual_extracted_path = extracted_dirs[-1]
+                if is_archive_file:
+                    actual_extracted_path = str(extract_path)
+                else:
+                    extracted_dirs = sorted(glob.glob(f"{extract_path}/_{firmware_name}*.extracted"), key=os.path.getmtime)
+                    if not extracted_dirs:
+                        raise RuntimeError("binwalk 未提取出任何目录")
+                    actual_extracted_path = extracted_dirs[-1]
 
                 with open(binwalk_log_file, 'r', encoding='utf-8') as log_f:
                     binwalk_output = log_f.read()
@@ -102,12 +135,12 @@ class BinwalkAgent(Agent):
 
                 return result_output, actual_extracted_path, binwalk_output
 
-            result_output, actual_extracted_path, binwalk_output = await asyncio.to_thread(_run_binwalk)
+            result_output, actual_extracted_path, binwalk_output = await asyncio.to_thread(_run_extract)
 
             if result_output.returncode != 0:
                 raise RuntimeError(f"binwalk 执行失败: {result_output.returncode}")
 
-            config.update_tool_status("Binwalk")
+            config.update_tool_status(tool_name)
             self.tool_status = "completed"
             if on_status_update:
                 on_status_update(tool_status=self.tool_status)
@@ -134,12 +167,12 @@ class BinwalkAgent(Agent):
             return result
 
         except subprocess.TimeoutExpired as e:
-            error_msg = f'Binwalk 执行超时(30分钟): {firmware_name}'
+            error_msg = f'{tool_name} 执行超时({timeout_seconds // 60}分钟): {firmware_name}'
             error_result = {
                 'status': 'error',
                 'message': error_msg
             }
-            logger.error(f"Binwalk timeout for {firmware_name}: {str(e)}")
+            logger.error(f"{tool_name} timeout for {firmware_name}: {str(e)}")
             self._update_status_ini(work_dir, firmware_name, error_result)
             return error_result
 
@@ -151,13 +184,13 @@ class BinwalkAgent(Agent):
             except Exception:
                 log_excerpt = e.stderr if hasattr(e, 'stderr') else ''
 
-            error_msg = f'Binwalk 执行失败(返回码 {e.returncode}): {firmware_name}'
+            error_msg = f'{tool_name} 执行失败(返回码 {e.returncode}): {firmware_name}'
             error_result = {
                 'status': 'error',
                 'message': error_msg,
                 'stderr': log_excerpt
             }
-            logger.error(f"Binwalk failed for {firmware_name}: returncode={e.returncode}, log={log_excerpt}")
+            logger.error(f"{tool_name} failed for {firmware_name}: returncode={e.returncode}, log={log_excerpt}")
             self._update_status_ini(work_dir, firmware_name, error_result)
             return error_result
 
