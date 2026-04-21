@@ -79,7 +79,10 @@ class BinwalkAgent(Agent):
             if is_archive_file:
                 extract_cmd = ['7z', 'x', firmware_path, f'-o{extract_path}', '-y']
             else:
-                extract_cmd = ['binwalk', '-Me', firmware_path]
+                extract_cmd = ['binwalk']
+                if os.geteuid() == 0:
+                    extract_cmd.append('--run-as=root')
+                extract_cmd.extend(['-Me', firmware_path])
 
             config.update_tool_status("Online Search", tool_name)
             self.tool_status = "running"
@@ -209,7 +212,7 @@ class BinwalkAgent(Agent):
         """更新状态"""
         status_file = work_dir / 'status.ini'
 
-        status_config = configparser.ConfigParser()
+        status_config = configparser.RawConfigParser()
         if os.path.exists(status_file):
             status_config.read(status_file)
 
@@ -241,7 +244,7 @@ class BinwalkAgent(Agent):
                 'message': f'未找到任务 {task_id} 的处理结果'
             }
 
-        status_parser = configparser.ConfigParser()
+        status_parser = configparser.RawConfigParser()
         status_parser.read(status_file)
 
         if firmware_name is not None:

@@ -650,9 +650,14 @@ class BinaryFilterAgent(Agent):
                     cve_details=cve_details or "No CVE details provided"
                 )
 
-            enc = tiktoken.get_encoding("cl100k_base")
-            enc = tiktoken.encoding_for_model("gpt-4o")
-            token_ids = enc.encode(prompt)
+            try:
+                enc = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                try:
+                    enc = tiktoken.encoding_for_model("gpt-4o")
+                except Exception:
+                    enc = None
+            token_ids = enc.encode(prompt) if enc else prompt.encode("utf-8", errors="ignore")
             logger.debug(f"Prompt token 数: {len(token_ids)}")
             
             process_result, raw_response = self._chat_and_parse_with_retry(prompt, max_attempts=2)
