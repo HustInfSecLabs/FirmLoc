@@ -1,0 +1,30 @@
+services:
+  vulnagent:
+    image: ${VULNAGENT_IMAGE:-vulnagent-offline:latest}
+    container_name: ${VULNAGENT_CONTAINER_NAME:-vulnagent-offline}
+    restart: unless-stopped
+    ports:
+      - "${VULNAGENT_PORT:-8001}:8001"
+      - "${IDA_SERVICE_PORT:-5000}:5000"
+    environment:
+      VULNAGENT_PORT: 8001
+      IDA_SERVICE_PORT: 5000
+      VULNAGENT_CONFIG: /app/config/config.ini
+      VULNAGENT_DATA_ROOT: /data/HustAgentData
+      IDA_OUTPUT_ROOT: /data/ida_output
+      IDA_LOG_DIR: /data/ida_logs
+      VULNAGENT_DATABASE_URL: ${VULNAGENT_DATABASE_URL:-}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
+      IDA32_PATH: ${IDA32_PATH:-/opt/ida/ida}
+      IDA64_PATH: ${IDA64_PATH:-/opt/ida/ida}
+      IDAT32_PATH: ${IDAT32_PATH:-/opt/ida/idat}
+      IDAT64_PATH: ${IDAT64_PATH:-/opt/ida/idat}
+    volumes:
+      - ../../config/config.ini:/app/config/config.ini:ro
+      - ${VULNAGENT_DATA_DIR:-../../data/offline}:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5000/health && curl -fsS http://127.0.0.1:8001/docs >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

@@ -1,5 +1,6 @@
 import configparser
 import os
+from pathlib import Path
 
 
 class LLMRoutingConfigError(ValueError):
@@ -9,12 +10,17 @@ class LLMRoutingConfigError(ValueError):
 class Config:
     LLM_ROUTING_SECTION = "LLM_ROUTING"
     DEFAULT_MODEL_KEY = "default_model"
+    ENV_CONFIG_PATH = "VULNAGENT_CONFIG"
 
     def __init__(self, config_path: str | None = None) -> None:
         if config_path:
             self.config_path = config_path
         else:
-            self.config_path = os.path.join(os.path.dirname(__file__), "config.ini")
+            env_config_path = os.environ.get(self.ENV_CONFIG_PATH)
+            if env_config_path:
+                self.config_path = str(Path(env_config_path).expanduser())
+            else:
+                self.config_path = os.path.join(os.path.dirname(__file__), "config.ini")
 
         self.read_config()
 
