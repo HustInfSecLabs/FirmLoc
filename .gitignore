@@ -2,6 +2,7 @@ __pycache__
 *.log
 history/
 images/
+agent/IDAService/ida_output/
 .worktrees/
 
 # 临时工作文件
