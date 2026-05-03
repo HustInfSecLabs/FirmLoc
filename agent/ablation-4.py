@@ -45,12 +45,12 @@ class Case:
 
 
 CASES: List[Case] = [
-    Case(chat_id="paper-3.16",
-        history_root=r"D:\HUSTCourse\402\chenyi_zhu\VulnAgent-new\VulnAgent\history",
+    Case(chat_id="xx",
+        history_root=r"xx",
         binary_filename="CVE-2022-36480cstecgi",
         post_binary_filename = "CVE-2022-36480cstecgi1",
-        pre_c=r"D:\HUSTCourse\402\chenyi_zhu\VulnAgent-new\VulnAgent\history\paper-3.16\ida\CVE-2022-36480cstecgi\CVE-2022-36480cstecgi.cgi_pseudo.c",
-        post_c=r"D:\HUSTCourse\402\chenyi_zhu\VulnAgent-new\VulnAgent\history\paper-3.16\ida\CVE-2022-36480cstecgi\CVE-2022-36480cstecgi1.cgi_pseudo.c",
+        pre_c=r"xx",
+        post_c=r"xx",
         cve_details="TOTOLINK N350RT V9.3.5u.6139_B20201216 was discovered to contain a command injection vulnerability via the command parameter",
         cwe="CWE-78"),
 ]

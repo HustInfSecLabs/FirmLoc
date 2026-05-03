@@ -57,7 +57,7 @@ if not os.path.exists("images"):
 app.mount("/static/images", StaticFiles(directory="images"), name="static")
 
 path = config_manager.config["result.path"]["savedir"]
-SHARED_DATA_DIRNAME = "HustAgentData"
+SHARED_DATA_DIRNAME = "AgentData"
 VULNAGENT_AGENT_ID = "vulnagent"
 init_db()
 
@@ -396,7 +396,7 @@ def _normalize_platform_source(source: Optional[str]) -> str:
 
 
 def _shared_data_root() -> Path:
-    shared_root_override = os.getenv("HUSTAGENT_DATA_ROOT")
+    shared_root_override = os.getenv("AGENT_DATA_ROOT")
     if shared_root_override:
         return Path(shared_root_override).expanduser().resolve()
 

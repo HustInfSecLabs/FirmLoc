@@ -11,7 +11,7 @@ mkdir -p \
   "$(dirname "$CONFIG_PATH")" \
   "${IDA_OUTPUT_ROOT:-/data/ida_output}" \
   "${IDA_LOG_DIR:-/data/ida_logs}" \
-  "${VULNAGENT_DATA_ROOT:-/data/HustAgentData}" \
+  "${VULNAGENT_DATA_ROOT:-/data/AgentData}" \
   "$APP_ROOT/images" \
   "$APP_ROOT/log"
 

@@ -9,7 +9,7 @@ CLICK_BUTTONS = {
     "double_click": ["--repeat", "2", "--delay", "10", "1"],
 }
 
-HOME = "/home/wzh/Desktop/Project/VulnAgent/"  # 截图保存的路径, 请根据需要修改 username
+HOME = "VulnAgent/"  # 截图保存的路径, 请根据需要修改 username
 DIFF_FILE = "~/Desktop/Project/VulnAgent/test/"              
 # "/path/to/stack_overflow_demo.export"  # 请替换为实际的文件路径
 IMAGE_DIR = "/images/"

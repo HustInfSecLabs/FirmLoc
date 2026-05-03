@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     IDA_OUTPUT_ROOT=/data/ida_output \
     IDA_LOG_DIR=/data/ida_logs \
     VULNAGENT_CONFIG=/app/config/config.ini \
-    VULNAGENT_DATA_ROOT=/data/HustAgentData
+    VULNAGENT_DATA_ROOT=/data/AgentData
 
 WORKDIR /app
 
@@ -71,7 +71,7 @@ COPY .delivery_tmp/idapro /root/.idapro
 COPY .delivery_tmp/bindiff /opt/bindiff
 COPY . .
 
-RUN mkdir -p /data/ida_output /data/ida_logs /data/HustAgentData \
+RUN mkdir -p /data/ida_output /data/ida_logs /data/AgentData \
     && /opt/ida/idapyswitch --force-path /usr/local/lib/libpython3.10.so.1.0 \
     && chmod +x /app/docker/offline/entrypoint.sh \
     && chmod +x /opt/bindiff/bin/bindiff /opt/bindiff/bin/binexport2dump

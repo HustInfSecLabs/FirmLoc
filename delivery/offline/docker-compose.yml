@@ -10,7 +10,7 @@ services:
       VULNAGENT_PORT: 8001
       IDA_SERVICE_PORT: 5000
       VULNAGENT_CONFIG: /app/config/config.ini
-      VULNAGENT_DATA_ROOT: /data/HustAgentData
+      VULNAGENT_DATA_ROOT: /data/AgentData
       IDA_OUTPUT_ROOT: /data/ida_output
       IDA_LOG_DIR: /data/ida_logs
       VULNAGENT_DATABASE_URL: ${VULNAGENT_DATABASE_URL:-}

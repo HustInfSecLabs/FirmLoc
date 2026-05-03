@@ -19,8 +19,8 @@ source "$ENV_FILE"
 set +a
 
 IMAGE_NAME="${VULNAGENT_IMAGE:-vulnagent-offline:latest}"
-LOCAL_IDA_SOURCE="${LOCAL_IDA_SOURCE:-/home/wzh/Desktop/tools/IDA}"
-LOCAL_IDA_HOME="${LOCAL_IDA_HOME:-/home/wzh/.idapro}"
+LOCAL_IDA_SOURCE="${LOCAL_IDA_SOURCE:-/Desktop/tools/IDA}"
+LOCAL_IDA_HOME="${LOCAL_IDA_HOME:-/.idapro}"
 LOCAL_BINDIFF_SOURCE="${LOCAL_BINDIFF_SOURCE:-/opt/bindiff}"
 
 if [ ! -d "$LOCAL_IDA_SOURCE" ]; then

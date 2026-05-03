@@ -66,7 +66,7 @@ class BinwalkAgent(Agent):
 
             tool_content = [
                 {
-                    "user": "wzh@ubuntu:~$",
+                    "user": "xxx@ubuntu:~$",
                     "input": ' '.join(extract_cmd),
                     "output": None
                 }

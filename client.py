@@ -20,8 +20,8 @@ DEFAULT_INITIAL_PROMPT = os.getenv(
 )
 
 FIRMWARE_PATHS = [
-    os.getenv("FIRMWARE_PATH1", "/home/wzh/Desktop/DSL-AC3100_v1.10.06_build591.w"),
-    os.getenv("FIRMWARE_PATH2", "/home/wzh/Desktop/DSL-AC3100_v1.10.08_build593.w"),
+    os.getenv("FIRMWARE_PATH1", "/DSL-AC3100_v1.10.06_build591.w"),
+    os.getenv("FIRMWARE_PATH2", "/DSL-AC3100_v1.10.08_build593.w"),
 ]
 
 CHAT_ID = str(os.getenv("CHAT_ID") or random.randint(100000, 999999))

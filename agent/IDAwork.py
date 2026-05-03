@@ -118,7 +118,7 @@ def export_and_extract(work_dir, output_dir=None):
 # ============================================
 
 if __name__ == "__main__":
-    c_files = export_and_extract(work_dir=r"D:/HUSTCourse/402/chenyi_zhu/TestCase/firmware")
+    c_files = export_and_extract(work_dir=r"firmware")
     print("\n==== 导出的伪C文件列表 ====")
     for name, path in c_files:
         print(f"{name}: {path}")
