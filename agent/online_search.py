@@ -1,6 +1,5 @@
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 from .base import Agent
 from model import ChatModel
 from log import logger
@@ -10,7 +9,8 @@ from requests import RequestException
 import json
 import configparser
 import time
-from utils import ConfigManager
+import re
+from html import unescape
 
 
 class NVDConnectivityError(Exception):
@@ -61,15 +61,14 @@ class OnlineSearchAgent(Agent):
         self.request_delay = 6  # 秒
         # 默认搜索最近5年的CVE，可配置
         self.default_years_back = 5
-
-    def _task_root_from_config(self, task_id: str, config: ConfigManager) -> Path:
-        config_file = Path(config.config_path).expanduser().resolve()
-        if config_file.parent.name != task_id:
-            raise ValueError(f"配置路径与任务ID不匹配: {config_file}")
-        return config_file.parent
-
-    def _online_search_work_dir(self, task_root: Path) -> Path:
-        return task_root / 'online_search'
+        self.enable_reference_fetch = False
+        self.enable_reference_llm = False
+        self.reference_max_count = 5
+        self.reference_timeout = 12
+        self.reference_max_bytes = 200000
+        self.reference_user_agent = "VulnAgent/1.0"
+        self.reference_llm_max_chars = 12000
+        self.reference_llm_context_window = 1200
 
     def _empty_search_results(self) -> dict:
         return {
@@ -157,6 +156,8 @@ class OnlineSearchAgent(Agent):
             try:
                 date_str = vuln.get("cve", {}).get("published", "")
                 if date_str:
+                    # 解析ISO 8601格式的日期
+                    from datetime import datetime
                     return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                 return datetime.min
             except Exception:
@@ -167,7 +168,7 @@ class OnlineSearchAgent(Agent):
         
     def process(self, task_id: str, vendor: str = None, model: str = None,
                 version: str = None, cve_id: str = None, cwe_id: str = None,
-                work_mode: str = "reproduction", config: Optional[ConfigManager] = None) -> dict:
+                work_mode: str = "reproduction", run_root: str = None) -> dict:
         """
         处理搜索请求
 
@@ -180,23 +181,23 @@ class OnlineSearchAgent(Agent):
             cwe_id: CWE编号（漏洞挖掘模式）
             work_mode: 工作模式 - "reproduction" 或 "discovery"
         """
-        if config is None:
+        if not run_root:
             return {
                 'status': 'error',
-                'message': '未提供配置，无法定位任务目录'
+                'message': '缺少必要参数: run_root'
             }
 
         # 漏洞复现模式：直接根据cve_id搜索CVE
         if work_mode == "reproduction" and cve_id:
-            return self._process_cve_search(task_id, cve_id, config)
+            return self._process_cve_search(task_id, cve_id, run_root=run_root)
 
         # 漏洞挖掘模式：根据CWE类型和厂商搜索历史同类型CVE
         if work_mode == "discovery" and cwe_id:
-            return self._process_cwe_discovery_search(task_id, cwe_id, config, vendor, model)
+            return self._process_cwe_discovery_search(task_id, cwe_id, vendor, model, run_root=run_root)
 
         # 兼容旧逻辑：根据设备厂商、型号、版本搜索相关的CVE
         if vendor:
-            return self._process_device_search(task_id, vendor, config, model, version)
+            return self._process_device_search(task_id, vendor, model, version, run_root=run_root)
 
         return {
             'status': 'error',
@@ -204,7 +205,8 @@ class OnlineSearchAgent(Agent):
         }
     
     def _process_cwe_discovery_search(self, task_id: str, cwe_id: str,
-                                       config: ConfigManager, vendor: str = None, model: str = None) -> dict:
+                                       vendor: str = None, model: str = None,
+                                       run_root: str = None) -> dict:
         """
         漏洞挖掘模式：根据CWE类型搜索历史同类型CVE作为参考
 
@@ -214,8 +216,8 @@ class OnlineSearchAgent(Agent):
         3. 如果结果不足，逐步扩展时间范围
         4. 返回相关的CVE作为漏洞挖掘参考
         """
-        task_root = self._task_root_from_config(task_id, config)
-        work_dir = self._online_search_work_dir(task_root)
+        base_root = Path(run_root)
+        work_dir = base_root / 'online_search'
         os.makedirs(work_dir, exist_ok=True)
 
         logger.info(f"漏洞挖掘搜索: CWE={cwe_id}, vendor={vendor}, model={model}")
@@ -432,16 +434,16 @@ class OnlineSearchAgent(Agent):
         # 没有时间范围限制，直接搜索
         params = {
             'cweId': cwe_id,
-            'resultsPerPage': min(max_results or 100, 100)
+            'resultsPerPage': min(max_results, 100)
         }
 
         return self._request_nvd(params, f"CWE={cwe_id}")
 
     
     # 直接搜索特定CVE-ID的详细信息
-    def _process_cve_search(self, task_id: str, cve_id: str, config: ConfigManager):
-        task_root = self._task_root_from_config(task_id, config)
-        work_dir = self._online_search_work_dir(task_root)
+    def _process_cve_search(self, task_id: str, cve_id: str, run_root: str = None):
+        base_root = Path(run_root)
+        work_dir = base_root / 'online_search'
         os.makedirs(work_dir, exist_ok=True)
         
         try:
@@ -476,9 +478,9 @@ class OnlineSearchAgent(Agent):
             return error_result
     
     # 根据厂商、型号、版本搜索相关CVE
-    def _process_device_search(self, task_id: str, vendor: str, config: ConfigManager, model: str = None, version: str = None):
-        task_root = self._task_root_from_config(task_id, config)
-        work_dir = self._online_search_work_dir(task_root)
+    def _process_device_search(self, task_id: str, vendor: str, model: str = None, version: str = None, run_root: str = None):
+        base_root = Path(run_root)
+        work_dir = base_root / 'online_search'
         os.makedirs(work_dir, exist_ok=True)
 
         try:
@@ -655,6 +657,70 @@ class OnlineSearchAgent(Agent):
 
         return all_results
     
+    def _sanitize_cve_description_for_analysis(self, text: str) -> str:
+        if not text:
+            return ""
+
+        sanitized = text
+        sanitized = re.sub(r"\bsub_[0-9A-Fa-f]{4,}\b", "[FUNC]", sanitized)
+
+        protected_tokens = {
+            "api", "cve", "cwe", "http", "https", "rce", "dos", "xss", "csrf", "sql", "xml", "json",
+            "get", "post", "put", "delete", "patch", "head", "options", "connect", "trace",
+            "function", "functions", "vulnerability", "vulnerable", "overflow", "buffer", "stack", "heap",
+            "request", "response", "endpoint", "parameter", "parameters", "authentication", "authorization",
+            "command", "injection", "path", "directory", "memory", "read", "write", "null", "pointer",
+            "integer", "format", "string", "deserialization", "ssrf", "xxe", "uaf", "race", "condition",
+            "linux", "windows", "android", "ios", "firmware", "router", "server", "client", "kernel",
+        }
+
+        def should_mask_symbol(symbol: str) -> bool:
+            lower = symbol.lower()
+            if lower in protected_tokens:
+                return False
+            if lower.startswith("cve") or lower.startswith("cwe"):
+                return False
+            if len(symbol) <= 2:
+                return False
+            return True
+
+        def mask_call_style(match: re.Match) -> str:
+            symbol = match.group(1)
+            if should_mask_symbol(symbol):
+                return "[FUNC]("
+            return match.group(0)
+
+        sanitized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(", mask_call_style, sanitized)
+
+        def mask_context_symbol(match: re.Match) -> str:
+            prefix = match.group(1)
+            symbol = match.group(2)
+            if should_mask_symbol(symbol):
+                return f"{prefix} [FUNC]"
+            return match.group(0)
+
+        sanitized = re.sub(
+            r"\b(function|functions|in|calls?|called|invokes?|triggered by)\s+([A-Za-z_][A-Za-z0-9_]{2,})\b",
+            mask_context_symbol,
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+
+        sanitized = re.sub(r"\[FUNC\](?:\s*\[FUNC\])+", "[FUNC]", sanitized)
+        sanitized = re.sub(r"\s{2,}", " ", sanitized).strip()
+        return sanitized
+
+    def _sanitize_cve_descriptions(self, descriptions):
+        sanitized_descriptions = []
+        for desc in descriptions or []:
+            if not isinstance(desc, dict):
+                continue
+            value = desc.get("value", "")
+            sanitized_desc = dict(desc)
+            sanitized_desc["value"] = self._sanitize_cve_description_for_analysis(value)
+            sanitized_descriptions.append(sanitized_desc)
+        return sanitized_descriptions
+
     def _process_search_results(self, search_results):
         processed_results = {
             "totalResults": search_results.get("totalResults", 0),
@@ -669,11 +735,11 @@ class OnlineSearchAgent(Agent):
                     "sourceIdentifier": cve_data.get("sourceIdentifier", ""),
                     "published": cve_data.get("published", ""),
                     "lastModified": cve_data.get("lastModified", ""),
-                    "descriptions": cve_data.get("descriptions", []),
+                    "descriptions": self._sanitize_cve_descriptions(cve_data.get("descriptions", [])),
                     "metrics": self._process_metrics(cve_data.get("metrics", {})),
                     "weaknesses": self._process_weaknesses(cve_data.get("weaknesses", [])),
                     "configurations": self._process_configurations(cve_data.get("configurations", [])),
-                    "references": self._process_references(cve_data.get("references", []))
+                    "references": self._process_references(cve_data.get("references", []), cve_data.get("id", ""))
                 }
             }
             processed_results["vulnerabilities"].append(processed_cve)
@@ -766,20 +832,299 @@ class OnlineSearchAgent(Agent):
         
         return cpe_list
     
-    def _process_references(self, references):
+    def _process_references(self, references, cve_id: str = ""):
         processed_references = []
-        
+        seen = set()
+
         for ref in references:
+            url = ref.get("url", "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
             processed_references.append({
-                "url": ref.get("url", ""),
+                "url": url,
                 "tags": ref.get("tags", [])
             })
-        
+
+        if self.enable_reference_fetch and processed_references:
+            summaries = self._fetch_reference_summaries([r["url"] for r in processed_references], cve_id)
+            for item in processed_references:
+                summary = summaries.get(item["url"])
+                if summary:
+                    item["summary"] = summary
+
         return processed_references
+
+    def _fetch_reference_summaries(self, urls, cve_id: str = ""):
+        summaries = {}
+        if not urls:
+            return summaries
+
+        limited_urls = urls[: self.reference_max_count]
+        headers = {
+            "User-Agent": self.reference_user_agent,
+            "Accept": "text/html, text/plain;q=0.9, */*;q=0.5",
+        }
+
+        for url in limited_urls:
+            if not url.startswith("http://") and not url.startswith("https://"):
+                continue
+            try:
+                response = requests.get(url, headers=headers, timeout=(6, self.reference_timeout), stream=True)
+                if response.status_code != 200:
+                    summaries[url] = {"error": f"HTTP {response.status_code}"}
+                    continue
+
+                content_type = response.headers.get("Content-Type", "")
+                if "text/" not in content_type.lower() and "html" not in content_type.lower():
+                    summaries[url] = {"error": f"Unsupported content-type: {content_type}"}
+                    continue
+                raw_bytes = response.raw.read(self.reference_max_bytes, decode_content=True)
+                text = raw_bytes.decode(response.encoding or "utf-8", errors="replace")
+                summary = self._extract_reference_summary(text, content_type, cve_id)
+                if summary:
+                    summaries[url] = summary
+            except requests.exceptions.Timeout:
+                # Timeout should not interrupt the pipeline; skip this reference.
+                continue
+            except Exception as exc:
+                summaries[url] = {"error": str(exc)}
+            finally:
+                time.sleep(1)
+
+        return summaries
+
+    def _build_llm_context(self, text: str, cve_id: str) -> str:
+        if not text:
+            return ""
+        if not cve_id:
+            return text[: self.reference_llm_max_chars]
+
+        lower = text.lower()
+        cve_lower = cve_id.lower()
+        hits = [m.start() for m in re.finditer(re.escape(cve_lower), lower)]
+        if not hits:
+            return text[: self.reference_llm_max_chars]
+
+        chunks = []
+        for idx in hits:
+            start = max(0, idx - self.reference_llm_context_window)
+            end = min(len(text), idx + self.reference_llm_context_window)
+            chunks.append(text[start:end])
+        merged = "\n---\n".join(chunks)
+        return merged[: self.reference_llm_max_chars]
+
+    def _summarize_reference_with_llm(self, text: str, cve_id: str, links=None):
+        if not self.chat_model or not text or not cve_id:
+            return None
+        links = links or []
+        context = self._build_llm_context(text, cve_id)
+        if not context:
+            return None
+
+        prompt = (
+            "Extract only information about the target CVE from the reference content. "
+            "Ignore other CVEs and site boilerplate. "
+            "Return JSON only.\n\n"
+            f"Target CVE: {cve_id}\n"
+            f"Known links: {links}\n\n"
+            "Content:\n"
+            f"{context}\n\n"
+            "JSON schema:\n"
+            "{\n"
+            '  "relevant": true|false,\n'
+            '  "summary": "short plain summary",\n'
+            '  "endpoints": ["..."],\n'
+            '  "parameters": ["..."],\n'
+            '  "root_cause": "string",\n'
+            '  "impact": "string",\n'
+            '  "prerequisites": "string",\n'
+            '  "poc_links": ["..."],\n'
+            '  "quotes": ["verbatim sentences about the target CVE"]\n'
+            "}\n"
+        )
+        try:
+            response = self.chat_model.chat(prompt)
+        except Exception:
+            return None
+
+        if not response:
+            return None
+
+        match = re.search(r"\{.*\}", response, flags=re.DOTALL)
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+        if not data or not data.get("relevant", True):
+            return None
+        return data
+
+    def _extract_reference_summary(self, text: str, content_type: str, cve_id: str = ""):
+        if not text:
+            return None
+
+        title = ""
+        raw_html = text
+        links = []
+        is_html = "html" in content_type.lower()
+        if is_html:
+            match = re.search(r"<title[^>]*>(.*?)</title>", raw_html, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                title = unescape(re.sub(r"\s+", " ", match.group(1)).strip())
+            links = re.findall(r'href=["\'](.*?)["\']', raw_html, flags=re.IGNORECASE)
+            # Very lightweight HTML to text with paragraph boundaries.
+            text = re.sub(r"(?is)<script.*?>.*?</script>", " ", raw_html)
+            text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+            text = re.sub(r"(?is)</?(p|br|li|h1|h2|h3|h4|h5|h6|div|section|article)[^>]*>", "\n", text)
+            text = re.sub(r"(?is)<[^>]+>", " ", text)
+            text = unescape(text)
+
+        cleaned = re.sub(r"[ \t\r]+", " ", text)
+        cleaned = re.sub(r"\n{2,}", "\n", cleaned).strip()
+        if not cleaned:
+            return None
+
+        llm_data = None
+        if self.enable_reference_llm:
+            llm_data = self._summarize_reference_with_llm(cleaned, cve_id, links)
+
+        # Extract useful signals.
+        cve_pattern = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+        all_cves = sorted({m.upper() for m in cve_pattern.findall(cleaned)})
+
+        poc_links = []
+        for link in links:
+            if not link.startswith("http://") and not link.startswith("https://"):
+                continue
+            lower = link.lower()
+            if "poc" in lower or "exploit" in lower:
+                poc_links.append(link)
+        poc_links = list(dict.fromkeys(poc_links))
+
+        # Heuristic highlights: score sentences by keyword density, filter boilerplate.
+        keywords = [
+            "exploit", "poc", "vulnerability", "overflow", "rce", "dos", "patch", "fixed",
+            "buffer", "stack", "endpoint", "parameter", "authenticated", "post request",
+            "command injection"
+        ]
+        if cve_id:
+            keywords.insert(0, cve_id.lower())
+
+        bad_phrases = [
+            "home blog tags", "previous post", "next post", "back to top",
+            "share post", "subscribe", "cookie", "privacy policy", "all rights reserved"
+        ]
+
+        paragraphs = [p.strip() for p in cleaned.split("\n") if p.strip()]
+        focused_paragraphs = []
+        if cve_id:
+            cve_lower = cve_id.lower()
+            cve_hits = [i for i, p in enumerate(paragraphs) if cve_lower in p.lower()]
+            for idx in cve_hits:
+                for j in range(max(0, idx - 2), min(len(paragraphs), idx + 3)):
+                    focused_paragraphs.append(paragraphs[j])
+        if not focused_paragraphs:
+            for p in paragraphs:
+                lower = p.lower()
+                if any(k in lower for k in ["vulnerability", "overflow", "endpoint", "parameter", "exploit", "poc"]):
+                    focused_paragraphs.append(p)
+
+        candidate_text = "\n".join(dict.fromkeys(focused_paragraphs)) if focused_paragraphs else cleaned
+        extraction_text = candidate_text if cve_id else cleaned
+
+        endpoint_candidates = sorted({m for m in re.findall(r"/[A-Za-z0-9_\-/]+", extraction_text) if len(m) > 3})
+        endpoint_candidates = [
+            e for e in endpoint_candidates
+            if not e.startswith("/tags")
+            and not e.startswith("/about")
+            and re.search(r"[A-Za-z]", e)
+        ]
+
+        param_matches = re.findall(r"(?:parameter|param|field)\s+(?:is\s+|set\s+to\s+)?([A-Za-z0-9_-]{2,})", extraction_text, re.IGNORECASE)
+        value_param_matches = re.findall(r"parameter\s+is\s+set\s+to\s+([A-Za-z0-9_-]{2,})", extraction_text, re.IGNORECASE)
+        post_param_matches = re.findall(r"(?:post\s+)?parameters?\s+([A-Za-z0-9_-]{2,})(?:\s+and\s+([A-Za-z0-9_-]{2,}))?", extraction_text, re.IGNORECASE)
+        post_param_values = []
+        for first, second in post_param_matches:
+            post_param_values.append(first)
+            if second:
+                post_param_values.append(second)
+        parameters = sorted({p for p in param_matches + value_param_matches + post_param_values})
+
+        sentences = [s.strip() for s in re.split(r"(?<=[\.!\?])\s+", candidate_text) if s.strip()]
+        scored = []
+        seen = set()
+        for sentence in sentences:
+            lower = sentence.lower()
+            if any(bad in lower for bad in bad_phrases):
+                continue
+            if len(sentence) > 480:
+                continue
+            score = 0
+            score += sum(2 for k in keywords if k in lower)
+            if cve_id and cve_id.lower() in lower:
+                score += 3
+            if any(ep in sentence for ep in endpoint_candidates):
+                score += 2
+            if "post" in lower or "get" in lower:
+                score += 1
+            if score <= 0:
+                continue
+            key = lower[:200]
+            if key in seen:
+                continue
+            seen.add(key)
+            scored.append((score, sentence))
+
+        scored.sort(key=lambda x: (-x[0], len(x[1])))
+        picked = [s for _, s in scored[:4]]
+        if not picked:
+            picked = [cleaned.split("\n", 1)[0][:360]]
+
+        if cve_id:
+            picked = [s for s in picked if cve_id.lower() in s.lower()] or picked
+
+        if cve_id:
+            cve_lower = cve_id.lower()
+            cve_links = [l for l in poc_links if cve_lower in l.lower()]
+            if cve_links:
+                poc_links = cve_links
+
+        if llm_data:
+            llm_endpoints = [e for e in (llm_data.get("endpoints") or []) if isinstance(e, str)]
+            llm_parameters = [p for p in (llm_data.get("parameters") or []) if isinstance(p, str)]
+            llm_poc_links = [l for l in (llm_data.get("poc_links") or []) if isinstance(l, str)]
+            llm_quotes = [q for q in (llm_data.get("quotes") or []) if isinstance(q, str)]
+            llm_summary = llm_data.get("summary") or ""
+            highlights = llm_quotes or ([llm_summary] if llm_summary else picked)
+
+            return {
+                "title": title,
+                "summary": llm_summary,
+                "root_cause": llm_data.get("root_cause", ""),
+                "impact": llm_data.get("impact", ""),
+                "prerequisites": llm_data.get("prerequisites", ""),
+                "highlights": highlights[:4],
+                "endpoints": (llm_endpoints or endpoint_candidates)[:6],
+                "parameters": (llm_parameters or parameters)[:6],
+                "poc_links": (llm_poc_links or poc_links)[:3],
+                "other_cves": [c for c in all_cves if not cve_id or c != cve_id.upper()][:6]
+            }
+
+        return {
+            "title": title,
+            "highlights": picked,
+            "endpoints": endpoint_candidates[:6],
+            "parameters": parameters[:6],
+            "poc_links": poc_links[:3],
+            "other_cves": [c for c in all_cves if not cve_id or c != cve_id.upper()][:6]
+        }
     
     def _update_status_ini(self, work_dir, vendor=None, model=None, version=None, result=None, cve_id=None, cwe_id=None):
         """更新状态文件
-
+        
         Args:
             work_dir: 工作目录
             vendor: 厂商
@@ -790,8 +1135,7 @@ class OnlineSearchAgent(Agent):
             cwe_id: CWE编号（漏洞挖掘模式）
         """
         status_file = work_dir / 'status.ini'
-        result = result or {}
-
+        
         config = configparser.ConfigParser()
         if os.path.exists(status_file):
             config.read(status_file)
@@ -840,15 +1184,9 @@ class OnlineSearchAgent(Agent):
         with open(status_file, 'w') as f:
             config.write(f)
     
-    def get_result(self, task_id: str, vendor=None, model=None, version=None, cve_id=None, config: Optional[ConfigManager] = None) -> dict:
-        if config is None:
-            return {
-                'status': 'unknown',
-                'message': '未提供配置，无法定位任务目录'
-            }
-
-        task_root = self._task_root_from_config(task_id, config)
-        work_dir = self._online_search_work_dir(task_root)
+    def get_result(self, task_id: str, vendor=None, model=None, version=None, cve_id=None, run_root: str = None) -> dict:
+        base_root = Path(run_root)
+        work_dir = base_root / 'online_search'
         status_file = work_dir / 'status.ini'
         
         if not os.path.exists(status_file):
@@ -857,42 +1195,42 @@ class OnlineSearchAgent(Agent):
                 'message': f'未找到任务 {task_id} 的处理结果'
             }
         
-        status_parser = configparser.ConfigParser()
-        status_parser.read(status_file)
-
-        if status_parser.has_section('input'):
-            search_mode = status_parser.get('input', 'search_mode', fallback='device')
-
+        config = configparser.ConfigParser()
+        config.read(status_file)
+        
+        if config.has_section('input'):
+            search_mode = config.get('input', 'search_mode', fallback='device')
+            
             # CVE-ID
-            if search_mode == 'cve_id' and cve_id and status_parser.get('input', 'cve_id', fallback='') == cve_id:
+            if search_mode == 'cve_id' and cve_id and config.get('input', 'cve_id', fallback='') == cve_id:
                 specific_result = {}
-                if status_parser.has_section('output'):
-                    specific_result.update({key: value for key, value in status_parser['output'].items()})
+                if config.has_section('output'):
+                    specific_result.update({key: value for key, value in config['output'].items()})
                 specific_result.update({'cve_id': cve_id})
                 return specific_result
-
+            
             # 设备-厂商-型号-版本号
             if search_mode == 'device' and vendor and model and version:
                 section_name = f"{vendor}_{model}_{version}"
-                if status_parser.has_section(section_name):
-                    return {key: value for key, value in status_parser[section_name].items()}
-
+                if config.has_section(section_name):
+                    return {key: value for key, value in config[section_name].items()}
+        
         result = {}
-
+        
         # [agent]
-        if status_parser.has_section('agent'):
-            result['agent'] = {key: value for key, value in status_parser['agent'].items()}
-
+        if config.has_section('agent'):
+            result['agent'] = {key: value for key, value in config['agent'].items()}
+        
         # [input]
-        if status_parser.has_section('input'):
-            result['input'] = {key: value for key, value in status_parser['input'].items()}
-
+        if config.has_section('input'):
+            result['input'] = {key: value for key, value in config['input'].items()}
+        
         # [output]
-        if status_parser.has_section('output'):
-            result['output'] = {key: value for key, value in status_parser['output'].items()}
-
-            if status_parser.has_option('output', 'search_result_path'):
-                search_result_path = status_parser.get('output', 'search_result_path')
+        if config.has_section('output'):
+            result['output'] = {key: value for key, value in config['output'].items()}
+            
+            if config.has_option('output', 'search_result_path'):
+                search_result_path = config.get('output', 'search_result_path')
                 if os.path.exists(search_result_path):
                     with open(search_result_path, 'r', encoding='utf-8') as f:
                         result['search_result'] = json.load(f)

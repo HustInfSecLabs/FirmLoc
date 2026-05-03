@@ -13,6 +13,7 @@ from pathlib import Path
 
 from langchain.tools import BaseTool
 from langchain.callbacks.manager import CallbackManagerForToolRun, AsyncCallbackManagerForToolRun
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from log import logger
@@ -45,12 +46,31 @@ class DataFlowInput(BaseModel):
     version: str = Field(default="pre", description="Which version to analyze: 'pre' or 'post'")
 
 
+class SinkSliceInput(BaseModel):
+    function_name: str = Field(description="The name of the function containing the sink")
+    sink_expression: Optional[str] = Field(default=None, description="Concrete sink expression such as strcpy(v38, a2)")
+    sink_name: Optional[str] = Field(default=None, description="Sink function name such as strcpy or system")
+    sink_line_hint: Optional[str] = Field(default=None, description="Optional location hint for the sink")
+    variable_name: Optional[str] = Field(default=None, description="Optional focus variable related to the sink")
+    emit_slice_code: bool = Field(default=False, description="Whether to emit a conservative sliced code snippet")
+    version: str = Field(default="pre", description="Which version to analyze: 'pre' or 'post'")
+
+
 class AnalysisResultInput(BaseModel):
     """提交分析结果的输入参数"""
     vulnerability_found: str = Field(description="Whether a vulnerability was found: 'Yes' or 'No'")
+    scenario_match: str = Field(default="Unknown", description="Whether the vulnerable scenario exists in the before version: 'Yes' or 'No'")
+    property_match: str = Field(default="Unknown", description="Whether the after version removes the scenario/property: 'Yes', 'No', or 'Partial'")
     vulnerability_type: str = Field(default="Unknown", description="The CWE type of the vulnerability (e.g., 'CWE-78')")
     severity: str = Field(default="Unknown", description="Severity level: 'High', 'Medium', 'Low', or 'None'")
+    vulnerable_code_location: str = Field(default="Not analyzed", description="Where the vulnerable operation exists in the current function")
+    attack_vector: str = Field(default="See reasoning for details", description="How this issue could be exploited")
+    impact: str = Field(default="Unknown", description="What is the potential impact")
     is_fixed: str = Field(default="Unknown", description="Whether the vulnerability is fixed in the patched version: 'Yes', 'No', or 'Partial'")
+    data_flow_trace: str = Field(default="Not analyzed", description="Concrete `->` propagation chain for the current function using exact names where possible; prefer the longest evidence-supported chain and avoid vague summaries")
+    dangerous_operations: str = Field(default="Not analyzed", description="Dangerous operations found in the current function")
+    input_sources: str = Field(default="Not analyzed", description="Where controllable input enters the current function")
+    confidence: str = Field(default="Low", description="Function-level analysis confidence: 'High', 'Medium', or 'Low'")
     root_cause: str = Field(default="Not analyzed", description="Detailed explanation of the vulnerability's root cause")
     fix_description: str = Field(default="Not analyzed", description="How the patch addresses the vulnerability")
     reason: List[str] = Field(default_factory=list, description="List of detailed reasoning points supporting the conclusion")
@@ -168,10 +188,10 @@ class PseudoCodeIndex:
 class VulnToolContext:
     """
     漏洞分析工具的上下文管理器
-    
+
     管理伪代码索引、IDA服务连接等共享资源
     """
-    
+
     def __init__(
         self,
         pre_pseudo_file: str,
@@ -179,7 +199,8 @@ class VulnToolContext:
         pre_binary_name: str,
         post_binary_name: str,
         ida_service_url: str = "http://10.12.189.21:5000",
-        history_dir: Optional[str] = None
+        history_dir: Optional[str] = None,
+        llm: Optional[Any] = None
     ):
         """
         初始化工具上下文
@@ -198,7 +219,7 @@ class VulnToolContext:
         self.post_binary_name = post_binary_name
         self.ida_service_url = ida_service_url
         self.history_dir = history_dir
-        
+        self.llm = llm  # 用于 LLM-based 数据流分析
         # 构建伪代码索引
         self.pre_index = PseudoCodeIndex(pre_pseudo_file) if pre_pseudo_file else None
         self.post_index = PseudoCodeIndex(post_pseudo_file) if post_pseudo_file else None
@@ -208,6 +229,9 @@ class VulnToolContext:
         
         # 推理链记录
         self.reasoning_chain: List[Dict[str, Any]] = []
+        self.current_function_name: str = ""
+        self.current_cve_details: str = ""
+        self.current_cwe_id: str = ""
     
     def get_index(self, version: str) -> Optional[PseudoCodeIndex]:
         """获取指定版本的伪代码索引"""
@@ -242,6 +266,33 @@ class VulnToolContext:
 _tool_context: Optional[VulnToolContext] = None
 
 
+def _extract_json_payload(raw_value: Any) -> Optional[Dict[str, Any]]:
+    """Best-effort extract a JSON object from a raw tool input string."""
+    if raw_value is None:
+        return None
+    text = raw_value if isinstance(raw_value, str) else str(raw_value)
+    stripped = text.strip()
+    candidates: List[str] = []
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end > start:
+        candidate = stripped[start:end + 1]
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def set_tool_context(context: VulnToolContext):
     """设置全局工具上下文"""
     global _tool_context
@@ -260,17 +311,37 @@ def _normalize_tool_inputs(
     depth: Optional[int] = None
 ):
     """兼容解析被错误包裹为 JSON 字符串的工具输入"""
-    if isinstance(function_name, str):
-        stripped = function_name.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
+    payload = _extract_json_payload(function_name)
+    if payload:
+        function_name = payload.get("function_name", function_name)
+        variable_name = payload.get("variable_name", variable_name)
+        version = payload.get("version", version)
+        depth = payload.get("depth", depth)
+
+    function_name = str(function_name or "").strip()
+    if function_name in {"", "{}", "null", "none"}:
+        function_name = ""
+
+    if variable_name is not None:
+        variable_name = str(variable_name).strip() or None
+
+    if version is not None:
+        version = str(version).strip().lower()
+        if version not in {"pre", "post"}:
+            version = None
+
+    if depth is not None:
+        if isinstance(depth, str):
+            stripped_depth = depth.strip()
             try:
-                payload = json.loads(stripped)
-                function_name = payload.get("function_name", function_name)
-                variable_name = payload.get("variable_name", variable_name)
-                version = payload.get("version", version)
-                depth = payload.get("depth", depth)
-            except json.JSONDecodeError:
-                pass
+                depth = int(stripped_depth)
+            except ValueError:
+                depth = None
+        else:
+            try:
+                depth = int(depth)
+            except (TypeError, ValueError):
+                depth = None
 
     return function_name, version, variable_name, depth
 
@@ -300,6 +371,8 @@ Input should be a JSON with:
         """同步执行"""
         function_name, version, _, _ = _normalize_tool_inputs(function_name, version=version)
         version = version or "pre"
+        if not function_name:
+            return "Error: Missing required field 'function_name'"
         context = get_tool_context()
         if not context:
             return "Error: Tool context not initialized"
@@ -363,6 +436,8 @@ Input should be a JSON with:
         )
         version = version or "pre"
         depth = depth or 2
+        if not function_name:
+            return "Error: Missing required field 'function_name'"
         context = get_tool_context()
         if not context:
             return "Error: Tool context not initialized"
@@ -470,6 +545,8 @@ Input should be a JSON with:
         )
         version = version or "pre"
         depth = depth or 2
+        if not function_name:
+            return "Error: Missing required field 'function_name'"
         context = get_tool_context()
         if not context:
             return "Error: Tool context not initialized"
@@ -562,23 +639,99 @@ Input should be a JSON with:
         return self._run(function_name, depth, version)
 
 
+_DATA_FLOW_PROMPT = """You are a binary vulnerability analyst. Analyze the data flow of the following IDA-decompiled pseudo-C function.
+
+Function name: {function_name}
+Version: {version}
+{variable_focus}
+
+Function code:
+```c
+{code}
+```
+
+Analyze and report:
+1. **Parameter roles**: For each function parameter, identify its semantic role:
+   - Is it an output buffer (written to)?
+   - Is it an input source (read from, potentially attacker-controlled)?
+   - Is it a size/length limit?
+   - Is it a flag/mode?
+
+2. **Data flow paths**: Trace how data flows through the function:
+   - What are the sources of data (parameters, global vars, return values from calls)?
+   - What are the sinks (where data is written, passed to other functions, or used in operations)?
+   - Are there any bounds checks? If so, are they correct?
+   - Build the longest concrete propagation chains you can support from the code using `->`
+   - Use exact names for functions, parameters, locals, globals, structure fields, pointer offsets, and sink calls whenever available
+   - Do NOT collapse concrete chains into vague summaries like "memory operations" or "index calculations"
+   - If only part of the chain is known, keep the concrete partial chain instead of inventing unsupported hops
+
+3. **Potential attack surface**: Based on the parameter roles and data flow:
+   - Which parameters could carry attacker-controlled data?
+   - Does attacker-controlled data reach any dangerous operations without proper validation?
+   - Are there any logic bugs in bounds checking (e.g., wrong counter used for bounds check)?
+
+{variable_section}
+
+Be specific about variable names and line-level observations. Do not speculate beyond what the code shows."""
+
+
+_SINK_SLICE_PROMPT = """You are a static-analysis assistant specialized in sink-anchored backward slicing for vulnerability analysis.
+
+Analyze ONE specified sink inside ONE decompiled pseudo-C function.
+
+Function name: {function_name}
+Version: {version}
+Target sink expression: {sink_expression}
+Target sink name: {sink_name}
+Optional sink line hint: {sink_line_hint}
+Optional focus variable: {variable_name}
+
+Function code:
+```c
+{code}
+```
+
+Rules:
+1. Treat the specified sink as the only slicing anchor.
+2. Work backward from the sink and keep only data/control dependencies relevant to that sink.
+3. Use exact local names and exact conditions when available.
+4. Ignore unrelated sinks and unrelated branches.
+5. If the full source is not visible inside this function, stop at the parameter/local boundary and state the cross-function gap explicitly.
+6. Be conservative: over-approximation is acceptable; missing required dependencies is not.
+
+Output ONLY valid JSON in this format:
+{{
+  "sink": "...",
+  "sink_kind": "...",
+  "tracked_vars": ["..."],
+  "source_candidates": ["..."],
+  "control_dependencies": ["..."],
+  "local_data_flow_trace": "...",
+  "slice_summary": "...",
+  "cross_function_gap": "...",
+  "next_recommended_actions": ["..."],
+  "confidence": "High/Medium/Low"{slice_code_clause}
+}}"""
+
+
 class GetDataFlowTool(BaseTool):
-    """获取数据流分析的工具"""
-    
+    """获取数据流分析的工具（LLM-based）"""
     name: str = "get_data_flow"
-    description: str = """Get data flow analysis for a specific function or variable.
+    description: str = """Get LLM-based semantic data flow analysis for a specific function or variable.
 
 Use this tool when you need to:
-- Trace where a variable's value comes from
-- Determine if a value is user-controllable
-- Understand how data propagates through the function
+- Understand the semantic role of each function parameter (input buffer, output buffer, size limit, etc.)
+- Trace how data flows through the function from sources to sinks
+- Determine if attacker-controlled data can reach dangerous operations
+- Identify logic bugs in bounds checking or validation
+- Recover concrete propagation chains that can later be copied into `data_flow_trace`
 
 Input should be a JSON with:
 - function_name: The name of the function to analyze
-- variable_name: (Optional) specific variable to trace
+- variable_name: (Optional) specific variable to focus the analysis on
 - version: 'pre' or 'post', default is 'pre'"""
     args_schema: Type[BaseModel] = DataFlowInput
-    
     def _run(
         self,
         function_name: str,
@@ -586,123 +739,55 @@ Input should be a JSON with:
         version: str = "pre",
         run_manager: Optional[CallbackManagerForToolRun] = None
     ) -> str:
-        """同步执行"""
         function_name, version, variable_name, _ = _normalize_tool_inputs(
-            function_name,
-            version=version,
-            variable_name=variable_name
+            function_name, version=version, variable_name=variable_name
         )
         version = version or "pre"
+        if not function_name:
+            return "Error: Missing required field 'function_name'"
         context = get_tool_context()
         if not context:
             return "Error: Tool context not initialized"
-        
         index = context.get_index(version)
         if not index:
             return f"Error: No pseudo-code index available for version '{version}'"
-        
         code = index.get_function(function_name)
         if not code:
             return f"Function '{function_name}' not found in {version} version"
-        
-        # 执行简单的数据流分析
-        analysis = self._analyze_data_flow(code, variable_name)
-        
-        result = f"[Data Flow Analysis: {function_name}] ({version} version)\n"
-        
-        if variable_name:
-            result += f"Target variable: {variable_name}\n\n"
-        
-        # 输入源
-        if analysis['input_sources']:
-            result += "📥 Input Sources:\n"
-            for src in analysis['input_sources']:
-                result += f"  - {src}\n"
-        
-        # 危险操作
-        if analysis['dangerous_sinks']:
-            result += "\n⚠️ Dangerous Sinks:\n"
-            for sink in analysis['dangerous_sinks']:
-                result += f"  - {sink}\n"
-        
-        # 变量定义
-        if variable_name and analysis['variable_defs']:
-            result += f"\n📝 Definitions of '{variable_name}':\n"
-            for defn in analysis['variable_defs']:
-                result += f"  - {defn}\n"
-        
-        # 变量使用
-        if variable_name and analysis['variable_uses']:
-            result += f"\n📖 Uses of '{variable_name}':\n"
-            for use in analysis['variable_uses']:
-                result += f"  - {use}\n"
-        
+
+        if not context.llm:
+            return f"Error: LLM not available in tool context for data flow analysis of '{function_name}'"
+
+        variable_focus = f"Focus variable: {variable_name}" if variable_name else ""
+        variable_section = (
+            f"\n4. **Variable trace for '{variable_name}'**: Track every assignment to and use of "
+            f"'{variable_name}', and determine whether its value can be influenced by external input."
+            if variable_name else ""
+        )
+
+        prompt = _DATA_FLOW_PROMPT.format(
+            function_name=function_name,
+            version=version,
+            code=code[:6000],  # 截断过长代码
+            variable_focus=variable_focus,
+            variable_section=variable_section,
+        )
+
+        try:
+            from langchain.schema import HumanMessage
+            response = context.llm.invoke([HumanMessage(content=prompt)])
+            analysis_text = response.content if hasattr(response, "content") else str(response)
+        except Exception as e:
+            logger.error(f"LLM data flow analysis failed for {function_name}: {e}")
+            return f"Data flow analysis failed for '{function_name}': {e}"
+
+        result = f"[Data Flow Analysis: {function_name}] ({version} version)\n{analysis_text}"
         context.add_reasoning_step(
             self.name,
             {"function_name": function_name, "variable_name": variable_name, "version": version},
             result
         )
-        
         return result
-    
-    def _analyze_data_flow(
-        self, 
-        code: str, 
-        target_var: Optional[str] = None
-    ) -> Dict[str, List[str]]:
-        """分析代码的数据流"""
-        
-        # 输入源模式
-        input_patterns = {
-            'HTTP Input': re.compile(r'\b(websGet|http_header|HTTP_|getenv|nvram_get|cgi_get)\s*\(', re.I),
-            'Network Input': re.compile(r'\b(recv|read|recvfrom|socket_read)\s*\(', re.I),
-            'File Input': re.compile(r'\b(fopen|fread|fgets|fscanf)\s*\(', re.I),
-            'User Input': re.compile(r'\b(gets|scanf|getchar)\s*\(', re.I),
-        }
-        
-        # 危险操作模式
-        sink_patterns = {
-            'Command Execution': re.compile(r'\b(system|popen|execl|execv|execve)\s*\(', re.I),
-            'Buffer Operation': re.compile(r'\b(strcpy|strncpy|sprintf|memcpy|strcat)\s*\(', re.I),
-            'Format String': re.compile(r'\b(printf|fprintf|sprintf|snprintf)\s*\([^,]+,\s*[a-zA-Z_]', re.I),
-        }
-        
-        result = {
-            'input_sources': [],
-            'dangerous_sinks': [],
-            'variable_defs': [],
-            'variable_uses': []
-        }
-        
-        lines = code.split('\n')
-        
-        for line in lines:
-            line_stripped = line.strip()
-            
-            # 检查输入源
-            for source_type, pattern in input_patterns.items():
-                if pattern.search(line_stripped):
-                    result['input_sources'].append(f"[{source_type}] {line_stripped[:80]}")
-            
-            # 检查危险操作
-            for sink_type, pattern in sink_patterns.items():
-                if pattern.search(line_stripped):
-                    result['dangerous_sinks'].append(f"[{sink_type}] {line_stripped[:80]}")
-            
-            # 如果指定了目标变量，追踪其定义和使用
-            if target_var:
-                # 变量定义（赋值左侧）
-                def_pattern = re.compile(rf'\b{re.escape(target_var)}\s*=')
-                if def_pattern.search(line_stripped):
-                    result['variable_defs'].append(line_stripped[:80])
-                
-                # 变量使用（非赋值左侧）
-                use_pattern = re.compile(rf'\b{re.escape(target_var)}\b')
-                if use_pattern.search(line_stripped) and not def_pattern.search(line_stripped):
-                    result['variable_uses'].append(line_stripped[:80])
-        
-        return result
-    
     async def _arun(
         self,
         function_name: str,
@@ -710,8 +795,137 @@ Input should be a JSON with:
         version: str = "pre",
         run_manager: Optional[AsyncCallbackManagerForToolRun] = None
     ) -> str:
-        """异步执行"""
         return self._run(function_name, variable_name, version)
+
+
+class GetSinkSliceTool(BaseTool):
+    """Sink-anchored backward slicing tool."""
+
+    name: str = "get_sink_slice"
+    description: str = """Get a sink-anchored backward slice for one suspicious sink in the current function.
+
+Use this tool after get_data_flow has identified a concrete suspicious sink.
+
+Input should be a JSON with:
+- function_name: current function name
+- sink_expression: concrete sink expression when available
+- sink_name: sink API name such as strcpy/system/memcpy
+- sink_line_hint: optional location hint
+- variable_name: optional focus variable
+- emit_slice_code: optional bool, default false
+- version: 'pre' or 'post', default is 'pre'
+
+Output: JSON describing tracked vars, local data-flow trace, control dependencies, and cross-function gaps."""
+    args_schema: Type[BaseModel] = SinkSliceInput
+
+    def _run(
+        self,
+        function_name: str,
+        sink_expression: Optional[str] = None,
+        sink_name: Optional[str] = None,
+        sink_line_hint: Optional[str] = None,
+        variable_name: Optional[str] = None,
+        emit_slice_code: bool = False,
+        version: str = "pre",
+        run_manager: Optional[CallbackManagerForToolRun] = None
+    ) -> str:
+        payload = _extract_json_payload(function_name)
+        if payload:
+            function_name = payload.get("function_name", function_name)
+            sink_expression = payload.get("sink_expression", sink_expression)
+            sink_name = payload.get("sink_name", sink_name)
+            sink_line_hint = payload.get("sink_line_hint", sink_line_hint)
+            variable_name = payload.get("variable_name", variable_name)
+            emit_slice_code = payload.get("emit_slice_code", emit_slice_code)
+            version = payload.get("version", version)
+
+        function_name, version, variable_name, _ = _normalize_tool_inputs(
+            function_name, version=version, variable_name=variable_name
+        )
+        if isinstance(emit_slice_code, str):
+            emit_slice_code = str(emit_slice_code).strip().lower() in {"1", "true", "yes", "y"}
+        version = version or "pre"
+        if not function_name:
+            return "Error: Missing required field 'function_name'"
+        if not (sink_expression or sink_name):
+            return "Error: At least one of 'sink_expression' or 'sink_name' is required"
+
+        context = get_tool_context()
+        if not context:
+            return "Error: Tool context not initialized"
+
+        index = context.get_index(version)
+        if not index:
+            return f"Error: No pseudo-code index available for version '{version}'"
+
+        code = index.get_function(function_name)
+        if not code:
+            return f"Function '{function_name}' not found in {version} version"
+
+        if not context.llm:
+            return f"Error: LLM not available in tool context for sink slicing of '{function_name}'"
+
+        sink_expression = str(sink_expression or "").strip() or "Not provided"
+        sink_name = str(sink_name or "").strip() or "Not provided"
+        sink_line_hint = str(sink_line_hint or "").strip() or "Not provided"
+        variable_name = variable_name or "Not provided"
+        slice_code_clause = ',\n  "slice_code": "..."' if emit_slice_code else ""
+
+        prompt = _SINK_SLICE_PROMPT.format(
+            function_name=function_name,
+            version=version,
+            sink_expression=sink_expression,
+            sink_name=sink_name,
+            sink_line_hint=sink_line_hint,
+            variable_name=variable_name,
+            code=code[:6000],
+            slice_code_clause=slice_code_clause,
+        )
+
+        try:
+            from langchain.schema import HumanMessage
+            response = context.llm.invoke([HumanMessage(content=prompt)])
+            analysis_text = response.content if hasattr(response, "content") else str(response)
+        except Exception as e:
+            logger.error(f"LLM sink slicing failed for {function_name}: {e}")
+            return f"Sink slicing failed for '{function_name}': {e}"
+
+        result = f"[Sink Slice: {function_name}] ({version} version)\n{analysis_text}"
+        context.add_reasoning_step(
+            self.name,
+            {
+                "function_name": function_name,
+                "sink_expression": sink_expression,
+                "sink_name": sink_name,
+                "sink_line_hint": sink_line_hint,
+                "variable_name": variable_name,
+                "emit_slice_code": emit_slice_code,
+                "version": version,
+            },
+            result
+        )
+        return result
+
+    async def _arun(
+        self,
+        function_name: str,
+        sink_expression: Optional[str] = None,
+        sink_name: Optional[str] = None,
+        sink_line_hint: Optional[str] = None,
+        variable_name: Optional[str] = None,
+        emit_slice_code: bool = False,
+        version: str = "pre",
+        run_manager: Optional[AsyncCallbackManagerForToolRun] = None
+    ) -> str:
+        return self._run(
+            function_name=function_name,
+            sink_expression=sink_expression,
+            sink_name=sink_name,
+            sink_line_hint=sink_line_hint,
+            variable_name=variable_name,
+            emit_slice_code=emit_slice_code,
+            version=version
+        )
 
 
 class SubmitAnalysisTool(BaseTool):
@@ -724,9 +938,21 @@ Use this tool ONLY when you have gathered sufficient information to make a confi
 
 Input should be a JSON with:
 - vulnerability_found: 'Yes' or 'No'
+- scenario_match: 'Yes' or 'No'
+- property_match: 'Yes', 'No', or 'Partial'
 - vulnerability_type: CWE ID (e.g., 'CWE-78')
+- If the observed evidence more strongly matches a different bug class than the requested CWE, set scenario_match to 'No' instead of forcing the requested CWE
 - severity: 'High', 'Medium', 'Low', or 'None'
+- vulnerable_code_location: where the vulnerable operation exists in the current function
+- attack_vector: how exploitation would occur
+- impact: potential impact
 - is_fixed: 'Yes', 'No', or 'Partial'
+- data_flow_trace: key current-function data flow paths identified, written as a concrete `->` propagation chain with exact names where possible
+- If `get_sink_slice` was used, prefer its `local_data_flow_trace` as the core of `data_flow_trace`
+- Only prepend caller-side provenance when it is directly supported by `get_callers` / `get_function_body` observations
+- dangerous_operations: dangerous operations found in the current function
+- input_sources: where controllable input enters the current function
+- confidence: function-level confidence: 'High', 'Medium', or 'Low'
 - root_cause: Detailed explanation of the vulnerability's root cause
 - fix_description: How the patch addresses the vulnerability
 - reason: List of reasoning points supporting your conclusion"""
@@ -736,9 +962,18 @@ Input should be a JSON with:
     def _run(
         self,
         vulnerability_found: Optional[str] = None,
+        scenario_match: Optional[str] = None,
+        property_match: Optional[str] = None,
         vulnerability_type: Optional[str] = None,
         severity: Optional[str] = None,
+        vulnerable_code_location: Optional[str] = None,
+        attack_vector: Optional[str] = None,
+        impact: Optional[str] = None,
         is_fixed: Optional[str] = None,
+        data_flow_trace: Optional[str] = None,
+        dangerous_operations: Optional[str] = None,
+        input_sources: Optional[str] = None,
+        confidence: Optional[str] = None,
         root_cause: Optional[str] = None,
         fix_description: Optional[str] = None,
         reason: Optional[List[str]] = None,
@@ -751,64 +986,113 @@ Input should be a JSON with:
             if stripped.startswith("{") and stripped.endswith("}"):
                 try:
                     payload = json.loads(stripped)
+                    vulnerability_details = payload.get("vulnerability_details") or {}
+                    fix_analysis = payload.get("fix_analysis") or {}
+                    evidence = payload.get("evidence") or {}
                     vulnerability_found = payload.get("vulnerability_found")
+                    scenario_match = payload.get("scenario_match")
+                    property_match = payload.get("property_match")
                     vulnerability_type = payload.get("vulnerability_type")
                     severity = payload.get("severity")
-                    is_fixed = payload.get("is_fixed")
-                    root_cause = payload.get("root_cause")
-                    fix_description = payload.get("fix_description")
+                    vulnerable_code_location = payload.get("vulnerable_code_location")
+                    attack_vector = payload.get("attack_vector") or vulnerability_details.get("attack_vector")
+                    impact = payload.get("impact") or vulnerability_details.get("impact")
+                    is_fixed = payload.get("is_fixed") or fix_analysis.get("is_fixed")
+                    data_flow_trace = payload.get("data_flow_trace") or evidence.get("data_flow_trace")
+                    dangerous_operations = payload.get("dangerous_operations") or evidence.get("dangerous_operations")
+                    input_sources = payload.get("input_sources") or evidence.get("input_sources")
+                    confidence = payload.get("confidence")
+                    root_cause = payload.get("root_cause") or vulnerability_details.get("root_cause")
+                    fix_description = payload.get("fix_description") or fix_analysis.get("fix_description")
                     reason = payload.get("reason")
                 except json.JSONDecodeError:
                     pass
         elif isinstance(vulnerability_found, dict):
             payload = vulnerability_found
+            vulnerability_details = payload.get("vulnerability_details") or {}
+            fix_analysis = payload.get("fix_analysis") or {}
+            evidence = payload.get("evidence") or {}
             vulnerability_found = payload.get("vulnerability_found")
+            scenario_match = payload.get("scenario_match")
+            property_match = payload.get("property_match")
             vulnerability_type = payload.get("vulnerability_type")
             severity = payload.get("severity")
-            is_fixed = payload.get("is_fixed")
-            root_cause = payload.get("root_cause")
-            fix_description = payload.get("fix_description")
+            vulnerable_code_location = payload.get("vulnerable_code_location")
+            attack_vector = payload.get("attack_vector") or vulnerability_details.get("attack_vector")
+            impact = payload.get("impact") or vulnerability_details.get("impact")
+            is_fixed = payload.get("is_fixed") or fix_analysis.get("is_fixed")
+            data_flow_trace = payload.get("data_flow_trace") or evidence.get("data_flow_trace")
+            dangerous_operations = payload.get("dangerous_operations") or evidence.get("dangerous_operations")
+            input_sources = payload.get("input_sources") or evidence.get("input_sources")
+            confidence = payload.get("confidence")
+            root_cause = payload.get("root_cause") or vulnerability_details.get("root_cause")
+            fix_description = payload.get("fix_description") or fix_analysis.get("fix_description")
             reason = payload.get("reason")
 
         vulnerability_found = vulnerability_found or "Unknown"
+        is_fixed = is_fixed or "Unknown"
+        scenario_match = scenario_match or ("Yes" if vulnerability_found == "Yes" else "No")
+        property_match = property_match or ("Yes" if is_fixed == "Yes" else "No")
         vulnerability_type = vulnerability_type or "Unknown"
         severity = severity or "Unknown"
-        is_fixed = is_fixed or "Unknown"
+        vulnerable_code_location = vulnerable_code_location or "Not analyzed"
+        attack_vector = attack_vector or "See reasoning for details"
+        impact = impact or (f"{severity} severity impact" if severity != "Unknown" else "Not analyzed")
+        data_flow_trace = data_flow_trace or "Not analyzed"
+        dangerous_operations = dangerous_operations or "Not analyzed"
+        input_sources = input_sources or "Not analyzed"
+        confidence = confidence or "Low"
         root_cause = root_cause or "Not analyzed"
         fix_description = fix_description or "Not analyzed"
         reason = reason or []
 
         context = get_tool_context()
-        
-        # 构建结果 JSON
+
+        # 构建结果 JSON（CVE_Attribution 由 post-processing 填充）
         result = {
             "vulnerability_found": vulnerability_found,
-            "scenario_match": "Yes" if vulnerability_found == "Yes" else "No",
-            "property_match": "Yes" if is_fixed == "Yes" else "No",
-            "Scenario_match & Property_match": "Yes" if (vulnerability_found == "Yes" and is_fixed == "Yes") else "No",
+            "scenario_match": scenario_match,
+            "property_match": property_match,
+            "Scenario_match & Property_match": "Yes" if (scenario_match == "Yes" and property_match == "Yes") else "No",
             "vulnerability_type": vulnerability_type,
             "severity": severity,
+            "vulnerable_code_location": vulnerable_code_location,
             "vulnerability_details": {
                 "root_cause": root_cause,
-                "attack_vector": "See reasoning for details",
-                "impact": f"{severity} severity impact"
+                "attack_vector": attack_vector,
+                "impact": impact
             },
             "fix_analysis": {
                 "is_fixed": is_fixed,
                 "fix_description": fix_description
             },
+            "evidence": {
+                "data_flow_trace": data_flow_trace,
+                "dangerous_operations": dangerous_operations,
+                "input_sources": input_sources
+            },
+            "confidence": confidence,
             "reason": reason,
-            "reasoning_chain": context.get_reasoning_summary() if context else "N/A"
+            "reasoning_chain": context.get_reasoning_summary() if context else "N/A",
         }
-        
+
         return json.dumps(result, indent=2, ensure_ascii=False)
     
     async def _arun(
         self,
         vulnerability_found: Optional[str] = None,
+        scenario_match: Optional[str] = None,
+        property_match: Optional[str] = None,
         vulnerability_type: Optional[str] = None,
         severity: Optional[str] = None,
+        vulnerable_code_location: Optional[str] = None,
+        attack_vector: Optional[str] = None,
+        impact: Optional[str] = None,
         is_fixed: Optional[str] = None,
+        data_flow_trace: Optional[str] = None,
+        dangerous_operations: Optional[str] = None,
+        input_sources: Optional[str] = None,
+        confidence: Optional[str] = None,
         root_cause: Optional[str] = None,
         fix_description: Optional[str] = None,
         reason: Optional[List[str]] = None,
@@ -818,9 +1102,18 @@ Input should be a JSON with:
         """异步执行"""
         return self._run(
             vulnerability_found=vulnerability_found,
+            scenario_match=scenario_match,
+            property_match=property_match,
             vulnerability_type=vulnerability_type,
             severity=severity,
+            vulnerable_code_location=vulnerable_code_location,
+            attack_vector=attack_vector,
+            impact=impact,
             is_fixed=is_fixed,
+            data_flow_trace=data_flow_trace,
+            dangerous_operations=dangerous_operations,
+            input_sources=input_sources,
+            confidence=confidence,
             root_cause=root_cause,
             fix_description=fix_description,
             reason=reason,
@@ -844,6 +1137,7 @@ def create_vuln_tools(context: VulnToolContext) -> List[BaseTool]:
         GetCallersTool(),
         GetCalleesTool(),
         GetDataFlowTool(),
+        GetSinkSliceTool(),
         SubmitAnalysisTool()
     ]
 
@@ -858,5 +1152,6 @@ __all__ = [
     'GetCallersTool',
     'GetCalleesTool',
     'GetDataFlowTool',
+    'GetSinkSliceTool',
     'SubmitAnalysisTool'
 ]

@@ -4,32 +4,47 @@ import os, sys, zipfile
 import subprocess
 import shutil
 import logging
+import configparser
 from datetime import datetime
-import pyautogui
 import time
-import json
-import re
+import psutil, json
 
 # Flask服务端口
 port = 5000
 
-# 配置 PYTHONHOME 和 PYTHONPATH 环境变量
-PYTHONHOME = r"C:\Users\WangZihao\AppData\Local\Programs\Python\Python313"
-PYTHONPATH = r"C:\Users\WangZihao\AppData\Local\Programs\Python\Python313\Lib;C:\Users\WangZihao\AppData\Local\Programs\Python\Python313\DLLs"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_CONFIG_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "..", "config", "config.ini"))
 
-# 配置ida、idat路径
-IDA32_PATH = r"C:\tools\IDA\ida.exe"  # ida32安装路径
-IDA64_PATH = r"C:\tools\IDA\ida.exe"  # ida64安装路径
-IDAT32_PATH = r"C:\tools\IDA\idat.exe"
-IDAT64_PATH = r"C:\tools\IDA\idat.exe"
+
+def _load_binary_tool_paths() -> dict:
+    parser = configparser.ConfigParser()
+    parser.read(PROJECT_CONFIG_PATH, encoding="utf-8")
+    section = "BINARY_TOOLS"
+    return {
+        "ida32_path": parser.get(section, "ida32_path", fallback="/home/ubuntu-24-04-4/linux_ida/ida"),
+        "ida64_path": parser.get(section, "ida64_path", fallback="/home/ubuntu-24-04-4/linux_ida/ida"),
+        "idat32_path": parser.get(section, "idat32_path", fallback="/home/ubuntu-24-04-4/linux_ida/idat"),
+        "idat64_path": parser.get(section, "idat64_path", fallback="/home/ubuntu-24-04-4/linux_ida/idat"),
+    }
+
+
+_BINARY_TOOL_PATHS = _load_binary_tool_paths()
+
+# 环境变量配置（Linux 优先）
+PYTHONHOME = os.environ.get("IDA_PYTHONHOME", "")
+PYTHONPATH = os.environ.get("IDA_PYTHONPATH", "")
+IDA32_PATH = _BINARY_TOOL_PATHS["ida32_path"]
+IDA64_PATH = _BINARY_TOOL_PATHS["ida64_path"]
+IDAT32_PATH = _BINARY_TOOL_PATHS["idat32_path"]
+IDAT64_PATH = _BINARY_TOOL_PATHS["idat64_path"]
 
 # 配置分析脚本路径, 确保绝对路径
-BINEXPORT_SCRIPT = os.path.abspath("export_binexport.py")
-EXPORT_SCRIPT = os.path.abspath("export_hexrays.py")
-EXPORT_STRINGS_SCRIPT = os.path.abspath("export_strings.py")
-ANALYZE_SCRIPT = os.path.abspath("analyze.py")
-WAIT_SCRIPT = os.path.abspath("wait_for_analysis.py")
-STRING_XREF_SCRIPT = os.path.abspath("string_xref_analysis.py")
+BINEXPORT_SCRIPT = os.path.join(BASE_DIR, "export_binexport.py")
+EXPORT_SCRIPT = os.path.join(BASE_DIR, "export_hexrays.py")
+EXPORT_STRINGS_SCRIPT = os.path.join(BASE_DIR, "export_strings.py")
+ANALYZE_SCRIPT = os.path.join(BASE_DIR, "analyze.py")
+WAIT_SCRIPT = os.path.join(BASE_DIR, "wait_for_analysis.py")
+STRING_XREF_SCRIPT = os.path.join(BASE_DIR, "string_xref_analysis.py")
 
 # 最大文件大小限制
 MAX_FILE_SIZE = 1024 * 1024 * 1024 * 5  # 5GB
@@ -38,6 +53,29 @@ TIMEOUT = 3000  # 50分钟超时
 # 导出伪C代码的等待检测时间
 max_wait_time = 30  # 最大等待时间（秒）
 check_interval = 0.5  # 检查间隔（秒）
+
+def clear_ida_cache(bin_path):
+    """
+    删除与bin_path相关的IDA缓存文件（如 .id0/.id1/.idb/.nam/.til 等）
+    支持扩展名为.so、.bin等的 ELF 文件。
+    """
+    patterns = [
+        bin_path + '.id0',
+        bin_path + '.id1',
+        bin_path + '.id2',
+        bin_path + '.nam',
+        bin_path + '.til',
+        bin_path + '.idb',
+        bin_path + '.i64',
+
+    ]
+    for file_path in patterns:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"[Cache Clean] Removed: {file_path}")
+        except Exception as e:
+            logger.warning(f"[Cache Clean] Failed to remove {file_path}: {str(e)}")
 
 # 配置日志记录
 def setup_logger():
@@ -50,7 +88,7 @@ def setup_logger():
     
     # 配置日志格式和级别
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(log_file),
@@ -75,175 +113,10 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 ida_output_dir = os.path.join(base_dir, "ida_output")
 os.makedirs(ida_output_dir, exist_ok=True)
    
-def take_screenshot(filename: str, stage="disassembly"):
-    """
-    获取当前屏幕截图并保存到日期目录
-    
-    参数:
-        stage (str): 截图阶段标识，可选值:
-            - "disassembly" (默认): 反汇编阶段
-            - "decompilation": 反编译阶段
-    
-    返回:
-        str: 截图文件路径，失败时返回None
-    """
-    try:
-        # 验证stage参数
-        if stage not in ["disassembly", "decompilation"]:
-            raise ValueError(f"Invalid stage value: {stage}. Must be 'disassembly' or 'decompilation'")
-        
-
-        # 创建日期格式的子目录
-        date_str = datetime.now().strftime('%Y%m%d')
-        screenshot_dir = os.path.join(ida_output_dir, date_str, "screenshots")
-        
-        # 确保目录存在
-        os.makedirs(screenshot_dir, exist_ok=True)
-        
-        # 生成带时间戳和阶段标识的文件名
-        timestamp = datetime.now().strftime('%H%M%S')
-        stage_marker = "asm" if stage == "disassembly" else "decomp"
-        screenshot_path = os.path.join(
-            screenshot_dir, 
-            f"{filename}_{stage_marker}_{timestamp}.png"
-        )
-        
-        # 获取屏幕截图
-        pyautogui.screenshot(screenshot_path)
-        logger.info(f"Saved {stage} screenshot to: {screenshot_path}")
-        return screenshot_path
-    except ValueError as ve:
-        logger.error(f"Invalid parameter: {str(ve)}")
-        return None
-    except Exception as e:
-        logger.error(f"Error taking screenshot: {str(e)}")
-        return None
-    
-
 @app.route('/reversing_analyze_screenshot', methods=['POST'])
 def analyze_with_screenshot():
-    """分析二进制文件并返回IDA屏幕截图"""
-    # 检查文件大小
-    if request.content_length > MAX_FILE_SIZE:
-        abort(413, "File too large (max 100MB)")
-    
-    # 获取IDA版本参数 (默认为ida32)
-    ida_version = request.form.get('ida_version', 'ida').lower()
-    if ida_version == 'ida64':
-        print("Using IDA64")
-        IDA_PATH = IDA64_PATH
-    else:
-        IDA_PATH = IDA32_PATH
-    
-    # 创建基于日期的目录
-    date_str = datetime.now().strftime('%Y%m%d')
-    analysis_dir = os.path.join(ida_output_dir, date_str)
-    os.makedirs(analysis_dir, exist_ok=True)
-    logger.info(f"Using analysis dir: {analysis_dir}")
-    
-    try:
-        # 保存上传文件
-        uploaded_file = request.files['file']
-        if not uploaded_file or uploaded_file.filename == '':
-            abort(400, "No valid file uploaded")
-        
-        # 保存文件到ida_output_dir下的当天日期目录
-        bin_path = os.path.join(analysis_dir, uploaded_file.filename)
-        uploaded_file.save(bin_path)
-        logger.info(f"File saved to: {bin_path}")
-        
-        # 运行IDA分析
-        marker_path = os.path.join(analysis_dir, "analysis_done.marker")
-        cmd = [
-            IDA_PATH,
-            '-A',  # 自动模式
-            f'-S"{WAIT_SCRIPT}"',
-            bin_path
-        ]
-        print(cmd)
-        
-        try:
-            # 启动IDA进程
-            env = {
-                "PATH": os.environ["PATH"],
-                "SYSTEMROOT": os.environ["SYSTEMROOT"],
-                "PYTHONHOME": PYTHONHOME,
-                "PYTHONPATH": PYTHONPATH,
-                "IDA_ANALYSIS_MARKER": marker_path
-            }
-            ida_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-            )
-            
-            # 等待IDA分析完成（检查marker文件）
-            logger.info("Waiting for IDA analysis to complete...")
-            start_wait = time.time()
-            analysis_completed = False
-            while time.time() - start_wait < 300:  # 最多等待5分钟
-                if os.path.exists(marker_path):
-                    analysis_completed = True
-                    break
-                if ida_process.poll() is not None:
-                    logger.error("IDA process exited unexpectedly")
-                    break
-                time.sleep(1)
-            
-            if not analysis_completed:
-                logger.warning("Analysis timeout or failed, proceeding with screenshots anyway")
-            else:
-                logger.info(f"Analysis completed in {time.time() - start_wait:.2f} seconds")
-            
-            # 获取反汇编的截图
-            screenshot_path_1 = take_screenshot(filename=uploaded_file.filename, stage="disassembly")
-            if not screenshot_path_1:
-                abort(500, "Failed to capture first screenshot")
-
-            # 模拟Tab键输入，进行反编译
-            pyautogui.press('tab')
-            time.sleep(1)
-            
-            # 获取反编译的截图
-            screenshot_path_2 = take_screenshot(filename=uploaded_file.filename, stage="decompilation")
-            if not screenshot_path_2:
-                abort(500, "Failed to capture second screenshot")
-            
-            # 终止IDA进程，否则终端会卡住
-            ida_process.terminate()
-            try:
-                ida_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                ida_process.kill()
-            
-            # 检查截图是否存在
-            if not (os.path.exists(screenshot_path_1) or not os.path.exists(screenshot_path_2)):
-                abort(500, "Screenshot files not generated")
-            
-            # 创建zip文件
-            zip_filename = os.path.join(analysis_dir, f"ida_screenshots_{uploaded_file.filename}.zip")
-            with zipfile.ZipFile(zip_filename, 'w') as zipf:
-                zipf.write(screenshot_path_1, os.path.basename(screenshot_path_1))
-                zipf.write(screenshot_path_2, os.path.basename(screenshot_path_2))
-            
-            # 返回zip文件
-            return send_file(
-                zip_filename,
-                as_attachment=True,
-                download_name=f"ida_screenshots_{uploaded_file.filename}.zip",
-                mimetype='application/zip'
-            )
-            
-        except subprocess.TimeoutExpired:
-            abort(408, "Analysis timeout")
-        except Exception as e:
-            logger.error(f"Error during IDA analysis: {str(e)}")
-            abort(500, f"IDA analysis error: {str(e)}")
-            
-    except Exception as e:
-        logger.error(f"Error during analysis: {str(e)}")
-        abort(500, f"Analysis error: {str(e)}")
+    """无界面模式下不支持截图接口"""
+    abort(410, "Screenshot endpoint is disabled in headless mode")
 
 
 @app.route('/export_binexport', methods=['POST'])
@@ -252,9 +125,10 @@ def analyze():
     try:
         # 获取请求参数
         binary_name = request.form.get('binary_name')
-        if not binary_name:
-            abort(400, "No binary name provided")
-        
+        binary_path = request.form.get('binary_path')
+        if not binary_name and not binary_path:
+            abort(400, "No binary name or binary path provided")
+
         # 获取IDA版本参数 (默认为ida32)
         ida_version = request.form.get('ida_version', 'ida').lower()
         if ida_version == 'ida64':
@@ -262,84 +136,120 @@ def analyze():
             IDAT_PATH = IDAT64_PATH
         else:
             IDAT_PATH = IDAT32_PATH
-        
+
         # 构建当天日期目录路径
         date_str = datetime.now().strftime('%Y%m%d')
         analysis_dir = os.path.join(ida_output_dir, date_str)
-        
-        # 检查目录是否存在
-        if not os.path.exists(analysis_dir):
-            abort(404, f"Analysis directory not found: {analysis_dir}")
-        
-        # 查找目标文件
-        bin_path = os.path.join(analysis_dir, binary_name)
-        if not bin_path:
-            abort(404, f"Binary file not found: {binary_name}")
-        
+
+        # 优先使用直接传入的二进制绝对路径；否则回退到历史目录模式
+        if binary_path:
+            bin_path = os.path.abspath(binary_path)
+            if not os.path.isfile(bin_path):
+                abort(404, f"Binary file not found: {bin_path}")
+        else:
+            if not os.path.exists(analysis_dir):
+                abort(404, f"Analysis directory not found: {analysis_dir}")
+            bin_path = os.path.join(analysis_dir, binary_name)
+            if not os.path.isfile(bin_path):
+                abort(404, f"Binary file not found: {binary_name}")
+
         logger.info(f"Found target file: {bin_path}")
-        
+
         # 运行IDA分析
         cmd = [
             IDAT_PATH,
             '-A',  # 自动模式
             '-T',  # 不显示界面
-            f'-S\"{BINEXPORT_SCRIPT}\"',  # 执行脚本
+            f'-S{BINEXPORT_SCRIPT}',  # 执行脚本
             bin_path
         ]
         logger.info(f"Executing: {' '.join(cmd)}")
-        
+
         try:
-            proc_env = os.environ.copy()
-            proc_env.update({
-                "PYTHONHOME": PYTHONHOME,
-                "PYTHONPATH": PYTHONPATH
-            })
+            '''
             result = subprocess.run(
                 cmd,
                 cwd=analysis_dir,  # 在工作目录执行
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=TIMEOUT,
-                env=proc_env,
+                env=os.environ.copy()
+            )'''
+            result = subprocess.run(
+                cmd,
+                cwd=os.path.dirname(bin_path),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=3600
             )
+
+            print("[DEBUG] CMD =", cmd)
+            print("[DEBUG] returncode =", result.returncode)
+            print("[DEBUG] stdout =", result.stdout)
+            print("[DEBUG] stderr =", result.stderr)
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"IDA subprocess failed.\n"
+                    f"cmd={cmd}\n"
+                    f"returncode={result.returncode}\n"
+                    f"stdout={result.stdout}\n"
+                    f"stderr={result.stderr}"
+                )
         except subprocess.TimeoutExpired:
             abort(408, "Analysis timeout")
-        
+
         # 检查执行结果
         if result.returncode != 0:
-            error_msg = result.stderr.decode().strip()
+            error_msg = (result.stderr or "").strip()
             logger.error(f"IDA Error (code {result.returncode}): {error_msg}")
             abort(500, f"IDA analysis failed: {error_msg}")
-        
+
         logger.info(f"Analysis completed successfully")
-        
-        # 获取生成文件（假设脚本生成同名的.BinExport文件）
+        # 获取生成文件（脚本生成同名 .BinExport，IDB/i64 可选）
         export_path = bin_path + '.BinExport'
-        if ida_version == 'ida64':
-            idb_path = bin_path + '.i64'
+
+        # 先保证 BinExport 一定存在
+        if not os.path.exists(export_path) or os.path.getsize(export_path) == 0:
+            logger.error(f"BinExport file missing or empty: {export_path}")
+            abort(500, f"BinExport file not generated or empty: {export_path}")
+
+        # 尝试同时兼容 .i64 / .idb，两者都没有也不报错，只 warning
+        idb_candidates = [bin_path + '.i64', bin_path + '.idb']
+        idb_path = None
+        for cand in idb_candidates:
+            if os.path.exists(cand) and os.path.getsize(cand) > 0:
+                idb_path = cand
+                break
+
+        if idb_path:
+            logger.info(f"Using IDB file: {idb_path}")
         else:
-            idb_path = bin_path + '.idb'
-        logger.info(f"Looking for export file: {export_path} and idb file: {idb_path}")
-        logger.info(f"Export file exists: {os.path.exists(export_path)}")
-        if not os.path.exists(export_path):
-            logger.error(f"Export file not found: {export_path} or {idb_path}")
-            abort(500, f"BinExport file not generated: {export_path}")
-        
-        # 创建zip文件
-        zip_filename = os.path.join(analysis_dir, f"ida_analysis_{binary_name}.zip")
+            logger.warning(f"IDB/i64 file not found for {bin_path}, continue without IDB")
+
+        # 创建 zip 文件（BinExport 必须打包，IDB 有就顺便打进去）
+        zip_base_dir = os.path.dirname(bin_path)
+        zip_stem = os.path.basename(bin_path)
+        zip_filename = os.path.join(zip_base_dir, f"ida_analysis_{zip_stem}.zip")
         with zipfile.ZipFile(zip_filename, 'w') as zipf:
             zipf.write(export_path, os.path.basename(export_path))
-            # zipf.write(idb_path, os.path.basename(idb_path))
+            if idb_path:
+                zipf.write(idb_path, os.path.basename(idb_path))
+
+        # 清理旧的IDA缓存文件
+        clear_ida_cache(bin_path)
 
         # 返回zip文件
         return send_file(
             zip_filename,
             as_attachment=True,
-            download_name=f"ida_analysis_{binary_name}.zip",
+            download_name=f"ida_analysis_{zip_stem}.zip",
             mimetype='application/zip'
         )
-        
-        
+
+
     except Exception as e:
         logger.error(f"Error during analysis: {str(e)}", exc_info=True)
         abort(500, f"Analysis error: {str(e)}")
@@ -359,8 +269,9 @@ def export_pseudo_c():
     try:
         # 获取请求参数
         binary_name = request.form.get('binary_name')
-        if not binary_name:
-            abort(400, "No binary name provided")
+        binary_path = request.form.get('binary_path')
+        if not binary_name and not binary_path:
+            abort(400, "No binary name or binary path provided")
 
         # 获取IDA版本参数 (默认为ida32)
         ida_version = request.form.get('ida_version', 'ida').lower()
@@ -373,13 +284,18 @@ def export_pseudo_c():
         # 构建当天日期目录路径
         date_str = datetime.now().strftime('%Y%m%d')
         analysis_dir = os.path.join(ida_output_dir, date_str)
-        source_output_dir = os.path.join(analysis_dir, "source")
-        os.makedirs(source_output_dir, exist_ok=True)
 
-        # 查找目标文件
-        bin_path = os.path.join(analysis_dir, binary_name)
-        if not bin_path:
-            abort(404, f"Binary file not found: {binary_name}")
+        # 优先使用直接传入的二进制绝对路径；否则回退到历史目录模式
+        if binary_path:
+            bin_path = os.path.abspath(binary_path)
+            if not os.path.isfile(bin_path):
+                abort(404, f"Binary file not found: {bin_path}")
+        else:
+            source_output_dir = os.path.join(analysis_dir, "source")
+            os.makedirs(source_output_dir, exist_ok=True)
+            bin_path = os.path.join(analysis_dir, binary_name)
+            if not os.path.isfile(bin_path):
+                abort(404, f"Binary file not found: {binary_name}")
 
         logger.info(f"Found target file: {bin_path}")
 
@@ -388,45 +304,59 @@ def export_pseudo_c():
             IDAT_PATH,
             '-A',  # 自动模式
             '-T',  # 不显示界面
-            f'-S\"{EXPORT_SCRIPT}\"',
+            f'-S{EXPORT_SCRIPT}',
             bin_path
         ]
         logger.info(f"Executing: {' '.join(cmd)}")
-        
+
         start_time = time.time()
         try:
             result = subprocess.run(
                 cmd,
-                # cwd=analysis_dir,  # 在工作目录执行
+                cwd=os.path.dirname(bin_path),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=TIMEOUT,
-                env={
-                    "PATH": os.environ["PATH"],
-                    "SYSTEMROOT": os.environ["SYSTEMROOT"],
-                    "PYTHONHOME": PYTHONHOME,
-                    "PYTHONPATH": PYTHONPATH
-                },
+                env=os.environ.copy()
             )
         except subprocess.TimeoutExpired:
             # abort(408, "Export pseudo C timeout")
             logger.warning("Export pseudo C timeout")
-        
+
         end_time = time.time()
-        
+
+        stdout_text = (result.stdout or "").strip()
+        stderr_text = (result.stderr or "").strip()
+        logger.info(f"[PseudoC] stdout for {binary_name}:\n{stdout_text}")
+        logger.info(f"[PseudoC] stderr for {binary_name}:\n{stderr_text}")
+
+        if result.returncode != 0:
+            logger.error(f"[PseudoC] IDA exited with code {result.returncode}")
+            abort(500, f"Pseudo C export failed: {stderr_text or stdout_text or 'unknown error'}")
+
+
         # 再次检查输出文件
-        output_filepath = os.path.join(analysis_dir, f"{binary_name}_pseudo.c")
-        if not os.path.exists(output_filepath):
-            abort(500, f"Pseudo C file not generated: {output_filepath}")
-        
-        pseudo_filepath = os.path.join(source_output_dir, f"{binary_name}_pseudo.c")
+        output_dir = os.path.dirname(bin_path)
+        output_basename = os.path.basename(bin_path)
+        output_filepath = os.path.join(output_dir, f"{output_basename}_pseudo.c")
+        if not os.path.exists(output_filepath) or os.path.getsize(output_filepath) == 0:
+            logger.error(f"Pseudo C file not found or empty: {output_filepath}")
+            abort(500, f"Pseudo C file not generated or empty: {output_filepath}")
+
+
+        source_output_dir = os.path.join(output_dir, "source")
+        os.makedirs(source_output_dir, exist_ok=True)
+        pseudo_filepath = os.path.join(source_output_dir, f"{output_basename}_pseudo.c")
         if os.path.exists(pseudo_filepath):
             os.remove(pseudo_filepath)
         shutil.move(output_filepath, source_output_dir)
-        
 
-        logger.info(f"{binary_name} Exported pseudo C completed, size: {convert_size(os.path.getsize(bin_path))}")
+
+        logger.info(f"{output_basename} Exported pseudo C completed, size: {convert_size(os.path.getsize(bin_path))}")
         logger.info(f"Export time: {end_time - start_time:.2f} seconds")
+
+        # 清理旧的IDA缓存文件
+        clear_ida_cache(bin_path)
 
         # 返回生成的伪C代码文件
         return send_file(
@@ -470,6 +400,7 @@ def get_function_call_info():
         bin_path = os.path.join(analysis_dir, binary_name)
         if not os.path.exists(bin_path):
             abort(404, f"Binary file not found: {binary_name}")
+            print("[DEBUG][get_function_call_info] binary_name=", binary_name)
 
         logger.info(f"Getting call info for function {function_name} in file {bin_path}")
         
@@ -490,11 +421,7 @@ def get_function_call_info():
             
             # 执行命令，通过环境变量传递函数名
             proc_env = os.environ.copy()
-            proc_env.update({
-                "PYTHONHOME": PYTHONHOME,
-                "PYTHONPATH": PYTHONPATH,
-                "IDA_FUNC_NAME": function_name  # 通过环境变量传递函数名
-            })
+            proc_env["IDA_FUNC_NAME"] = function_name  # 通过环境变量传递函数名
             
             logger.debug(f"Environment variables: IDA_FUNC_NAME={function_name}")
 
@@ -507,13 +434,13 @@ def get_function_call_info():
                 env=proc_env,
             )
             
-            stdout_text = result.stdout.decode(errors='ignore').strip()
-            stderr_text = result.stderr.decode(errors='ignore').strip()
+            stdout_text = (result.stdout or "").strip()
+            stderr_text = (result.stderr or "").strip()
 
             if stdout_text:
-                logger.debug(f"IDA stdout: {stdout_text}")
+                logger.info(f"IDA stdout: {stdout_text}")
             if stderr_text:
-                logger.debug(f"IDA stderr: {stderr_text}")
+                logger.info(f"IDA stderr: {stderr_text}")
 
             # 检查执行结果
             if result.returncode != 0:
@@ -533,8 +460,44 @@ def get_function_call_info():
                     json_files.append(os.path.join(analysis_dir, filename))
             
             if not json_files:
-                logger.error(f"Analysis result file not found for function {function_name}")
-                abort(500, "Analysis result file not found")
+                # Fallback: accept any slice/combined json if none specifically include the function name
+                for filename in os.listdir(analysis_dir):
+                    if not filename.endswith('.json'):
+                        continue
+                    if not (filename.startswith('ida_slice_') or filename.startswith('ida_combined_analysis_')):
+                        continue
+                    json_files.append(os.path.join(analysis_dir, filename))
+
+            if not json_files:
+                # Diagnostic logging to help debug missing files
+                try:
+                    files = os.listdir(analysis_dir)
+                except Exception as e:
+                    files = [f"(failed to list dir: {str(e)})"]
+                logger.error(f"Analysis result file not found for function {function_name}. Directory listing: {files}")
+                # Log any JSON snippets we can find
+                for fn in files:
+                    try:
+                        if isinstance(fn, str) and fn.endswith('.json'):
+                            p = os.path.join(analysis_dir, fn)
+                            if os.path.exists(p):
+                                with open(p, 'r', encoding='utf-8') as tf:
+                                    snippet = tf.read(1024)
+                                logger.error(f"JSON file snippet {fn}: {snippet}")
+                    except Exception:
+                        logger.exception(f"Failed to read json snippet: {fn}")
+
+                detail_msg = (
+                    f"Analysis result file not found.\n"
+                    f"function_name={function_name}\n"
+                    f"analysis_dir={analysis_dir}\n"
+                    f"candidates={json_files}\n"
+                    f"dir_listing={files}"
+                )
+
+                logger.error(detail_msg)
+                abort(500, detail_msg)
+
             
             # 使用最新的结果文件
             json_files.sort(key=os.path.getmtime, reverse=True)
@@ -586,7 +549,7 @@ def export_strings():
             IDAT_PATH,
             '-A',
             '-T',
-            f'-S"{EXPORT_STRINGS_SCRIPT}"',
+            f'-S{EXPORT_STRINGS_SCRIPT}',
             bin_path
         ]
 
@@ -610,7 +573,7 @@ def export_strings():
             abort(408, "Analysis timeout")
 
         if result.returncode != 0:
-            error_msg = result.stderr.decode(errors='ignore').strip()
+            error_msg = (result.stderr or "").strip()
             logger.error(f"IDA export_strings failed: {error_msg}")
             abort(500, f"IDA analysis failed: {error_msg}")
 
@@ -859,7 +822,7 @@ def export_call_graph():
             IDAT_PATH,
             '-A',
             '-T',
-            f'-S"{call_graph_script}"',
+            f'-S{call_graph_script}',
             bin_path
         ]
         
@@ -884,7 +847,7 @@ def export_call_graph():
             abort(408, "Call graph export timeout")
         
         if result.returncode != 0:
-            error_msg = result.stderr.decode(errors='ignore').strip()
+            error_msg = (result.stderr or "").strip()
             logger.error(f"Call graph export failed: {error_msg}")
             abort(500, f"Call graph export failed: {error_msg}")
         
@@ -955,7 +918,7 @@ def get_function_xrefs():
             IDAT_PATH,
             '-A',
             '-T',
-            f'-S"{xref_script}"',
+            f'-S{xref_script}',
             bin_path
         ]
         
@@ -974,7 +937,7 @@ def get_function_xrefs():
             abort(408, "Xref analysis timeout")
         
         if result.returncode != 0:
-            error_msg = result.stderr.decode(errors='ignore').strip()
+            error_msg = (result.stderr or "").strip()
             logger.error(f"Xref analysis failed: {error_msg}")
             abort(500, f"Xref analysis failed: {error_msg}")
         
@@ -993,8 +956,20 @@ def get_function_xrefs():
         abort(500, f"Xref analysis error: {str(e)}")
 
 
-if __name__ == '__main__':
-    from waitress import serve
-    # 增加 max_request_body_size 以支持大文件上传 (例如 10GB)
-    serve(app, host="0.0.0.0", port=port, max_request_body_size=10 * 1024 * 1024 * 1024)
+    
+@app.errorhandler(400)
+@app.errorhandler(404)
+@app.errorhandler(408)
+@app.errorhandler(410)
+@app.errorhandler(500)
+def handle_error(error):
+    logger.error(f"Error {error.code}: {error.description}")
+    return {
+        "status": "error",
+        "code": error.code,
+        "message": error.description
+    }, error.code
 
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=port)

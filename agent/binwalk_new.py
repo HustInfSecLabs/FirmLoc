@@ -15,11 +15,12 @@ from typing import Dict, Any, List, Callable
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.tools import Tool
 from langchain_core.prompts import ChatPromptTemplate
+from config import config_manager as global_config
 
 class BinwalkAgent(Agent):
     """
-    使用 LangChain ReAct Agent 对固件文件进行分析和提取
-    具有思考、执行和反思能力，能够在失败后分析原因并尝试解决
+    translated LangChain ReAct Agent translated
+    translated、translated,translated
     """
     
     def __init__(self, chat_model: ChatModel) -> None:
@@ -31,7 +32,7 @@ class BinwalkAgent(Agent):
     
     @staticmethod
     def _sanitize_input(func: Callable) -> Callable:
-        """装饰器: 自动清理工具函数的输入参数"""
+        """translated: translated"""
         @wraps(func)
         def wrapper(input_str: str = "") -> str:
             cleaned_input = (input_str or "").strip()
@@ -45,11 +46,11 @@ class BinwalkAgent(Agent):
         return wrapper
         
     def _create_error_response(self, status: str, message: str) -> Dict[str, str]:
-        """统一的错误响应格式"""
+        """translated"""
         return {'status': status, 'message': message}
     
     def _create_tools(self, task_id: str, firmware_path: str, work_dir: Path, firmware_dir: Path, local_firmware_path: Path) -> List[Tool]:
-        """创建 Agent 可用的工具集"""
+        """translated Agent translated"""
         local_firmware_name = local_firmware_path.name
 
         def _resolve_file_path(path_str: str) -> Path:
@@ -65,11 +66,11 @@ class BinwalkAgent(Agent):
         @self._sanitize_input
         def execute_binwalk_command(command: str) -> str:
             """
-            执行 binwalk 命令
+            translated binwalk translated
             Args:
-                command: 要执行的 binwalk 命令参数（不包含 'binwalk' 本身）
+                command: translated binwalk translated(translated 'binwalk' translated)
             Returns:
-                命令执行结果
+                translated
             """
             try:
                 args = shlex.split(command) if command else []
@@ -99,23 +100,23 @@ class BinwalkAgent(Agent):
                     timeout=300
                 )
                 
-                output = f"返回码: {result.returncode}\n标准输出:\n{result.stdout}\n"
+                output = f"translated: {result.returncode}\ntranslated:\n{result.stdout}\n"
                 if result.stderr:
-                    output += f"标准错误:\n{result.stderr}\n"
+                    output += f"translated:\n{result.stderr}\n"
                 return output
             except subprocess.TimeoutExpired:
-                return "错误: 命令执行超时（5分钟）"
+                return "translated: translated(5translated)"
             except Exception as e:
-                return f"错误: 命令执行异常 - {str(e)}"
+                return f"translated: translated - {str(e)}"
         
         @self._sanitize_input
         def check_file_type(file_path: str) -> str:
             """
-            检查文件类型
+            translated
             Args:
-                file_path: 文件路径
+                file_path: translated
             Returns:
-                文件类型信息
+                translated
             """
             try:
                 target = _resolve_file_path(file_path)
@@ -127,19 +128,19 @@ class BinwalkAgent(Agent):
                 )
                 return result.stdout.strip()
             except Exception as e:
-                return f"错误: 无法检查文件类型 - {str(e)}"
+                return f"translated: translated - {str(e)}"
         
         @self._sanitize_input
         def list_directory(directory: str = ".") -> str:
             """
-            列出目录内容
+            translated
             Args:
-                directory: 目录路径（相对于工作目录）
+                directory: translated(translated)
             Returns:
-                目录内容列表
+                translated
             """
             def get_dir_size(path: Path) -> int:
-                """递归计算目录大小"""
+                """translated"""
                 try:
                     return sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
                 except:
@@ -149,25 +150,25 @@ class BinwalkAgent(Agent):
                 dir_arg = directory.strip().strip('"') if directory else ''
                 full_path = firmware_dir / dir_arg if dir_arg and dir_arg != "." else firmware_dir
                 if not full_path.exists():
-                    return f"错误: 目录不存在 - {full_path}"
+                    return f"translated: translated - {full_path}"
                 
                 items = []
                 for item in full_path.iterdir():
-                    item_type = "目录" if item.is_dir() else "文件"
+                    item_type = "translated" if item.is_dir() else "translated"
                     size = item.stat().st_size if item.is_file() else get_dir_size(item)
-                    items.append(f"{item_type}: {item.name} ({size} 字节)")
+                    items.append(f"{item_type}: {item.name} ({size} translated)")
                 
-                return "\n".join(items) if items else "目录为空"
+                return "\n".join(items) if items else "translated"
             except Exception as e:
-                return f"错误: 无法列出目录 - {str(e)}"
+                return f"translated: translated - {str(e)}"
         
         def check_extracted_files(dummy_input: str = "") -> str:
             """
-            检查是否成功提取了文件
+            translated
             Args:
-                dummy_input: 占位参数，LangChain 会传递但不使用
+                dummy_input: translated,LangChain translated
             Returns:
-                提取结果信息
+                translated
             """
             try:
                 firmware_name = os.path.basename(firmware_path)
@@ -179,46 +180,41 @@ class BinwalkAgent(Agent):
                 extracted_dirs = sorted(set(extracted_dirs), key=os.path.getmtime)
                 
                 if not extracted_dirs:
-                    return "未找到提取的目录"
+                    return "translated"
                 
-                result = f"找到 {len(extracted_dirs)} 个提取目录:\n"
+                result = f"translated {len(extracted_dirs)} translated:\n"
                 for idx, dir_path in enumerate(extracted_dirs, 1):
                     file_count = sum(1 for _ in Path(dir_path).rglob('*') if _.is_file())
-                    # 转换为绝对路径
                     abs_path = os.path.abspath(dir_path)
-                    # 计算相对于程序运行目录的路径
                     rel_path = os.path.relpath(dir_path, start=os.getcwd())
-                    result += f"{idx}. 绝对路径: {abs_path}\n"
-                    result += f"   相对路径: {rel_path} (包含 {file_count} 个文件)\n"
+                    result += f"{idx}. translated: {abs_path}\n"
+                    result += f"   translated: {rel_path} (translated {file_count} translated)\n"
                 
                 return result
             except Exception as e:
-                return f"错误: 无法检查提取文件 - {str(e)}"
+                return f"translated: translated - {str(e)}"
         
         @self._sanitize_input
         def analyze_binwalk_output(output: str) -> str:
             """
-            分析 binwalk 输出，提供建议
+            translated binwalk translated,translated
             Args:
-                output: binwalk 的输出内容
+                output: binwalk translated
             Returns:
-                分析结果和建议
+                translated
             """
             suggestions = []
             output_upper = output.upper()
             output_lower = output.lower()
             
-            # 检查错误和警告
             if "WARNING" in output_upper or "ERROR" in output_upper:
-                suggestions.append("检测到警告或错误信息")
+                suggestions.append("translated")
             
-            # 检查文件结构识别
             if "DECIMAL" in output and "HEXADECIMAL" in output:
-                suggestions.append("成功识别文件结构")
+                suggestions.append("translated")
             else:
-                suggestions.append("可能未识别到文件结构，建议尝试其他参数")
+                suggestions.append("translated,translated")
             
-            # 检测文件系统类型
             fs_types = {
                 "squashfs": "Squashfs",
                 "jffs2": "JFFS2",
@@ -228,75 +224,75 @@ class BinwalkAgent(Agent):
             }
             for key, name in fs_types.items():
                 if key in output_lower:
-                    suggestions.append(f"检测到 {name} 文件系统")
+                    suggestions.append(f"translated {name} translated")
                     break
             
-            return "分析结果:\n" + "\n".join(f"- {s}" for s in suggestions) if suggestions else "分析结果:\n- 输出看起来正常"
+            return "translated:\n" + "\n".join(f"- {s}" for s in suggestions) if suggestions else "translated:\n- translated"
         
         return [
             Tool(
                 name="execute_binwalk",
                 func=execute_binwalk_command,
-                description="执行 binwalk 命令。输入应该是 binwalk 的参数（不包含 'binwalk' 本身），例如 '-Me /path/to/file' 或 '--signature /path/to/file'"
+                description="translated binwalk translated.translated binwalk translated(translated 'binwalk' translated),translated '-Me /path/to/file' translated '--signature /path/to/file'"
             ),
             Tool(
                 name="check_file_type",
                 func=check_file_type,
-                description="检查文件类型。输入应该是文件的完整路径"
+                description="translated.translated"
             ),
             Tool(
                 name="list_directory",
                 func=list_directory,
-                description="列出目录内容。输入应该是相对于工作目录的路径，或使用 '.' 表示工作目录"
+                description="translated.translated,translated '.' translated"
             ),
             Tool(
                 name="check_extracted_files",
                 func=check_extracted_files,
-                description="检查 binwalk 是否成功提取了文件。输入可以是任意值或留空，工具不使用输入参数"
+                description="translated binwalk translated.translated,translated"
             ),
             Tool(
                 name="analyze_output",
                 func=analyze_binwalk_output,
-                description="分析 binwalk 输出并提供建议。输入应该是 binwalk 命令的输出内容"
+                description="translated binwalk translated.translated binwalk translated"
             )
         ]
     
     def _create_react_prompt(self) -> ChatPromptTemplate:
-        """创建 ReAct Agent 的提示模板"""
-        template = """你是一个固件解包专家，负责使用 binwalk 工具提取固件文件。
+        """translated ReAct Agent translated"""
+        template = """translated,translated binwalk translated.
 
-当前任务:
-- 固件文件路径: {firmware_path}
-- 工作目录: {work_dir}
+translated:
+- translated: {firmware_path}
+- translated: {work_dir}
 
-你的目标是成功提取固件文件。如果遇到失败，你需要:
-1. 分析失败原因
-2. 思考可能的解决方案
-3. 尝试不同的方法
+translated.translated,translated:
+1. translated
+2. translated
+3. translated
 
-可用工具:
+translated:
 {tools}
 
-工具名称: {tool_names}
+translated: {tool_names}
 
-使用以下格式:
+translated:
 
-Question: 需要完成的任务
-Thought: 你应该思考该做什么
-Action: 要采取的行动，应该是 [{tool_names}] 之一
-Action Input: 行动的输入
-Observation: 行动的结果
-... (这个 Thought/Action/Action Input/Observation 可以重复 N 次)
-Thought: 我现在知道最终答案了
-Final Answer: 对原始输入问题的最终答案
+Question: translated
+Thought: translated
+Action: translated,translated [{tool_names}] translated
+Action Input: translated
+Observation: translated
+... (translated Thought/Action/Action Input/Observation translated N translated)
+Thought: translated
+Final Answer: translated
 
-常见问题和解决方案:
-1. 如果提取失败，尝试使用不同的参数（-e, -Me, --run-as=root）
-2. 如果未识别文件系统，先使用 check_file_type 检查文件类型
-3. 如果提取目录为空，检查是否需要特殊权限或工具
-4. 每次执行后都要检查提取结果
+translated:
+1. translated,translated(-e, -Me, --run-as=root)
+2. translated,translated check_file_type translated
+3. translated,translated
+4. translated
 
-开始!
+translated!
 
 Question: {input}
 Thought: {agent_scratchpad}"""
@@ -304,21 +300,24 @@ Thought: {agent_scratchpad}"""
         return ChatPromptTemplate.from_template(template)
 
     def _initialize_llm(self):
-        """初始化 LangChain LLM"""
+        """Initialize LangChain LLM."""
         from langchain_openai import ChatOpenAI
-        from config import config_manager as global_config
 
-        routed_llm_config = global_config.get_llm_config_for("binary_filter")
-        model_name = getattr(self.chat_model, 'model_name', None) or routed_llm_config["model_name"]
+        model_name = getattr(self.chat_model, 'model_name', None)
+        llm_key = global_config.resolve_llm_key()
+        llm_section = f"LLM.{llm_key}"
 
-        # 获取 API 配置
+        if not model_name:
+            model_name = global_config.config.get(llm_section, {}).get("model_name", "")
+
         if hasattr(self.chat_model, 'client'):
             api_key = getattr(self.chat_model.client, 'api_key', None)
             base_url_obj = getattr(self.chat_model.client, 'base_url', None)
             base_url = str(base_url_obj) if base_url_obj else None
         else:
-            api_key = routed_llm_config["api_key"]
-            base_url = routed_llm_config["base_url"]
+            llm_config = global_config.config.get(llm_section, {})
+            api_key = llm_config.get("api_key", "")
+            base_url = llm_config.get("base_url", "")
 
         return ChatOpenAI(
             model=model_name,
@@ -329,17 +328,16 @@ Thought: {agent_scratchpad}"""
     
     async def process(self, task_id: str, firmware_path: str, config: ConfigManager, send_message=None, on_status_update=None) -> Dict[str, Any]:
         """
-        使用 ReAct Agent 处理固件提取任务
+        translated ReAct Agent translated
         
         Returns:
-            Dict[str, Any]: 始终返回字典格式的结果
+            Dict[str, Any]: translated
         """
-        # 参数验证
         if not task_id or not firmware_path:
-            return self._create_error_response('error', '缺少必要参数: task_id 或 firmware_path')
+            return self._create_error_response('error', 'translated: task_id translated firmware_path')
             
         if not os.path.exists(firmware_path):
-            return self._create_error_response('error', f'固件文件不存在: {firmware_path}')
+            return self._create_error_response('error', f'translated: {firmware_path}')
         
         firmware_name = os.path.basename(firmware_path)
         work_dir = Path(f'./history/{task_id}/binwalk')
@@ -352,20 +350,17 @@ Thought: {agent_scratchpad}"""
             if not local_firmware_path.exists() or os.path.getsize(local_firmware_path) != os.path.getsize(firmware_path):
                 shutil.copy2(firmware_path, local_firmware_path)
         except Exception as copy_err:
-            return self._create_error_response('error', f'复制固件文件失败: {copy_err}')
+            return self._create_error_response('error', f'translated: {copy_err}')
         
-        # 更新状态
         config.update_tool_status("Online Search", "Binwalk")
         self.tool_status = "running"
         if on_status_update:
             on_status_update(None, self.tool, self.tool_status)
         
         try:
-            # 创建工具集和 LLM
             tools = self._create_tools(task_id, firmware_path, work_dir, firmware_dir, local_firmware_path)
             llm = self._initialize_llm()
             
-            # 创建 ReAct Agent
             agent = create_react_agent(llm, tools, self._create_react_prompt())
             agent_executor = AgentExecutor(
                 agent=agent,
@@ -376,26 +371,23 @@ Thought: {agent_scratchpad}"""
                 return_intermediate_steps=True
             )
             
-            # 准备输入
-            question = f"请使用 binwalk 提取固件文件 {local_firmware_path}。首先检查文件类型，然后选择合适的参数进行提取，最后验证提取是否成功。"
+            question = f"translated binwalk translated {local_firmware_path}.translated,translated,translated."
             
-            # 发送思考消息
             if send_message:
                 await send_message(
-                    "Agent 开始分析固件文件并规划提取策略...",
+                    "Agent translated...",
                     "command",
                     self.tool_type,
                     [{
                         "user": "Binwalk Agent",
                         "input": question,
-                        "output": "正在思考..."
+                        "output": "translated..."
                     }],
                     agent=self.agent,
                     tool=self.tool,
                     tool_status="running"
                 )
             
-            # 执行 Agent（在异步上下文中运行同步函数）
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
@@ -406,24 +398,21 @@ Thought: {agent_scratchpad}"""
                 })
             )
             
-            # 记录 Agent 的思考过程
             agent_log = []
             if 'intermediate_steps' in result:
                 for step in result['intermediate_steps']:
                     action, observation = step
                     agent_log.append({
-                        "thought": action.log if hasattr(action, 'log') else "执行工具",
+                        "thought": action.log if hasattr(action, 'log') else "translated",
                         "action": action.tool,
                         "action_input": action.tool_input,
                         "observation": observation
                     })
             
-            # 保存 Agent 日志
             log_file = firmware_dir / 'agent_log.json'
             with open(log_file, 'w', encoding='utf-8') as f:
                 json.dump(agent_log, f, ensure_ascii=False, indent=2)
             
-            # 检查提取结果
             search_roots = [firmware_dir, Path(firmware_path).parent]
             extracted_dirs = []
             for root in search_roots:
@@ -432,7 +421,7 @@ Thought: {agent_scratchpad}"""
             extracted_dirs = sorted(set(extracted_dirs), key=os.path.getmtime)
             
             if not extracted_dirs:
-                raise RuntimeError("Agent 执行完成但未找到提取的目录")
+                raise RuntimeError("Agent translated")
             
             actual_extracted_path = Path(extracted_dirs[-1])
             if not str(actual_extracted_path).startswith(str(firmware_dir)):
@@ -442,23 +431,21 @@ Thought: {agent_scratchpad}"""
                 shutil.move(str(actual_extracted_path), str(dest_path))
                 actual_extracted_path = dest_path
             
-            # 更新状态
             config.update_tool_status("Binwalk")
             self.tool_status = "completed"
             if on_status_update:
                 on_status_update(tool_status=self.tool_status)
             
-            # 发送完成消息
             if send_message:
                 tool_content = [{
                     "user": "Binwalk Agent",
                     "input": question,
-                    "output": result.get('output', '提取完成'),
+                    "output": result.get('output', 'translated'),
                     "agent_log": agent_log
                 }]
                 
                 await send_message(
-                    f"固件提取完成",
+                    f"translated",
                     "command",
                     self.tool_type,
                     tool_content,
@@ -468,7 +455,6 @@ Thought: {agent_scratchpad}"""
                 )
                 await asyncio.sleep(1)
             
-            # 保存结果
             result_data = {
                 'status': 'success',
                 'binwalk_result_path': str(log_file),
@@ -482,9 +468,8 @@ Thought: {agent_scratchpad}"""
             return result_data
             
         except Exception as e:
-            error_msg = f'Agent 执行过程中发生错误: {str(e)}'
+            error_msg = f'Agent translated: {str(e)}'
             
-            # 更新状态
             config.update_tool_status("Binwalk")
             self.tool_status = "error"
             if on_status_update:
@@ -498,7 +483,7 @@ Thought: {agent_scratchpad}"""
                     error_msg,
                     "command",
                     self.tool_type,
-                    [{"user": "Binwalk Agent", "input": "固件提取", "output": error_msg}],
+                    [{"user": "Binwalk Agent", "input": "translated", "output": error_msg}],
                     agent=self.agent,
                     tool=self.tool,
                     tool_status=self.tool_status
@@ -507,7 +492,7 @@ Thought: {agent_scratchpad}"""
             return self._create_error_response('error', error_msg)
     
     def _update_status_ini(self, work_dir, firmware_name, result):
-        """更新状态"""
+        """translated"""
         status_file = work_dir / 'status.ini'
         
         config = configparser.ConfigParser()
@@ -532,23 +517,21 @@ Thought: {agent_scratchpad}"""
         if not os.path.exists(status_file):
             return {
                 'status': 'unknown',
-                'message': f'未找到任务 {task_id} 的处理结果'
+                'message': f'translated {task_id} translated'
             }
         
         config = configparser.ConfigParser()
         config.read(status_file)
         
         if firmware_name is not None:
-            # 返回特定固件的结果
             if firmware_name in config.sections():
                 return {key: value for key, value in config[firmware_name].items()}
             else:
                 return {
                     'status': 'unknown',
-                    'message': f'未找到固件 {firmware_name} 的处理结果'
+                    'message': f'translated {firmware_name} translated'
                 }
         else:
-            # 返回所有固件的结果
             results = {}
             for section in config.sections():
                 results[section] = {key: value for key, value in config[section].items()}

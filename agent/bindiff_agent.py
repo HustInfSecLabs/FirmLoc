@@ -13,7 +13,7 @@ from state import TaskStatusEnum
 
 
 class BindiffAgent:
-    def __init__(self, chat_id: str, task_name: str = "bindiff_compare"):
+    def __init__(self, chat_id: str, task_name: str = "bindiff_compare", run_root: str = None):
         self.chat_id = chat_id
         self.task_name = task_name
         self.agent = "Bindiff Agent"
@@ -22,10 +22,14 @@ class BindiffAgent:
         self.tool_status = "stop"
         self.status = TaskStatusEnum.NOT_STARTED
 
-        self.output_dir = os.path.join("history", self.chat_id, "bindiff")
-        os.makedirs(self.output_dir, exist_ok=True)
+        if run_root:
+            self.output_dir = os.path.join(run_root, "bindiff")
+            os.makedirs(self.output_dir, exist_ok=True)
+            self.state_file = os.path.join(self.output_dir, f"{self.task_name}_state.json")
+        else:
+            self.output_dir = None
+            self.state_file = None
 
-        self.state_file = os.path.join(self.output_dir, f"{self.task_name}_state.json")
         self.state = {
             "chat_id": self.chat_id,
             "tool": self.tool_name,
@@ -93,6 +97,8 @@ class BindiffAgent:
         return self.state
 
     def _save_state(self):
+        if not self.state_file:
+            return
         with open(self.state_file, "w", encoding="utf-8") as f:
             json.dump(self.state, f, indent=4, ensure_ascii=False)
         logger.info(f"[BindiffAgent] 状态已保存: {self.state_file}")

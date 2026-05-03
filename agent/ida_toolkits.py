@@ -95,6 +95,7 @@ class IdaToolkit(BaseToolkit):
         def _request_and_extract() -> List[str]:
             data = {
                 'binary_name': file_name,
+                'binary_path': input_file_path,
                 'ida_version': ida_version.lower()
             }
             response = requests.post(bin_export_url, data=data, stream=True)
@@ -146,6 +147,7 @@ class IdaToolkit(BaseToolkit):
         def _request_and_write() -> str:
             data = {
                 'binary_name': file_name,
+                'binary_path': input_file_path,
                 'ida_version': ida_version.lower()
             }
             response = requests.post(pseudo_c_url, data=data, stream=True)
