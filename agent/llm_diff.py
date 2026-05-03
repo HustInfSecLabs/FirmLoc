@@ -3265,9 +3265,6 @@ class Refiner:
                 self._binary_locks[binary_name] = asyncio.Lock()
             return self._binary_locks[binary_name]
 
-        #api_key = "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"
-        #if not api_key:
-        #self.client = OpenAI(api_key=api_key) 
 
     def make_prompt(self, fa_content, fb_content, cve_details=None, cwe=None, work_mode: str = "reproduction"):
         """translated
